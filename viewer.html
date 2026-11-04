@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>UltraViewer Web Controller (Rust)</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#171b24;color:#eee;font:14px system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:10px 16px;background:#1f2430;box-shadow:0 2px 8px rgba(0,0,0,0.3);z-index:2}
+.brand{font-weight:700;color:#58a6ff;font-size:16px;margin-right:8px}
+.form-group{display:flex;align-items:center;gap:6px}
+input,textarea{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:4px;font-size:13px;outline:none}
+input:focus,textarea:focus{border-color:#58a6ff}
+button{background:#238636;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:600;font-size:13px}
+button:hover{background:#2ea043}
+button.secondary{background:#21262d;border:1px solid #30363d;color:#c9d1d9}
+button.secondary:hover{background:#30363d}
+button#disconnect,button.danger{background:#da3633}
+button#disconnect:hover,button.danger:hover{background:#f85149}
+#status{margin-left:auto;padding:4px 10px;border-radius:4px;background:#21262d;font-size:12px;color:#8b949e}
+.workspace{flex:1;display:grid;grid-template-columns:1fr 340px;overflow:hidden}
+main{overflow:auto;display:flex;justify-content:center;align-items:center;padding:12px;background:#0d1117}
+canvas{display:block;max-width:100%;max-height:100%;outline:none;background:#000;border:2px solid #30363d;border-radius:4px;box-shadow:0 4px 16px rgba(0,0,0,0.5)}
+canvas:focus{border-color:#58a6ff}
+aside{background:#161b22;border-left:1px solid #30363d;display:flex;flex-direction:column;gap:10px;padding:12px;overflow-y:auto}
+.card{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px}
+.card h3{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:#58a6ff;display:flex;justify-content:space-between;align-items:center}
+.row{display:flex;gap:6px;align-items:center}
+.muted{font-size:11px;color:#8b949e}
+.transfer-list{display:flex;flex-direction:column;gap:6px;max-height:150px;overflow-y:auto}
+.transfer-item{background:#161b22;border:1px solid #30363d;border-radius:4px;padding:6px;font-size:12px;display:flex;flex-direction:column;gap:4px}
+.progress{height:5px;background:#21262d;border-radius:3px;overflow:hidden}
+.progress > div{height:100%;background:#3fb950}
+footer{padding:6px 16px;background:#161b22;border-top:1px solid #30363d;color:#8b949e;font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">UltraViewer Linux (Rust)</span>
+  <div class="form-group">
+    <label for="partnerId">Partner ID:</label>
+    <input id="partnerId" type="text" placeholder="VD: 90135737" style="width:115px">
+  </div>
+  <div class="form-group">
+    <label for="partnerPass">Password:</label>
+    <input id="partnerPass" type="password" placeholder="Mật khẩu" style="width:95px">
+  </div>
+  <button id="connect">Kết nối</button>
+  <button id="disconnect">Ngắt</button>
+  <span id="status">Chưa kết nối</span>
+</header>
+<div class="workspace">
+  <main>
+    <canvas tabindex="0" id="screen" width="1024" height="768"></canvas>
+  </main>
+  <aside>
+    <div class="card">
+      <h3>
+        <span>Âm thanh (G.722 48kHz)</span>
+        <span id="audioStats" class="muted">0 chunks</span>
+      </h3>
+      <div class="row">
+        <button id="btnAudioToggle" style="flex:1">Bật âm thanh (|||31|||)</button>
+        <button id="btnAudioMute" class="secondary">Tắt (|||32|||)</button>
+      </div>
+      <div class="muted" id="audioStatus">Sẵn sàng phát âm thanh máy đối tác</div>
+    </div>
+
+    <div class="card">
+      <h3>
+        <span>Đồng bộ Clipboard (Kind 33)</span>
+        <span id="clipStats" class="muted">0↑ / 0↓</span>
+      </h3>
+      <textarea id="clipInput" rows="2" placeholder="Nhập nội dung gửi sang clipboard máy đối tác..."></textarea>
+      <div class="row">
+        <button id="btnSendClip" style="flex:1">Gửi sang đối tác</button>
+        <button id="btnSyncSysClip" class="secondary">Lấy từ Linux</button>
+      </div>
+      <div class="muted">Clipboard từ đối tác:</div>
+      <textarea id="clipRemote" rows="2" readonly placeholder="(Chưa nhận clipboard từ đối tác)"></textarea>
+    </div>
+
+    <div class="card">
+      <h3>
+        <span>Truyền File (Kinds 13-16, 21)</span>
+      </h3>
+      <input type="file" id="filePicker">
+      <div class="row">
+        <button id="btnSendFile" style="flex:1">Gửi File đã chọn</button>
+      </div>
+      <div class="row">
+        <input type="text" id="filePathInput" placeholder="Hoặc đường dẫn file trên máy..." style="flex:1">
+        <button id="btnSendPath" class="secondary">Gửi</button>
+      </div>
+      <div id="transferList" class="transfer-list"></div>
+    </div>
+
+    <div class="card">
+      <h3><span>Chat nhanh (Kind 12)</span></h3>
+      <div id="chatBox" class="transfer-list" style="max-height:90px"></div>
+      <div class="row">
+        <input type="text" id="chatInput" placeholder="Nhập tin nhắn..." style="flex:1">
+        <button id="btnSendChat" class="secondary">Gửi</button>
+      </div>
+    </div>
+  </aside>
+</div>
+<footer>Click vào màn hình để điều khiển chuột và bàn phím. Hỗ trợ đầy đủ Âm thanh G.722, Clipboard Sync và File Transfer.</footer>
+<script>
+const token='__TOKEN__';
+const screen=document.querySelector('#screen'),ctx=screen.getContext('2d'),held=new Set(),buttons=new Set();
+let busy=false,lastMove=0,audioPlaying=true,lastAudioSeq=0,audioCtx=null;
+
+async function post(path,value={}){
+  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Viewer-Token':token},body:JSON.stringify(value)});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok||data.ok===false){throw Error(data.error||'Thất bại');}
+  return data;
+}
+let inputChain=Promise.resolve();
+function input(v){inputChain=inputChain.then(()=>post('/event',v)).catch(()=>{});}
+function release(){
+  for(const vk of held)input({type:'key',vk,down:false});
+  held.clear();
+  for(const button of buttons)input({type:'button',button,down:false});
+  buttons.clear();
+}
+document.querySelector('#connect').onclick=()=>{
+  const id=document.querySelector('#partnerId').value.trim();
+  const pass=document.querySelector('#partnerPass').value.trim();
+  if(!id||!pass){alert('Vui lòng nhập đầy đủ Partner ID và Password');return;}
+  document.querySelector('#status').textContent='Đang khởi tạo kết nối...';
+  post('/connect',{id,pass}).catch(e=>alert(e.message));
+};
+document.querySelector('#disconnect').onclick=()=>{
+  release();
+  inputChain.then(()=>post('/disconnect')).catch(()=>{});
+};
+function point(e){
+  const r=screen.getBoundingClientRect();
+  return{x:Math.floor((e.clientX-r.left)*screen.width/r.width),y:Math.floor((e.clientY-r.top)*screen.height/r.height)};
+}
+screen.onpointermove=e=>{if(performance.now()-lastMove<35)return;lastMove=performance.now();input({type:'move',...point(e)});};
+screen.onpointerdown=e=>{e.preventDefault();screen.focus();screen.setPointerCapture(e.pointerId);const button=['left','middle','right'][e.button];if(button){input({type:'move',...point(e)});input({type:'button',button,down:true});buttons.add(button);}};
+screen.onpointerup=e=>{const button=['left','middle','right'][e.button];if(button){input({type:'button',button,down:false});buttons.delete(button);}};
+screen.oncontextmenu=e=>e.preventDefault();
+screen.addEventListener('wheel',e=>{e.preventDefault();input({type:'wheel',delta:e.deltaY>0?-120:120});},{passive:false});
+const special={Enter:13,Escape:27,Backspace:8,Tab:9,Space:32,ShiftLeft:160,ShiftRight:161,ControlLeft:162,ControlRight:163,AltLeft:164,AltRight:165,MetaLeft:91,MetaRight:92,ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Home:36,End:35,PageUp:33,PageDown:34,Delete:46,Insert:45,CapsLock:20,Semicolon:186,Equal:187,Comma:188,Minus:189,Period:190,Slash:191,Backquote:192,BracketLeft:219,Backslash:220,BracketRight:221,Quote:222};
+function keycode(code){if(special[code]!==undefined)return special[code];if(/^Key[A-Z]$/.test(code))return code.charCodeAt(3);if(/^Digit[0-9]$/.test(code))return code.charCodeAt(5);if(/^F([1-9]|1[0-2])$/.test(code))return 111+Number(code.slice(1));return null;}
+screen.onkeydown=e=>{const vk=keycode(e.code);if(vk===null)return;e.preventDefault();held.add(vk);input({type:'key',vk,down:true});};
+screen.onkeyup=e=>{const vk=keycode(e.code);if(vk===null)return;e.preventDefault();held.delete(vk);input({type:'key',vk,down:false});};
+screen.onblur=release;window.onblur=release;
+
+document.querySelector('#btnAudioToggle').onclick=async()=>{
+  audioPlaying=true;
+  if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==='suspended')await audioCtx.resume();
+  await post('/audio/toggle',{enable:true}).catch(()=>{});
+};
+document.querySelector('#btnAudioMute').onclick=async()=>{
+  audioPlaying=false;
+  await post('/audio/toggle',{enable:false}).catch(()=>{});
+};
+document.querySelector('#btnSendClip').onclick=async()=>{
+  const text=document.querySelector('#clipInput').value;
+  await post('/clipboard',{text,sync_from_system:false}).catch(e=>alert(e.message));
+};
+document.querySelector('#btnSyncSysClip').onclick=async()=>{
+  const r=await post('/clipboard',{text:'',sync_from_system:true}).catch(()=>null);
+  if(r&&r.text!==undefined)document.querySelector('#clipInput').value=r.text;
+};
+document.querySelector('#btnSendFile').onclick=async()=>{
+  const f=document.querySelector('#filePicker').files[0];
+  if(!f){alert('Chọn 1 file trước khi gửi');return;}
+  const buf=await f.arrayBuffer();
+  const bytes=new Uint8Array(buf);
+  let bin='';
+  for(let i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);
+  await post('/files/send',{file_name:f.name,data_base64:btoa(bin)}).catch(e=>alert(e.message));
+};
+document.querySelector('#btnSendPath').onclick=async()=>{
+  const p=document.querySelector('#filePathInput').value.trim();
+  if(!p)return;
+  await post('/files/send',{file_path:p}).catch(e=>alert(e.message));
+};
+document.querySelector('#btnSendChat').onclick=async()=>{
+  const el=document.querySelector('#chatInput');
+  const text=el.value.trim();
+  if(!text)return;
+  el.value='';
+  await post('/chat',{text}).catch(()=>{});
+};
+window.acceptTransfer=id=>post('/files/accept',{file_id:id}).catch(()=>{});
+window.cancelTransfer=id=>post('/files/cancel',{file_id:id}).catch(()=>{});
+
+async function pollAudio(chunks){
+  if(!audioPlaying||!chunks)return;
+  try{
+    const r=await fetch('/audio.wav?after='+lastAudioSeq);
+    if(!r.ok)return;
+    const seq=Number(r.headers.get('X-Audio-Seq')||'0');
+    if(seq<=lastAudioSeq)return;
+    lastAudioSeq=seq;
+    const buf=await r.arrayBuffer();
+    if(buf.byteLength<=44)return;
+    if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==='suspended')return;
+    const audioBuf=await audioCtx.decodeAudioData(buf);
+    const src=audioCtx.createBufferSource();
+    src.buffer=audioBuf;
+    src.connect(audioCtx.destination);
+    src.start();
+  }catch(_){}
+}
+
+function renderSidebar(s){
+  document.querySelector('#audioStats').textContent=`${s.audio_chunks_received||0} chunks`;
+  document.querySelector('#audioStatus').textContent=s.audio_enabled?'Đang bật nhận âm thanh từ máy đối tác':'Đã tắt nhận âm thanh (|||32|||)';
+  document.querySelector('#clipStats').textContent=`${s.clipboard_updates_sent||0}↑ / ${s.clipboard_updates_received||0}↓`;
+  const rem=document.querySelector('#clipRemote');
+  if(rem&&s.clipboard_remote!==undefined&&rem.value!==s.clipboard_remote){rem.value=s.clipboard_remote;}
+
+  const list=document.querySelector('#transferList');
+  const transfers=s.file_transfers||[];
+  list.innerHTML=transfers.length===0?'<div class="muted">Chưa có phiên truyền file nào.</div>':transfers.map(t=>{
+    const pct=t.file_size>0?Math.min(100,Math.round(t.transferred_bytes*100/t.file_size)):100;
+    return `<div class="transfer-item">
+      <div style="display:flex;justify-content:space-between"><strong>${t.file_name}</strong><span class="muted">${t.status}</span></div>
+      <div class="progress"><div style="width:${pct}%"></div></div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span class="muted">${t.transferred_bytes}/${t.file_size} B (${pct}%)</span>
+        <span>
+          ${t.direction==='receive'&&t.status==='offered'?`<button onclick="acceptTransfer('${t.file_id}')">Nhận</button>`:''}
+          ${t.status==='completed'?`<a href="/files/download?file_id=${encodeURIComponent(t.file_id)}" style="color:#58a6ff;margin-left:6px">Tải về</a>`:''}
+          ${t.status==='offered'||t.status==='transferring'?`<button class="danger" onclick="cancelTransfer('${t.file_id}')">Hủy</button>`:''}
+        </span>
+      </div>
+    </div>`;
+  }).join('');
+
+  const chatBox=document.querySelector('#chatBox');
+  const msgs=s.chat_messages||[];
+  chatBox.innerHTML=msgs.map(m=>`<div class="muted">${m}</div>`).join('');
+}
+
+async function refresh(){
+  if(busy)return;busy=true;
+  try{
+    const s=await(await fetch('/status',{signal:AbortSignal.timeout(3000)})).json();
+    const stEl=document.querySelector('#status');
+    if(s.state==='connected')stEl.style.color='#3fb950';
+    else if(s.state==='connecting')stEl.style.color='#d29922';
+    else stEl.style.color='#8b949e';
+    stEl.textContent=(s.state==='connected'?'Đã kết nối':(s.state==='connecting'?'Đang kết nối...':'Chưa kết nối'))+(s.error?' ('+s.error+')':'');
+    renderSidebar(s);
+    await pollAudio(s.audio_chunks_received||0);
+    if(s.frames){
+      const blob=await(await fetch('/frame.png',{signal:AbortSignal.timeout(3000)})).blob();
+      const bmp=await createImageBitmap(blob);
+      if(screen.width!==bmp.width||screen.height!==bmp.height){screen.width=bmp.width;screen.height=bmp.height;}
+      ctx.drawImage(bmp,0,0);
+      bmp.close();
+    }
+  }catch{document.querySelector('#status').textContent='Mất kết nối server';}
+  finally{busy=false;}
+}
+setInterval(refresh,150);refresh();
+</script>
+</body>
+</html>
