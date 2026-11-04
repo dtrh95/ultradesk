@@ -14,9 +14,9 @@ def main(port=8765):
         port = int(sys.argv[1])
     url = f"http://127.0.0.1:{port}"
 
-    GLib.set_prgname("ultraviewer-linux")
+    GLib.set_prgname("ultraviewer-linux-rust")
     Gtk.init()
-    win = Gtk.Window(title="UltraViewer Linux")
+    win = Gtk.Window(title="UltraViewer Linux (Rust)")
     win.set_default_size(1100, 800)
     win.set_position(Gtk.WindowPosition.CENTER)
     win.connect("destroy", Gtk.main_quit)
