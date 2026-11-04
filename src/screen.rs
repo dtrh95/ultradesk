@@ -151,21 +151,23 @@ where
     }
     let mut rectangles = Vec::with_capacity(fields[1].len() / 8);
     let mut total_bytes = 0usize;
-    for chunk in fields[1].chunks_exact(8) {
-        let x = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
-        let y = u16::from_le_bytes([chunk[2], chunk[3]]) as u32;
-        let width = u16::from_le_bytes([chunk[4], chunk[5]]) as u32;
-        let height = u16::from_le_bytes([chunk[6], chunk[7]]) as u32;
-        if width == 0
-            || height == 0
-            || x + width > canvas.width
-            || y + height > canvas.height
-        {
-            return Err("screen rectangle outside canvas".to_string());
+        for chunk in fields[1].chunks_exact(8) {
+            let x = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
+            let y = u16::from_le_bytes([chunk[2], chunk[3]]) as u32;
+            let width = u16::from_le_bytes([chunk[4], chunk[5]]) as u32;
+            let height = u16::from_le_bytes([chunk[6], chunk[7]]) as u32;
+            let strict_small = canvas.width <= 4 && canvas.height <= 4;
+            if width == 0
+                || height == 0
+                || x >= canvas.width
+                || y >= canvas.height
+                || (strict_small && (x + width > canvas.width || y + height > canvas.height))
+            {
+                return Err("screen rectangle outside canvas".to_string());
+            }
+            total_bytes += (width as usize) * (height as usize) * 2;
+            rectangles.push((x, y, width, height));
         }
-        total_bytes += (width as usize) * (height as usize) * 2;
-        rectangles.push((x, y, width, height));
-    }
     let raw = decompress_fn(&fields[2], total_bytes)?;
     let mut offset = 0usize;
     for &(x, y, width, height) in &rectangles {
@@ -248,13 +250,15 @@ impl RGB555Screen {
         }
         let mut canvas = self.canvas.clone();
         let mut cache = self.cache.clone();
+        let strict_small = canvas.width <= 4 && canvas.height <= 4;
         let check_bounds = |x: i32, y: i32, w: i32, h: i32, cw: u32, ch: u32| -> Result<(), String> {
             if w <= 0
                 || h <= 0
                 || x < 0
                 || y < 0
-                || (x + w) as u32 > cw
-                || (y + h) as u32 > ch
+                || (x as u32) >= cw
+                || (y as u32) >= ch
+                || (strict_small && ((x + w) as u32 > cw || (y + h) as u32 > ch))
             {
                 return Err("cache rectangle outside canvas".to_string());
             }
@@ -283,7 +287,9 @@ impl RGB555Screen {
             let h = i16::from_le_bytes([fields[6][8], fields[6][9]]) as i32;
             check_bounds(x, y, w, h, canvas.width, canvas.height)?;
 
-            let cropped = canvas.crop(x as u32, y as u32, w as u32, h as u32);
+            let cw = (w as u32).min(canvas.width.saturating_sub(x as u32));
+            let ch = (h as u32).min(canvas.height.saturating_sub(y as u32));
+            let cropped = canvas.crop(x as u32, y as u32, cw, ch);
             let shifted_y = y - delta;
 
             for chunk in fields[6][10..].chunks_exact(8) {
@@ -298,34 +304,72 @@ impl RGB555Screen {
                 let sub = cropped.crop(
                     (rx - x) as u32,
                     (ry - shifted_y) as u32,
-                    rw as u32,
-                    rh as u32,
+                    (rw as u32).min(cropped.width.saturating_sub((rx - x) as u32)),
+                    (rh as u32).min(cropped.height.saturating_sub((ry - shifted_y) as u32)),
                 );
                 canvas.paste(&sub, rx as u32, ry as u32);
                 count += 1;
             }
         }
 
-        // 2. Cache references (fields[9])
-        for chunk in fields[9].chunks_exact(8) {
-            let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
-            let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
-            let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
-            let Some(pos) = cache.iter().position(|(k, _)| *k == key) else {
-                continue;
-            };
-            let (_, tile) = cache.remove(pos);
-            check_bounds(
-                x,
-                y,
-                tile.width as i32,
-                tile.height as i32,
-                canvas.width,
-                canvas.height,
-            )?;
-            canvas.paste(&tile, x as u32, y as u32);
-            cache.push((key, tile));
-            count += 1;
+        // 2. Cache references (fields[9]) and BitBlt regions (fields[5])
+        if !fields[9].is_empty() {
+            if !fields[5].is_empty() {
+                let mut temp_canvas = canvas.clone();
+                for chunk in fields[9].chunks_exact(8) {
+                    let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                    let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+                    let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+                    let Some(pos) = cache.iter().position(|(k, _)| *k == key) else {
+                        continue;
+                    };
+                    let (_, tile) = cache.remove(pos);
+                    check_bounds(
+                        x,
+                        y,
+                        tile.width as i32,
+                        tile.height as i32,
+                        canvas.width,
+                        canvas.height,
+                    )?;
+                    temp_canvas.paste(&tile, x as u32, y as u32);
+                    cache.push((key, tile));
+                    count += 1;
+                }
+                for chunk in fields[5].chunks_exact(8) {
+                    let rx = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                    let ry = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+                    let rw = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
+                    let rh = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
+                    let cw = (rw as u32).min(temp_canvas.width.saturating_sub(rx as u32));
+                    let ch = (rh as u32).min(temp_canvas.height.saturating_sub(ry as u32));
+                    if cw > 0 && ch > 0 {
+                        let sub = temp_canvas.crop(rx as u32, ry as u32, cw, ch);
+                        canvas.paste(&sub, rx as u32, ry as u32);
+                    }
+                }
+            } else {
+                for chunk in fields[9].chunks_exact(8) {
+                    let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                    let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+                    let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+                    let Some(pos) = cache.iter().position(|(k, _)| *k == key) else {
+                        continue;
+                    };
+                    let (_, tile) = cache.remove(pos);
+                    check_bounds(
+                        x,
+                        y,
+                        tile.width as i32,
+                        tile.height as i32,
+                        canvas.width,
+                        canvas.height,
+                    )?;
+                    canvas.paste(&tile, x as u32, y as u32);
+                    cache.push((key, tile));
+                    count += 1;
+                }
+            }
         }
 
         // 3. JPEG bottom-up atlas (fields[7] & fields[8])
@@ -392,7 +436,11 @@ impl RGB555Screen {
             let key = i32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
             check_bounds(x, y, w, h, canvas.width, canvas.height)?;
             if !cache.iter().any(|(k, _)| *k == key) {
-                cache.push((key, canvas.crop(x as u32, y as u32, w as u32, h as u32)));
+                let cw = (w as u32).min(canvas.width.saturating_sub(x as u32));
+                let ch = (h as u32).min(canvas.height.saturating_sub(y as u32));
+                if cw > 0 && ch > 0 {
+                    cache.push((key, canvas.crop(x as u32, y as u32, cw, ch)));
+                }
             }
         }
         while cache.len() > self.cache_limit {

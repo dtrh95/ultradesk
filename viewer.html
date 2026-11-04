@@ -45,6 +45,10 @@ footer{padding:6px 16px;background:#161b22;border-top:1px solid #30363d;color:#8
     <label for="partnerPass">Password:</label>
     <input id="partnerPass" type="password" placeholder="Mật khẩu" style="width:95px">
   </div>
+  <label class="form-group" style="cursor:pointer;user-select:none;font-size:12px;color:#c9d1d9">
+    <input id="rememberCreds" type="checkbox" checked style="margin:0;cursor:pointer">
+    <span>Ghi nhớ</span>
+  </label>
   <button id="connect">Kết nối</button>
   <button id="disconnect">Ngắt</button>
   <span id="status">Chưa kết nối</span>
@@ -109,7 +113,18 @@ footer{padding:6px 16px;background:#161b22;border-top:1px solid #30363d;color:#8
 <script>
 const token='__TOKEN__';
 const screen=document.querySelector('#screen'),ctx=screen.getContext('2d'),held=new Set(),buttons=new Set();
-let busy=false,lastMove=0,audioPlaying=true,lastAudioSeq=0,audioCtx=null;
+let busy=false,lastMove=0,audioPlaying=true,lastAudioSeq=0,audioCtx=null,credsInitialized=false;
+
+try{
+  const saved=JSON.parse(localStorage.getItem('uv_saved_creds')||'null');
+  if(saved){
+    if(saved.remember!==undefined)document.querySelector('#rememberCreds').checked=!!saved.remember;
+    if(saved.remember!==false){
+      if(saved.id)document.querySelector('#partnerId').value=saved.id;
+      if(saved.pass)document.querySelector('#partnerPass').value=saved.pass;
+    }
+  }
+}catch(_){}
 
 async function post(path,value={}){
   const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Viewer-Token':token},body:JSON.stringify(value)});
@@ -125,12 +140,27 @@ function release(){
   for(const button of buttons)input({type:'button',button,down:false});
   buttons.clear();
 }
+function persistCredsLocal(id,pass,remember){
+  try{
+    if(remember)localStorage.setItem('uv_saved_creds',JSON.stringify({id,pass,remember:true}));
+    else localStorage.setItem('uv_saved_creds',JSON.stringify({id:'',pass:'',remember:false}));
+  }catch(_){}
+}
+document.querySelector('#rememberCreds').onchange=e=>{
+  const remember=e.target.checked;
+  const id=document.querySelector('#partnerId').value.trim();
+  const pass=document.querySelector('#partnerPass').value.trim();
+  persistCredsLocal(id,pass,remember);
+  post('/credentials',{id,pass,remember}).catch(()=>{});
+};
 document.querySelector('#connect').onclick=()=>{
   const id=document.querySelector('#partnerId').value.trim();
   const pass=document.querySelector('#partnerPass').value.trim();
+  const remember=document.querySelector('#rememberCreds').checked;
   if(!id||!pass){alert('Vui lòng nhập đầy đủ Partner ID và Password');return;}
+  persistCredsLocal(id,pass,remember);
   document.querySelector('#status').textContent='Đang khởi tạo kết nối...';
-  post('/connect',{id,pass}).catch(e=>alert(e.message));
+  post('/connect',{id,pass,remember}).catch(e=>alert(e.message));
 };
 document.querySelector('#disconnect').onclick=()=>{
   release();
@@ -247,6 +277,16 @@ async function refresh(){
   if(busy)return;busy=true;
   try{
     const s=await(await fetch('/status',{signal:AbortSignal.timeout(3000)})).json();
+    if(!credsInitialized){
+      credsInitialized=true;
+      const idEl=document.querySelector('#partnerId');
+      const passEl=document.querySelector('#partnerPass');
+      const remEl=document.querySelector('#rememberCreds');
+      if(s.remember_credentials!==undefined)remEl.checked=!!s.remember_credentials;
+      if(!idEl.value&&(s.saved_partner_id||s.partner_id))idEl.value=s.saved_partner_id||s.partner_id;
+      if(!passEl.value&&s.saved_password)passEl.value=s.saved_password;
+      if(idEl.value||passEl.value)persistCredsLocal(idEl.value,passEl.value,remEl.checked);
+    }
     const stEl=document.querySelector('#status');
     if(s.state==='connected')stEl.style.color='#3fb950';
     else if(s.state==='connecting')stEl.style.color='#d29922';

@@ -75,6 +75,8 @@ struct ConnectRequest {
     partner_id: String,
     #[serde(default)]
     password: String,
+    #[serde(default = "default_true")]
+    remember: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -367,7 +369,7 @@ fn handle_http_client(
             } else {
                 &req.password
             };
-            match session.start_connect(pid, pwd) {
+            match session.start_connect_with_remember(pid, pwd, req.remember) {
                 Ok(state) => write_json_response(
                     &mut stream,
                     200,
@@ -377,6 +379,38 @@ fn handle_http_client(
                     write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
                 }
             }
+        }
+        ("GET", "/credentials") => {
+            let snap = session.snapshot();
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({
+                    "ok": true,
+                    "partner_id": snap.saved_partner_id,
+                    "password": snap.saved_password,
+                    "remember": snap.remember_credentials
+                }),
+            )
+        }
+        ("POST", "/credentials") => {
+            let req: ConnectRequest = serde_json::from_slice(&body).unwrap_or_default();
+            let pid = if !req.id.trim().is_empty() {
+                &req.id
+            } else {
+                &req.partner_id
+            };
+            let pwd = if !req.pass.trim().is_empty() {
+                &req.pass
+            } else {
+                &req.password
+            };
+            let _ = session.update_saved_credentials(pid, pwd, req.remember);
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({ "ok": true, "state": session.snapshot() }),
+            )
         }
         ("POST", "/disconnect") => {
             session.disconnect();

@@ -1,15 +1,17 @@
 use crate::audio::{encode_sound_toggle_command, AudioBuffer};
 use crate::clipboard::{
-    decode_clipboard_packet, encode_clipboard_packet, get_linux_system_clipboard,
+    decode_clipboard_packet, encode_clipboard_for_remote, get_linux_system_clipboard,
     set_linux_system_clipboard, ClipboardState,
 };
-use crate::file_transfer::{encode_chat_message, FileTransferEntry, FileTransferManager};
+use crate::file_transfer::{
+    encode_chat_message, is_utf16_string_packet, FileTransferEntry, FileTransferManager,
+};
 use crate::input::{keyboard, mouse_button, mouse_move, InputEvent};
 use crate::protocol::{
     build_connection_request_command, build_login_with_password, build_registration_command,
     connection_request_password_value, decode_byte_array_fields, decode_target_route,
     decode_transport_body, encode_relay_frame, encode_transport_frame, encrypt_registration_bytes,
-    extract_command3_identity, http_service_preface, md5_hex_lower, version_equal_or_greater,
+    extract_command3_identity, http_service_preface, md5_hex_lower,
     Command3Identity, TargetRoute, REGISTRATION_PASSWORD,
 };
 use crate::screen::{desktop_size_from_login, RGB555Screen, ZstdDictionaryDecoder};
@@ -19,7 +21,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
@@ -480,6 +482,61 @@ fn find_crlf_crlf(buf: &[u8]) -> Option<usize> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedCredentials {
+    #[serde(default)]
+    pub partner_id: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default = "default_remember_true")]
+    pub remember: bool,
+}
+
+fn default_remember_true() -> bool {
+    true
+}
+
+impl Default for SavedCredentials {
+    fn default() -> Self {
+        Self {
+            partner_id: String::new(),
+            password: String::new(),
+            remember: true,
+        }
+    }
+}
+
+pub fn credentials_file_path() -> PathBuf {
+    std::env::var("HOME")
+        .map(|h| {
+            PathBuf::from(h)
+                .join(".config")
+                .join("ultraviewer-linux")
+                .join("credentials.json")
+        })
+        .unwrap_or_else(|_| std::env::temp_dir().join("ultraviewer-credentials.json"))
+}
+
+pub fn load_saved_credentials() -> SavedCredentials {
+    let path = credentials_file_path();
+    if let Ok(bytes) = fs::read(&path) {
+        if let Ok(creds) = serde_json::from_slice::<SavedCredentials>(&bytes) {
+            return creds;
+        }
+    }
+    SavedCredentials::default()
+}
+
+pub fn save_credentials(creds: &SavedCredentials) -> Result<(), String> {
+    let path = credentials_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_vec_pretty(creds)
+        .map_err(|e| format!("Failed to serialize credentials: {}", e))?;
+    fs::write(&path, json).map_err(|e| format!("Failed to write credentials: {}", e))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
     pub state: String,
     pub status: String,
@@ -488,6 +545,12 @@ pub struct SessionState {
     pub height: u32,
     pub local_id: String,
     pub partner_id: String,
+    #[serde(default)]
+    pub saved_partner_id: String,
+    #[serde(default)]
+    pub saved_password: String,
+    #[serde(default = "default_remember_true")]
+    pub remember_credentials: bool,
     pub route_mode: String,
     pub remote_endpoint: String,
     pub screen_width: u32,
@@ -511,6 +574,7 @@ pub struct SessionState {
 
 impl Default for SessionState {
     fn default() -> Self {
+        let saved = load_saved_credentials();
         Self {
             state: "disconnected".to_string(),
             status: "disconnected".to_string(),
@@ -518,7 +582,10 @@ impl Default for SessionState {
             width: 1024,
             height: 768,
             local_id: String::new(),
-            partner_id: String::new(),
+            partner_id: saved.partner_id.clone(),
+            saved_partner_id: saved.partner_id,
+            saved_password: saved.password,
+            remember_credentials: saved.remember,
             route_mode: String::new(),
             remote_endpoint: String::new(),
             screen_width: 1024,
@@ -555,7 +622,7 @@ pub struct ControlSessionInner {
     pub clipboard: ClipboardState,
     pub files: FileTransferManager,
     pub login_acknowledged: bool,
-    pub outbound_queue: Vec<(Vec<u8>, Option<InputEvent>)>,
+    pub outbound_queue: Vec<(Vec<u8>, bool, Option<InputEvent>)>,
 }
 
 #[derive(Clone)]
@@ -658,9 +725,12 @@ impl ControlSession {
     fn dispatch_payload(
         inner: &mut ControlSessionInner,
         payload: &[u8],
+        unicode_bytes: bool,
         event: Option<InputEvent>,
     ) -> Result<(), String> {
-        inner.outbound_queue.push((payload.to_vec(), event));
+        inner
+            .outbound_queue
+            .push((payload.to_vec(), unicode_bytes, event));
         Ok(())
     }
 
@@ -697,7 +767,7 @@ impl ControlSession {
                             if block_size > 0 { block_size } else { 32 },
                         );
                         guard.login_acknowledged = true;
-                        let _ = Self::dispatch_payload(&mut guard, b"17", None);
+                        let _ = Self::dispatch_payload(&mut guard, b"17", false, None);
                         guard.state.state = "connected".to_string();
                         guard.state.last_message = format!("Remote desktop size {}x{}", w, h);
                         Self::sync_state_fields(&mut guard);
@@ -732,7 +802,7 @@ impl ControlSession {
                             if let Ok(png) = guard.screen.to_png() {
                                 guard.latest_png = png;
                             }
-                            let _ = Self::dispatch_payload(&mut guard, b"18", None);
+                            let _ = Self::dispatch_payload(&mut guard, b"18", false, None);
                             guard.state.last_message = format!(
                                 "Frame #{} ({} rects)",
                                 guard.frames_applied, applied
@@ -741,7 +811,7 @@ impl ControlSession {
                             return;
                         }
                         Err(err) => {
-                            let _ = Self::dispatch_payload(&mut guard, b"18", None);
+                            let _ = Self::dispatch_payload(&mut guard, b"18", false, None);
                             guard.state.last_message = format!("Frame decode warning: {}", err);
                             Self::sync_state_fields(&mut guard);
                             return;
@@ -757,7 +827,7 @@ impl ControlSession {
                         fields[1][3],
                     ]);
                     let reply = format!("|||4{}", val).into_bytes();
-                    let _ = Self::dispatch_payload(&mut guard, &reply, None);
+                    let _ = Self::dispatch_payload(&mut guard, &reply, false, None);
                     return;
                 }
             }
@@ -788,7 +858,8 @@ impl ControlSession {
         if let Ok(Some((ft_pkt, replies))) = guard.files.handle_packet(payload) {
             guard.state.last_message = format!("File/chat event: {:?}", ft_pkt);
             for reply in replies {
-                let _ = Self::dispatch_payload(&mut guard, &reply, None);
+                let is_utf16 = is_utf16_string_packet(&reply);
+                let _ = Self::dispatch_payload(&mut guard, &reply, is_utf16, None);
             }
             Self::sync_state_fields(&mut guard);
             return;
@@ -800,7 +871,7 @@ impl ControlSession {
     pub fn send_input(&self, event: InputEvent) -> Result<Vec<u8>, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let payload = event.to_wire()?;
-        Self::dispatch_payload(&mut guard, &payload, Some(event))?;
+        Self::dispatch_payload(&mut guard, &payload, false, Some(event))?;
         Ok(payload)
     }
 
@@ -808,7 +879,7 @@ impl ControlSession {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.audio.enabled = enable;
         let payload = encode_sound_toggle_command(enable);
-        Self::dispatch_payload(&mut guard, &payload, None)?;
+        Self::dispatch_payload(&mut guard, &payload, false, None)?;
         guard.state.last_message = if enable {
             "Requested remote computer sound ON (|||31|||)".to_string()
         } else {
@@ -825,8 +896,8 @@ impl ControlSession {
         if sync_system {
             let _ = set_linux_system_clipboard(text);
         }
-        let payload = encode_clipboard_packet(0, text)?;
-        Self::dispatch_payload(&mut guard, &payload, None)?;
+        let (payload, unicode_bytes) = encode_clipboard_for_remote(text)?;
+        Self::dispatch_payload(&mut guard, &payload, unicode_bytes, None)?;
         guard.state.last_message = format!("Sent clipboard to remote ({} chars)", text.len());
         Self::sync_state_fields(&mut guard);
         Ok(payload)
@@ -841,7 +912,8 @@ impl ControlSession {
     pub fn offer_file_bytes(&self, file_name: &str, data: Vec<u8>) -> Result<String, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let (file_id, pkt) = guard.files.offer_file_bytes(file_name, data)?;
-        Self::dispatch_payload(&mut guard, &pkt, None)?;
+        let is_utf16 = is_utf16_string_packet(&pkt);
+        Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
         guard.state.last_message = format!("Offered file {} ({})", file_name, file_id);
         Self::sync_state_fields(&mut guard);
         Ok(file_id)
@@ -850,7 +922,8 @@ impl ControlSession {
     pub fn offer_file_from_path(&self, path: &Path) -> Result<String, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let (file_id, pkt) = guard.files.offer_file_from_path(path)?;
-        Self::dispatch_payload(&mut guard, &pkt, None)?;
+        let is_utf16 = is_utf16_string_packet(&pkt);
+        Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
         guard.state.last_message = format!("Offered file {} ({})", path.display(), file_id);
         Self::sync_state_fields(&mut guard);
         Ok(file_id)
@@ -859,7 +932,8 @@ impl ControlSession {
     pub fn accept_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let pkt = guard.files.accept_incoming_offer(file_id)?;
-        Self::dispatch_payload(&mut guard, &pkt, None)?;
+        let is_utf16 = is_utf16_string_packet(&pkt);
+        Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
         guard.state.last_message = format!("Accepted incoming file {}", file_id);
         Self::sync_state_fields(&mut guard);
         Ok(pkt)
@@ -868,7 +942,8 @@ impl ControlSession {
     pub fn cancel_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let pkt = guard.files.cancel_transfer(file_id)?;
-        Self::dispatch_payload(&mut guard, &pkt, None)?;
+        let is_utf16 = is_utf16_string_packet(&pkt);
+        Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
         guard.state.last_message = format!("Cancelled file transfer {}", file_id);
         Self::sync_state_fields(&mut guard);
         Ok(pkt)
@@ -878,17 +953,63 @@ impl ControlSession {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let modern = guard.files.modern_protocol;
         let pkt = encode_chat_message(text, modern)?;
+        let is_utf16 = is_utf16_string_packet(&pkt);
         guard.files.chat_messages.push(format!("Me: {}", text));
-        Self::dispatch_payload(&mut guard, &pkt, None)?;
+        Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
         guard.state.last_message = format!("Sent chat message ({} chars)", text.len());
         Self::sync_state_fields(&mut guard);
         Ok(pkt)
     }
 
+    pub fn update_saved_credentials(
+        &self,
+        partner_id: &str,
+        password: &str,
+        remember: bool,
+    ) -> Result<(), String> {
+        let cleaned_id: String = partner_id.chars().filter(|c| !c.is_whitespace()).collect();
+        let cleaned_pass = password.trim().to_string();
+        let creds = if remember {
+            SavedCredentials {
+                partner_id: cleaned_id.clone(),
+                password: cleaned_pass.clone(),
+                remember: true,
+            }
+        } else {
+            SavedCredentials {
+                partner_id: String::new(),
+                password: String::new(),
+                remember: false,
+            }
+        };
+        let _ = save_credentials(&creds);
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.state.saved_partner_id = creds.partner_id;
+        guard.state.saved_password = creds.password;
+        guard.state.remember_credentials = creds.remember;
+        Self::sync_state_fields(&mut guard);
+        Ok(())
+    }
+
     pub fn start_connect(&self, partner_id: &str, password: &str) -> Result<SessionState, String> {
+        let remember = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.state.remember_credentials
+        };
+        self.start_connect_with_remember(partner_id, password, remember)
+    }
+
+    pub fn start_connect_with_remember(
+        &self,
+        partner_id: &str,
+        password: &str,
+        remember: bool,
+    ) -> Result<SessionState, String> {
         self.stop_flag.store(true, Ordering::SeqCst);
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.stop_flag.store(false, Ordering::SeqCst);
+
+        let _ = self.update_saved_credentials(partner_id, password, remember);
 
         let (reg_profile, partner_profile) = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -949,12 +1070,12 @@ impl ControlSession {
         held_keys: &mut BTreeSet<i32>,
         held_buttons: &mut BTreeSet<String>,
     ) {
-        let queued: Vec<(Vec<u8>, Option<InputEvent>)> = {
+        let queued: Vec<(Vec<u8>, bool, Option<InputEvent>)> = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.outbound_queue.drain(..).collect()
         };
-        for (payload, evt_opt) in queued {
-            let _ = relay.send_relay(&payload, &route.public_ip, route.tcp_port, false);
+        for (payload, unicode_bytes, evt_opt) in queued {
+            let _ = relay.send_relay(&payload, &route.public_ip, route.tcp_port, unicode_bytes);
             if let Some(evt) = evt_opt {
                 match evt.event_type.as_str() {
                     "key" => {
@@ -1141,13 +1262,7 @@ impl ControlSession {
 
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let partner_ver = partner
-                .request_terms
-                .get(3)
-                .map(|s| s.as_str())
-                .unwrap_or("6.6.133");
-            guard.files.modern_protocol =
-                version_equal_or_greater(partner_ver, "6.4.25").unwrap_or(true);
+            guard.files.modern_protocol = false;
             let decoder = ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
             guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
             guard.state.local_id = identity.client_id.to_string();
@@ -1161,7 +1276,7 @@ impl ControlSession {
     pub fn move_pointer(&self, x: i32, y: i32) -> Result<Vec<u8>, String> {
         let payload = mouse_move(x, y)?;
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        Self::dispatch_payload(&mut guard, &payload, None)?;
+        Self::dispatch_payload(&mut guard, &payload, false, None)?;
         Ok(payload)
     }
 }
