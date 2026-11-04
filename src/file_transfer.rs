@@ -280,8 +280,10 @@ pub fn decode_file_transfer_packet(payload: &[u8]) -> Option<FileTransferPacket>
                 _ => {}
             }
         }
-        // Check 2-field chunk packet: ["|||15<file_id>|||<offset>|||" or "|||15|||<file_id>|||<offset>|||", chunk_bytes]
-        if fields.len() >= 2 && fields[0].starts_with(b"|||15") {
+        // Check 2-field chunk packet: ["|||15<file_id>|||<offset>|||" or "15|||<file_id>|||<offset>|||", chunk_bytes]
+        if fields.len() >= 2
+            && (fields[0].starts_with(b"|||15") || fields[0].starts_with(b"15|||"))
+        {
             let header = String::from_utf8_lossy(&fields[0]);
             let parts = parse_command_fields(&header);
             if parts.len() >= 2 {
@@ -392,7 +394,7 @@ impl FileTransferManager {
             download_dir,
             auto_accept: true,
             chunk_size: DEFAULT_FILE_CHUNK_SIZE,
-            modern_protocol: false,
+            modern_protocol: true,
             next_id: 1,
         }
     }
@@ -482,8 +484,7 @@ impl FileTransferManager {
             }
             let end = (offset + chunk_sz).min(entry.buffer.len());
             let slice = &entry.buffer[offset..end];
-            // Send 2-field format ("|||15|||<id>|||<offset>|||", data) as produced by 0x701a25
-            let pkt = encode_file_chunk(file_id, offset as u64, slice, false)?;
+            let pkt = encode_file_chunk(file_id, offset as u64, slice, self.modern_protocol)?;
             packets.push(pkt);
             entry.transferred_bytes = end as u64;
             if entry.transferred_bytes >= entry.file_size {
@@ -572,7 +573,7 @@ impl FileTransferManager {
                     replies.push(encode_file_ack(
                         file_id,
                         entry.transferred_bytes,
-                        self.modern_protocol,
+                        false,
                     )?);
 
                     if entry.transferred_bytes >= entry.file_size {

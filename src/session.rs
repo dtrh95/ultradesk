@@ -10,8 +10,8 @@ use crate::input::{keyboard, mouse_button, mouse_move, InputEvent};
 use crate::protocol::{
     build_connection_request_command, build_login_with_password, build_registration_command,
     connection_request_password_value, decode_byte_array_fields, decode_target_route,
-    decode_transport_body, encode_relay_frame, encode_transport_frame, encrypt_registration_bytes,
-    extract_command3_identity, http_service_preface, md5_hex_lower,
+    decode_transport_body, encode_byte_array_fields, encode_relay_frame, encode_transport_frame,
+    encrypt_registration_bytes, extract_command3_identity, http_service_preface, md5_hex_lower,
     Command3Identity, TargetRoute, REGISTRATION_PASSWORD,
 };
 use crate::screen::{desktop_size_from_login, RGB555Screen, ZstdDictionaryDecoder};
@@ -746,7 +746,7 @@ impl ControlSession {
 
                 if kind == 0 {
                     if let Ok((w, h)) = desktop_size_from_login(&fields) {
-                        let block_size = if fields.len() >= 15 && fields[14].len() == 2 {
+                        let parsed_bs = if fields.len() >= 15 && fields[14].len() == 2 {
                             i16::from_le_bytes([fields[14][0], fields[14][1]]) as i32
                         } else if fields.len() >= 15 && fields[14].len() == 4 {
                             i32::from_le_bytes([
@@ -756,17 +756,23 @@ impl ControlSession {
                                 fields[14][3],
                             ])
                         } else {
-                            32
+                            16
+                        };
+                        let effective_bs = if (16..=256).contains(&parsed_bs) {
+                            parsed_bs
+                        } else {
+                            16
                         };
                         let decoder =
                             ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
-                        guard.screen = RGB555Screen::new(
-                            (w, h),
-                            decoder,
-                            1000,
-                            if block_size > 0 { block_size } else { 32 },
-                        );
+                        guard.screen = RGB555Screen::new((w, h), decoder, 1000, effective_bs);
                         guard.login_acknowledged = true;
+                        if let Ok(pkt48) = encode_byte_array_fields(&[
+                            &[48u8][..],
+                            &effective_bs.to_le_bytes()[..],
+                        ]) {
+                            let _ = Self::dispatch_payload(&mut guard, &pkt48, false, None);
+                        }
                         let _ = Self::dispatch_payload(&mut guard, b"17", false, None);
                         guard.state.state = "connected".to_string();
                         guard.state.last_message = format!("Remote desktop size {}x{}", w, h);
@@ -1262,9 +1268,9 @@ impl ControlSession {
 
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.files.modern_protocol = false;
+            guard.files.modern_protocol = true;
             let decoder = ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
-            guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
+            guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 16);
             guard.state.local_id = identity.client_id.to_string();
             guard.state.route_mode = "relay".to_string();
             guard.state.remote_endpoint = format!("{}:{}", route.public_ip, route.tcp_port);

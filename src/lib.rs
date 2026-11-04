@@ -427,6 +427,28 @@ mod tests {
             .unwrap(),
             1
         );
+
+        let mut screen16 = RGB555Screen::new((64, 64), ZstdDictionaryDecoder::default(), 100, 32);
+        let mut jpeg_16col = Vec::new();
+        let atlas_16x64 = vec![200u8; 16 * 64 * 3];
+        JpegEncoder::new_with_quality(&mut jpeg_16col, 100)
+            .write_image(&atlas_16x64, 16, 64, ExtendedColorType::Rgb8)
+            .unwrap();
+        let jpeg_16_fields: Vec<Vec<u8>> = vec![
+            vec![1u8],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            jpeg_16col,
+            rect_xywh(10, 10, 32, 32),
+            Vec::new(),
+            Vec::new(),
+        ];
+        assert_eq!(screen16.apply(&jpeg_16_fields).unwrap(), 4);
+        assert_eq!(screen16.block_size, 16);
     }
 
     #[test]
@@ -441,6 +463,8 @@ mod tests {
         assert_eq!(mouse_wheel(120).unwrap(), b"8|||522|||7864320");
         assert_eq!(keyboard(65, true, false).unwrap(), b"8|||256|||65");
         assert_eq!(keyboard(65, false, true).unwrap(), b"8|||261|||65");
+        assert_eq!(keyboard(91, true, false).unwrap(), b"8|||256|||91");
+        assert_eq!(keyboard(91, false, false).unwrap(), b"8|||257|||91");
 
         let mut sent = Vec::new();
         with_held_key(
@@ -617,14 +641,18 @@ mod tests {
 
         let tmp_dir = std::env::temp_dir().join(format!("uv_ft_test_{}", std::process::id()));
         let mut sender = FileTransferManager::new(tmp_dir.clone());
+        assert!(sender.modern_protocol);
         sender.chunk_size = 1024;
         let mut receiver = FileTransferManager::new(tmp_dir.clone());
+        assert!(receiver.modern_protocol);
         receiver.auto_accept = true;
 
         let payload_bytes: Vec<u8> = (0..2500).map(|i| (i % 251) as u8).collect();
         let (file_id, offer_pkt) = sender
             .offer_file_bytes("archive.bin", payload_bytes.clone())
             .unwrap();
+        let offer_fields = decode_byte_array_fields_checked(&offer_pkt, Some(4)).unwrap();
+        assert_eq!(offer_fields[0], vec![13u8]);
 
         let (_, mut rx_replies) = receiver.handle_packet(&offer_pkt).unwrap().unwrap();
         assert_eq!(rx_replies.len(), 1);
@@ -632,6 +660,9 @@ mod tests {
 
         let (_, tx_chunks) = sender.handle_packet(&accept_pkt).unwrap().unwrap();
         assert_eq!(tx_chunks.len(), 2);
+        let chunk0_fields = decode_byte_array_fields_checked(&tx_chunks[0], Some(4)).unwrap();
+        assert_eq!(chunk0_fields[0], vec![15u8]);
+        assert_eq!(chunk0_fields[2].len(), 8);
 
         let (_, ack1) = receiver.handle_packet(&tx_chunks[0]).unwrap().unwrap();
         assert_eq!(ack1.len(), 1);

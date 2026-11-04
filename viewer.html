@@ -51,6 +51,7 @@ footer{padding:6px 16px;background:#161b22;border-top:1px solid #30363d;color:#8
   </label>
   <button id="connect">Kết nối</button>
   <button id="disconnect">Ngắt</button>
+  <button id="btnWinKey" class="secondary" title="Mở Start Menu trên máy đối tác (VK_LWIN)">⊞ Win</button>
   <span id="status">Chưa kết nối</span>
 </header>
 <div class="workspace">
@@ -166,6 +167,11 @@ document.querySelector('#disconnect').onclick=()=>{
   release();
   inputChain.then(()=>post('/disconnect')).catch(()=>{});
 };
+document.querySelector('#btnWinKey').onclick=()=>{
+  screen.focus();
+  input({type:'key',vk:91,down:true});
+  setTimeout(()=>input({type:'key',vk:91,down:false}),60);
+};
 function point(e){
   const r=screen.getBoundingClientRect();
   return{x:Math.floor((e.clientX-r.left)*screen.width/r.width),y:Math.floor((e.clientY-r.top)*screen.height/r.height)};
@@ -175,10 +181,10 @@ screen.onpointerdown=e=>{e.preventDefault();screen.focus();screen.setPointerCapt
 screen.onpointerup=e=>{const button=['left','middle','right'][e.button];if(button){input({type:'button',button,down:false});buttons.delete(button);}};
 screen.oncontextmenu=e=>e.preventDefault();
 screen.addEventListener('wheel',e=>{e.preventDefault();input({type:'wheel',delta:e.deltaY>0?-120:120});},{passive:false});
-const special={Enter:13,Escape:27,Backspace:8,Tab:9,Space:32,ShiftLeft:160,ShiftRight:161,ControlLeft:162,ControlRight:163,AltLeft:164,AltRight:165,MetaLeft:91,MetaRight:92,ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Home:36,End:35,PageUp:33,PageDown:34,Delete:46,Insert:45,CapsLock:20,Semicolon:186,Equal:187,Comma:188,Minus:189,Period:190,Slash:191,Backquote:192,BracketLeft:219,Backslash:220,BracketRight:221,Quote:222};
-function keycode(code){if(special[code]!==undefined)return special[code];if(/^Key[A-Z]$/.test(code))return code.charCodeAt(3);if(/^Digit[0-9]$/.test(code))return code.charCodeAt(5);if(/^F([1-9]|1[0-2])$/.test(code))return 111+Number(code.slice(1));return null;}
-screen.onkeydown=e=>{const vk=keycode(e.code);if(vk===null)return;e.preventDefault();held.add(vk);input({type:'key',vk,down:true});};
-screen.onkeyup=e=>{const vk=keycode(e.code);if(vk===null)return;e.preventDefault();held.delete(vk);input({type:'key',vk,down:false});};
+const special={Enter:13,Escape:27,Backspace:8,Tab:9,Space:32,ShiftLeft:160,ShiftRight:161,ControlLeft:162,ControlRight:163,AltLeft:164,AltRight:165,MetaLeft:91,MetaRight:92,OSLeft:91,OSRight:92,ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Home:36,End:35,PageUp:33,PageDown:34,Delete:46,Insert:45,CapsLock:20,Semicolon:186,Equal:187,Comma:188,Minus:189,Period:190,Slash:191,Backquote:192,BracketLeft:219,Backslash:220,BracketRight:221,Quote:222};
+function keycode(e){const code=e.code||'';if(special[code]!==undefined)return special[code];if(e.key==='Meta'||e.key==='Super'||e.key==='OS')return 91;if(/^Key[A-Z]$/.test(code))return code.charCodeAt(3);if(/^Digit[0-9]$/.test(code))return code.charCodeAt(5);if(/^F([1-9]|1[0-2])$/.test(code))return 111+Number(code.slice(1));return null;}
+screen.onkeydown=e=>{const vk=keycode(e);if(vk===null)return;e.preventDefault();held.add(vk);input({type:'key',vk,down:true});};
+screen.onkeyup=e=>{const vk=keycode(e);if(vk===null)return;e.preventDefault();held.delete(vk);input({type:'key',vk,down:false});};
 screen.onblur=release;window.onblur=release;
 
 document.querySelector('#btnAudioToggle').onclick=async()=>{
@@ -218,7 +224,10 @@ document.querySelector('#btnSendChat').onclick=async()=>{
   const text=el.value.trim();
   if(!text)return;
   el.value='';
-  await post('/chat',{text}).catch(()=>{});
+  await post('/chat',{text}).catch(e=>alert(e.message));
+};
+document.querySelector('#chatInput').onkeydown=e=>{
+  if(e.key==='Enter'){e.preventDefault();document.querySelector('#btnSendChat').click();}
 };
 window.acceptTransfer=id=>post('/files/accept',{file_id:id}).catch(()=>{});
 window.cancelTransfer=id=>post('/files/cancel',{file_id:id}).catch(()=>{});
