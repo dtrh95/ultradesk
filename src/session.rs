@@ -676,9 +676,26 @@ impl ControlSession {
 
                 if kind == 0 {
                     if let Ok((w, h)) = desktop_size_from_login(&fields) {
+                        let block_size = if fields.len() >= 15 && fields[14].len() == 2 {
+                            i16::from_le_bytes([fields[14][0], fields[14][1]]) as i32
+                        } else if fields.len() >= 15 && fields[14].len() == 4 {
+                            i32::from_le_bytes([
+                                fields[14][0],
+                                fields[14][1],
+                                fields[14][2],
+                                fields[14][3],
+                            ])
+                        } else {
+                            32
+                        };
                         let decoder =
                             ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
-                        guard.screen = RGB555Screen::new((w, h), decoder, 1000, 32);
+                        guard.screen = RGB555Screen::new(
+                            (w, h),
+                            decoder,
+                            1000,
+                            if block_size > 0 { block_size } else { 32 },
+                        );
                         guard.login_acknowledged = true;
                         let _ = Self::dispatch_payload(&mut guard, b"17", None);
                         guard.state.state = "connected".to_string();
@@ -688,20 +705,47 @@ impl ControlSession {
                     }
                 }
 
+                if kind == 48 && fields.len() > 1 {
+                    let block_size = if fields[1].len() == 2 {
+                        i16::from_le_bytes([fields[1][0], fields[1][1]]) as i32
+                    } else if fields[1].len() == 4 {
+                        i32::from_le_bytes([
+                            fields[1][0],
+                            fields[1][1],
+                            fields[1][2],
+                            fields[1][3],
+                        ])
+                    } else {
+                        0
+                    };
+                    if block_size > 0 {
+                        guard.screen.block_size = block_size;
+                    }
+                    return;
+                }
+
                 if kind == 1 && fields.len() == 11 {
-                    if let Ok(applied) = guard.screen.apply(&fields) {
-                        guard.frames_applied += 1;
-                        guard.rectangles_applied += applied;
-                        if let Ok(png) = guard.screen.to_png() {
-                            guard.latest_png = png;
+                    match guard.screen.apply(&fields) {
+                        Ok(applied) => {
+                            guard.frames_applied += 1;
+                            guard.rectangles_applied += applied;
+                            if let Ok(png) = guard.screen.to_png() {
+                                guard.latest_png = png;
+                            }
+                            let _ = Self::dispatch_payload(&mut guard, b"18", None);
+                            guard.state.last_message = format!(
+                                "Frame #{} ({} rects)",
+                                guard.frames_applied, applied
+                            );
+                            Self::sync_state_fields(&mut guard);
+                            return;
                         }
-                        let _ = Self::dispatch_payload(&mut guard, b"18", None);
-                        guard.state.last_message = format!(
-                            "Frame #{} ({} rects)",
-                            guard.frames_applied, applied
-                        );
-                        Self::sync_state_fields(&mut guard);
-                        return;
+                        Err(err) => {
+                            let _ = Self::dispatch_payload(&mut guard, b"18", None);
+                            guard.state.last_message = format!("Frame decode warning: {}", err);
+                            Self::sync_state_fields(&mut guard);
+                            return;
+                        }
                     }
                 }
 
