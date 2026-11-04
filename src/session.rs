@@ -554,9 +554,6 @@ pub struct ControlSessionInner {
     pub audio: AudioBuffer,
     pub clipboard: ClipboardState,
     pub files: FileTransferManager,
-    pub registration: Option<RegistrationTransport>,
-    pub relay: Option<SessionTransport>,
-    pub route: Option<TargetRoute>,
     pub login_acknowledged: bool,
     pub outbound_queue: Vec<(Vec<u8>, Option<InputEvent>)>,
 }
@@ -565,6 +562,7 @@ pub struct ControlSessionInner {
 pub struct ControlSession {
     pub inner: Arc<Mutex<ControlSessionInner>>,
     pub stop_flag: Arc<AtomicBool>,
+    pub generation: Arc<AtomicU64>,
 }
 
 impl Default for ControlSession {
@@ -602,24 +600,22 @@ impl ControlSession {
                 audio: AudioBuffer::default(),
                 clipboard: ClipboardState::default(),
                 files: FileTransferManager::default(),
-                registration: None,
-                relay: None,
-                route: None,
                 login_acknowledged: false,
                 outbound_queue: Vec::new(),
             })),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn snapshot(&self) -> SessionState {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         Self::sync_state_fields(&mut guard);
         guard.state.clone()
     }
 
     pub fn png_frame(&self) -> Result<Vec<u8>, String> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !guard.latest_png.is_empty() {
             return Ok(guard.latest_png.clone());
         }
@@ -627,12 +623,12 @@ impl ControlSession {
     }
 
     pub fn audio_wav_since(&self, after_seq: u64) -> (u64, Vec<u8>) {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.audio.wav_since(after_seq)
     }
 
     pub fn downloaded_file_bytes(&self, file_id: &str) -> Option<(String, Vec<u8>)> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.files.transfers.get(file_id)?;
         Some((entry.file_name.clone(), entry.buffer.clone()))
     }
@@ -664,26 +660,21 @@ impl ControlSession {
         payload: &[u8],
         event: Option<InputEvent>,
     ) -> Result<(), String> {
-        if let (Some(ref mut relay), Some(ref route)) = (&mut inner.relay, &inner.route) {
-            relay.send_relay(payload, &route.public_ip, route.tcp_port, false)
-        } else {
-            inner.outbound_queue.push((payload.to_vec(), event));
-            Ok(())
-        }
+        inner.outbound_queue.push((payload.to_vec(), event));
+        Ok(())
     }
 
     pub fn handle_session_payload(&self, payload: &[u8]) {
         if payload.is_empty() {
             return;
         }
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Ok(fields) = decode_byte_array_fields(payload) {
             if !fields.is_empty() && !fields[0].is_empty() {
                 let kind = fields[0][0];
 
-                // Kind 0: Login response with desktop dimensions
-                if kind == 0 && fields[0].len() == 1 {
+                if kind == 0 {
                     if let Ok((w, h)) = desktop_size_from_login(&fields) {
                         let decoder =
                             ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
@@ -697,8 +688,7 @@ impl ControlSession {
                     }
                 }
 
-                // Kind 1: 11-field screen update packet
-                if kind == 1 && fields[0].len() == 1 && fields.len() == 11 {
+                if kind == 1 && fields.len() == 11 {
                     if let Ok(applied) = guard.screen.apply(&fields) {
                         guard.frames_applied += 1;
                         guard.rectangles_applied += applied;
@@ -715,8 +705,7 @@ impl ControlSession {
                     }
                 }
 
-                // Kind 3: Keepalive ping -> reply with |||4<int32>
-                if kind == 3 && fields[0].len() == 1 && fields.len() > 1 && fields[1].len() == 4 {
+                if kind == 3 && fields.len() > 1 && fields[1].len() == 4 {
                     let val = i32::from_le_bytes([
                         fields[1][0],
                         fields[1][1],
@@ -730,7 +719,6 @@ impl ControlSession {
             }
         }
 
-        // Audio packet (kinds 42, 43, 50, 51)
         if let Ok(Some(audio_pkt)) = guard.audio.ingest_packet(payload) {
             guard.state.last_message = format!(
                 "Audio packet kind={} ({} PCM bytes)",
@@ -741,7 +729,6 @@ impl ControlSession {
             return;
         }
 
-        // Clipboard packet (kind 33 / |||33|||)
         if let Some(clip_msg) = decode_clipboard_packet(payload) {
             guard.clipboard.remote_text = clip_msg.text.clone();
             guard.clipboard.updates_received += 1;
@@ -754,7 +741,6 @@ impl ControlSession {
             return;
         }
 
-        // File Transfer & Chat packets (kinds 12, 13, 14, 15, 16, 21)
         if let Ok(Some((ft_pkt, replies))) = guard.files.handle_packet(payload) {
             guard.state.last_message = format!("File/chat event: {:?}", ft_pkt);
             for reply in replies {
@@ -768,14 +754,14 @@ impl ControlSession {
     }
 
     pub fn send_input(&self, event: InputEvent) -> Result<Vec<u8>, String> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let payload = event.to_wire()?;
         Self::dispatch_payload(&mut guard, &payload, Some(event))?;
         Ok(payload)
     }
 
     pub fn toggle_remote_sound(&self, enable: bool) -> Result<Vec<u8>, String> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.audio.enabled = enable;
         let payload = encode_sound_toggle_command(enable);
         Self::dispatch_payload(&mut guard, &payload, None)?;
@@ -789,7 +775,7 @@ impl ControlSession {
     }
 
     pub fn send_clipboard(&self, text: &str, sync_system: bool) -> Result<Vec<u8>, String> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.clipboard.local_text = text.to_string();
         guard.clipboard.updates_sent += 1;
         if sync_system {
@@ -809,7 +795,7 @@ impl ControlSession {
     }
 
     pub fn offer_file_bytes(&self, file_name: &str, data: Vec<u8>) -> Result<String, String> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let (file_id, pkt) = guard.files.offer_file_bytes(file_name, data)?;
         Self::dispatch_payload(&mut guard, &pkt, None)?;
         guard.state.last_message = format!("Offered file {} ({})", file_name, file_id);
@@ -818,7 +804,7 @@ impl ControlSession {
     }
 
     pub fn offer_file_from_path(&self, path: &Path) -> Result<String, String> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let (file_id, pkt) = guard.files.offer_file_from_path(path)?;
         Self::dispatch_payload(&mut guard, &pkt, None)?;
         guard.state.last_message = format!("Offered file {} ({})", path.display(), file_id);
@@ -827,7 +813,7 @@ impl ControlSession {
     }
 
     pub fn accept_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let pkt = guard.files.accept_incoming_offer(file_id)?;
         Self::dispatch_payload(&mut guard, &pkt, None)?;
         guard.state.last_message = format!("Accepted incoming file {}", file_id);
@@ -836,7 +822,7 @@ impl ControlSession {
     }
 
     pub fn cancel_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let pkt = guard.files.cancel_transfer(file_id)?;
         Self::dispatch_payload(&mut guard, &pkt, None)?;
         guard.state.last_message = format!("Cancelled file transfer {}", file_id);
@@ -845,7 +831,7 @@ impl ControlSession {
     }
 
     pub fn send_chat(&self, text: &str) -> Result<Vec<u8>, String> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let modern = guard.files.modern_protocol;
         let pkt = encode_chat_message(text, modern)?;
         guard.files.chat_messages.push(format!("Me: {}", text));
@@ -856,11 +842,12 @@ impl ControlSession {
     }
 
     pub fn start_connect(&self, partner_id: &str, password: &str) -> Result<SessionState, String> {
-        self.disconnect();
+        self.stop_flag.store(true, Ordering::SeqCst);
+        let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.stop_flag.store(false, Ordering::SeqCst);
 
-        let (reg_profile, mut partner_profile) = {
-            let mut guard = self.inner.lock().unwrap();
+        let (reg_profile, partner_profile) = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let mut p = guard.default_partner.clone();
             if !partner_id.trim().is_empty() {
                 let cleaned: String = partner_id.chars().filter(|c| !c.is_whitespace()).collect();
@@ -878,6 +865,7 @@ impl ControlSession {
             guard.frames_applied = 0;
             guard.rectangles_applied = 0;
             guard.outbound_queue.clear();
+            guard.login_acknowledged = false;
             guard.state.state = "connecting".to_string();
             guard.state.frames = 0;
             guard.state.error = None;
@@ -889,7 +877,7 @@ impl ControlSession {
 
         let session_clone = self.clone();
         thread::spawn(move || {
-            session_clone.run_worker(reg_profile, &mut partner_profile);
+            session_clone.run_worker(gen, reg_profile, partner_profile);
         });
 
         Ok(self.snapshot())
@@ -897,88 +885,89 @@ impl ControlSession {
 
     pub fn disconnect(&self) {
         self.stop_flag.store(true, Ordering::SeqCst);
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(ref mut r) = guard.relay {
-            r.close();
-        }
-        guard.relay = None;
-        if let Some(ref mut reg) = guard.registration {
-            reg.close();
-        }
-        guard.registration = None;
-        guard.route = None;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.login_acknowledged = false;
+        guard.outbound_queue.clear();
         guard.state.state = "disconnected".to_string();
         guard.state.last_message = "Disconnected".to_string();
         Self::sync_state_fields(&mut guard);
     }
 
-    fn run_worker(&self, reg_profile: RegistrationProfile, partner: &mut PartnerProfile) {
+    fn is_active(&self, gen: u64) -> bool {
+        !self.stop_flag.load(Ordering::SeqCst) && self.generation.load(Ordering::SeqCst) == gen
+    }
+
+    fn drain_and_send(
+        &self,
+        relay: &mut SessionTransport,
+        route: &TargetRoute,
+        held_keys: &mut BTreeSet<i32>,
+        held_buttons: &mut BTreeSet<String>,
+    ) {
+        let queued: Vec<(Vec<u8>, Option<InputEvent>)> = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.outbound_queue.drain(..).collect()
+        };
+        for (payload, evt_opt) in queued {
+            let _ = relay.send_relay(&payload, &route.public_ip, route.tcp_port, false);
+            if let Some(evt) = evt_opt {
+                match evt.event_type.as_str() {
+                    "key" => {
+                        if evt.down {
+                            held_keys.insert(evt.vk);
+                        } else {
+                            held_keys.remove(&evt.vk);
+                        }
+                    }
+                    "button" => {
+                        if evt.down {
+                            held_buttons.insert(evt.button.clone());
+                        } else {
+                            held_buttons.remove(&evt.button);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn run_worker(&self, gen: u64, reg_profile: RegistrationProfile, partner: PartnerProfile) {
         let mut held_keys = BTreeSet::<i32>::new();
         let mut held_buttons = BTreeSet::<String>::new();
 
-        let connect_res = self.establish_relay_session(&reg_profile, partner);
-        if let Err(err) = connect_res {
-            let mut guard = self.inner.lock().unwrap();
-            guard.state.state = "disconnected".to_string();
-            guard.state.error = Some(err.clone());
-            guard.state.last_message = err;
-            Self::sync_state_fields(&mut guard);
-            return;
-        }
-
-        while !self.stop_flag.load(Ordering::SeqCst) {
-            {
-                let mut guard = self.inner.lock().unwrap();
-                let queued: Vec<(Vec<u8>, Option<InputEvent>)> =
-                    guard.outbound_queue.drain(..).collect();
-                for (payload, evt_opt) in queued {
-                    let inner = &mut *guard;
-                    if let (Some(ref mut relay), Some(ref route)) = (&mut inner.relay, &inner.route)
-                    {
-                        let _ =
-                            relay.send_relay(&payload, &route.public_ip, route.tcp_port, false);
-                    }
-                    if let Some(evt) = evt_opt {
-                        match evt.event_type.as_str() {
-                            "key" => {
-                                if evt.down {
-                                    held_keys.insert(evt.vk);
-                                } else {
-                                    held_keys.remove(&evt.vk);
-                                }
-                            }
-                            "button" => {
-                                if evt.down {
-                                    held_buttons.insert(evt.button.clone());
-                                } else {
-                                    held_buttons.remove(&evt.button);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+        let (mut reg, mut relay, route) = match self.establish_relay_session(&reg_profile, &partner)
+        {
+            Ok(tuple) => tuple,
+            Err(err) => {
+                if self.generation.load(Ordering::SeqCst) == gen {
+                    let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.state.state = "disconnected".to_string();
+                    guard.state.error = Some(err.clone());
+                    guard.state.last_message = err;
+                    Self::sync_state_fields(&mut guard);
                 }
+                return;
             }
+        };
 
-            let body_res = {
-                let mut guard = self.inner.lock().unwrap();
-                if let Some(ref mut relay) = guard.relay {
-                    relay.receive_body()
-                } else {
-                    break;
-                }
-            };
+        while self.is_active(gen) {
+            self.drain_and_send(&mut relay, &route, &mut held_keys, &mut held_buttons);
 
-            match body_res {
+            match relay.receive_body() {
                 Ok(body) => match decode_transport_body(&body) {
                     Ok(Some(pkt)) if pkt.kind == "relay" => {
                         self.handle_session_payload(&pkt.data);
+                        self.drain_and_send(&mut relay, &route, &mut held_keys, &mut held_buttons);
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        let mut guard = self.inner.lock().unwrap();
-                        guard.state.error = Some(e);
+                        if self.generation.load(Ordering::SeqCst) == gen {
+                            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.state.error = Some(e);
+                            Self::sync_state_fields(&mut guard);
+                        }
                         break;
                     }
                 },
@@ -986,8 +975,8 @@ impl ControlSession {
                     if err.starts_with("TimeoutError") {
                         continue;
                     }
-                    if !self.stop_flag.load(Ordering::SeqCst) {
-                        let mut guard = self.inner.lock().unwrap();
+                    if self.is_active(gen) {
+                        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                         guard.state.error = Some(err.clone());
                         guard.state.last_message = err;
                         Self::sync_state_fields(&mut guard);
@@ -997,30 +986,21 @@ impl ControlSession {
             }
         }
 
-        {
-            let mut guard = self.inner.lock().unwrap();
-            let inner = &mut *guard;
-            if let (Some(ref mut relay), Some(ref route)) = (&mut inner.relay, &inner.route) {
-                for vk in held_keys {
-                    if let Ok(pkt) = keyboard(vk, false, false) {
-                        let _ = relay.send_relay(&pkt, &route.public_ip, route.tcp_port, false);
-                    }
-                }
-                for button in held_buttons {
-                    if let Ok(pkt) = mouse_button(&button, false) {
-                        let _ = relay.send_relay(&pkt, &route.public_ip, route.tcp_port, false);
-                    }
-                }
+        for vk in held_keys {
+            if let Ok(pkt) = keyboard(vk, false, false) {
+                let _ = relay.send_relay(&pkt, &route.public_ip, route.tcp_port, false);
             }
-            if let Some(ref mut r) = guard.relay {
-                r.close();
+        }
+        for button in held_buttons {
+            if let Ok(pkt) = mouse_button(&button, false) {
+                let _ = relay.send_relay(&pkt, &route.public_ip, route.tcp_port, false);
             }
-            guard.relay = None;
-            if let Some(ref mut reg) = guard.registration {
-                reg.close();
-            }
-            guard.registration = None;
-            guard.route = None;
+        }
+        relay.close();
+        reg.close();
+
+        if self.generation.load(Ordering::SeqCst) == gen {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.state.state = "disconnected".to_string();
             Self::sync_state_fields(&mut guard);
         }
@@ -1030,7 +1010,7 @@ impl ControlSession {
         &self,
         reg_profile: &RegistrationProfile,
         partner: &PartnerProfile,
-    ) -> Result<(), String> {
+    ) -> Result<(RegistrationTransport, SessionTransport, TargetRoute), String> {
         let mut terms = partner.request_terms.clone();
         if terms.len() != 17 {
             return Err("partner request needs seventeen terms".to_string());
@@ -1115,29 +1095,28 @@ impl ControlSession {
         relay.send_relay(&login_payload, &route.public_ip, route.tcp_port, true)?;
         relay.set_timeout(0.15);
 
-        let mut guard = self.inner.lock().unwrap();
-        let partner_ver = partner
-            .request_terms
-            .get(3)
-            .map(|s| s.as_str())
-            .unwrap_or("6.6.133");
-        guard.files.modern_protocol =
-            version_equal_or_greater(partner_ver, "6.4.25").unwrap_or(true);
-        let decoder = ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
-        guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
-        guard.state.local_id = identity.client_id.to_string();
-        guard.state.route_mode = "relay".to_string();
-        guard.state.remote_endpoint = format!("{}:{}", route.public_ip, route.tcp_port);
-        guard.registration = Some(reg);
-        guard.relay = Some(relay);
-        guard.route = Some(route);
-        Self::sync_state_fields(&mut guard);
-        Ok(())
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let partner_ver = partner
+                .request_terms
+                .get(3)
+                .map(|s| s.as_str())
+                .unwrap_or("6.6.133");
+            guard.files.modern_protocol =
+                version_equal_or_greater(partner_ver, "6.4.25").unwrap_or(true);
+            let decoder = ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
+            guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
+            guard.state.local_id = identity.client_id.to_string();
+            guard.state.route_mode = "relay".to_string();
+            guard.state.remote_endpoint = format!("{}:{}", route.public_ip, route.tcp_port);
+            Self::sync_state_fields(&mut guard);
+        }
+        Ok((reg, relay, route))
     }
 
     pub fn move_pointer(&self, x: i32, y: i32) -> Result<Vec<u8>, String> {
         let payload = mouse_move(x, y)?;
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         Self::dispatch_payload(&mut guard, &payload, None)?;
         Ok(payload)
     }

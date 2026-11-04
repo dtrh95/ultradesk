@@ -641,6 +641,18 @@ mod tests {
         assert_eq!(decode_base64(&b64).unwrap(), b"hello-rust-uv");
 
         let session = ControlSession::new();
+        let login_pkt = encode_byte_array_fields(&[
+            b"\x00\x00",
+            &1920i32.to_le_bytes(),
+            &1080i32.to_le_bytes(),
+        ])
+        .unwrap();
+        session.handle_session_payload(&login_pkt);
+        let snap_after_login = session.snapshot();
+        assert_eq!(snap_after_login.state, "connected");
+        assert_eq!(snap_after_login.screen_width, 1920);
+        assert_eq!(snap_after_login.screen_height, 1080);
+
         let clip_pkt = encode_clipboard_modern_packet(1, "Remote clip 123").unwrap();
         session.handle_session_payload(&clip_pkt);
         let audio_pkt =
