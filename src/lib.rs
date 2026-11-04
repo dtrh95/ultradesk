@@ -341,7 +341,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            Vec::new(),
+            rect_xywh(2, 0, 2, 2),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -351,6 +351,30 @@ mod tests {
         assert_eq!(screen.apply(&cache_hit_fields).unwrap(), 1);
         assert_eq!(screen.canvas.get_pixel(2, 0), (255, 0, 0));
         assert_eq!(screen.canvas.get_pixel(3, 1), (255, 255, 255));
+
+        let mut missing_and_valid_ref = Vec::new();
+        missing_and_valid_ref.extend_from_slice(&0i16.to_le_bytes());
+        missing_and_valid_ref.extend_from_slice(&2i16.to_le_bytes());
+        missing_and_valid_ref.extend_from_slice(&9999i32.to_le_bytes());
+        missing_and_valid_ref.extend_from_slice(&2i16.to_le_bytes());
+        missing_and_valid_ref.extend_from_slice(&2i16.to_le_bytes());
+        missing_and_valid_ref.extend_from_slice(&77i32.to_le_bytes());
+        let partial_cache_fields: Vec<Vec<u8>> = vec![
+            vec![1u8],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            rect_xywh(0, 2, 4, 2),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            missing_and_valid_ref,
+            Vec::new(),
+        ];
+        assert_eq!(screen.apply(&partial_cache_fields).unwrap(), 1);
+        assert_eq!(screen.canvas.get_pixel(2, 2), (255, 0, 0));
+        assert_eq!(screen.canvas.get_pixel(3, 3), (255, 255, 255));
 
         let mut jpeg_bytes = Vec::new();
         let atlas_rgb = vec![0u8, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0];

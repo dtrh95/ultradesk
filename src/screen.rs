@@ -243,10 +243,7 @@ impl RGB555Screen {
         if fields.len() != 11 || fields[0].is_empty() || fields[0][0] != 1 {
             return Err("expected eleven-field kind1 update".to_string());
         }
-        if !fields[5].is_empty() {
-            return Err("BitBlt screen operations are not supported yet".to_string());
-        }
-        if fields[9].len() % 8 != 0 || fields[10].len() % 12 != 0 {
+        if fields[5].len() % 8 != 0 || fields[9].len() % 8 != 0 || fields[10].len() % 12 != 0 {
             return Err("invalid screen cache record length".to_string());
         }
         let mut canvas = self.canvas.clone();
@@ -263,6 +260,14 @@ impl RGB555Screen {
             }
             Ok(())
         };
+
+        for chunk in fields[5].chunks_exact(8) {
+            let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+            let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+            let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
+            let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
+            check_bounds(x, y, w, h, canvas.width, canvas.height)?;
+        }
 
         let mut count = 0usize;
 
@@ -306,10 +311,9 @@ impl RGB555Screen {
             let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
             let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
             let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
-            let pos = cache
-                .iter()
-                .position(|(k, _)| *k == key)
-                .ok_or_else(|| "screen cache reference is missing".to_string())?;
+            let Some(pos) = cache.iter().position(|(k, _)| *k == key) else {
+                continue;
+            };
             let (_, tile) = cache.remove(pos);
             check_bounds(
                 x,
