@@ -647,7 +647,7 @@ mod tests {
         );
 
         let (_, final_replies) = receiver.handle_packet(&final_chunks[0]).unwrap().unwrap();
-        assert!(final_replies.is_empty());
+        assert_eq!(final_replies.len(), 1);
         let rx_entry = receiver.transfers.get(&file_id).unwrap();
         assert_eq!(rx_entry.direction, TransferDirection::Receive);
         assert_eq!(rx_entry.status, TransferStatus::Completed);
