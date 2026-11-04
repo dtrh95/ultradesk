@@ -1,0 +1,529 @@
+use crate::input::InputEvent;
+use crate::session::ControlSession;
+use serde::Deserialize;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Duration;
+
+pub const DEFAULT_VIEWER_HTML: &str = include_str!("../viewer.html");
+
+pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+    for b in input.bytes() {
+        if b.is_ascii_whitespace() || b == b'=' {
+            continue;
+        }
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return Err(format!("Invalid base64 character: {}", b as char)),
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+pub fn encode_base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        out.push(TABLE[b0 >> 2] as char);
+        out.push(TABLE[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((b1 & 0x0F) << 2) | (b2 >> 6)] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[b2 & 0x3F] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+#[derive(Deserialize, Default)]
+struct ConnectRequest {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    pass: String,
+    #[serde(default)]
+    partner_id: String,
+    #[serde(default)]
+    password: String,
+}
+
+#[derive(Deserialize, Default)]
+struct AudioToggleRequest {
+    #[serde(default = "default_true")]
+    enable: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Deserialize, Default)]
+struct ClipboardUpdateRequest {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    sync_from_system: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct FileSendRequest {
+    #[serde(default)]
+    file_name: String,
+    #[serde(default)]
+    data_base64: String,
+    #[serde(default)]
+    file_path: String,
+}
+
+#[derive(Deserialize, Default)]
+struct FileActionRequest {
+    #[serde(default)]
+    file_id: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ChatSendRequest {
+    #[serde(default)]
+    text: String,
+}
+
+pub struct PortalServer {
+    pub bind_addr: String,
+    pub port: u16,
+    pub session: ControlSession,
+    pub shutdown: Arc<AtomicBool>,
+    viewer_path: Option<PathBuf>,
+}
+
+impl PortalServer {
+    pub fn bind(
+        host: &str,
+        port: u16,
+        session: ControlSession,
+        viewer_path: Option<PathBuf>,
+    ) -> Result<(Self, TcpListener), String> {
+        let listener = TcpListener::bind(format!("{}:{}", host, port))
+            .map_err(|e| format!("Failed to bind HTTP portal on {}:{}: {}", host, port, e))?;
+        let local_addr = listener
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| format!("{}:{}", host, port));
+        let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+        Ok((
+            Self {
+                bind_addr: local_addr,
+                port: bound_port,
+                session,
+                shutdown: Arc::new(AtomicBool::new(false)),
+                viewer_path,
+            },
+            listener,
+        ))
+    }
+
+    pub fn spawn(self, listener: TcpListener) -> thread::JoinHandle<()> {
+        let _ = listener.set_nonblocking(true);
+        thread::spawn(move || {
+            while !self.shutdown.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let session = self.session.clone();
+                        let viewer_path = self.viewer_path.clone();
+                        thread::spawn(move || {
+                            let _ = handle_http_client(stream, session, viewer_path);
+                        });
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(15));
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    }
+}
+
+fn parse_query_params(query: &str) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let mut iter = pair.splitn(2, '=');
+        let k = iter.next().unwrap_or_default().to_string();
+        let v = iter.next().unwrap_or_default().to_string();
+        map.insert(k, v);
+    }
+    map
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let mut header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
+        status,
+        reason,
+        content_type,
+        body.len()
+    );
+    for (k, v) in extra_headers {
+        header.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    header.push_str("\r\n");
+    stream.write_all(header.as_bytes())?;
+    if !body.is_empty() {
+        stream.write_all(body)?;
+    }
+    stream.flush()
+}
+
+fn write_json_response(
+    stream: &mut TcpStream,
+    status: u16,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
+    write_http_response(
+        stream,
+        status,
+        "application/json; charset=utf-8",
+        &[],
+        &body,
+    )
+}
+
+fn handle_http_client(
+    mut stream: TcpStream,
+    session: ControlSession,
+    viewer_path: Option<PathBuf>,
+) -> std::io::Result<()> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line)? == 0 {
+        return Ok(());
+    }
+    let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
+    if parts.len() < 2 {
+        return Ok(());
+    }
+    let method = parts[0];
+    let raw_target = parts[1];
+    let (path, query_str) = match raw_target.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (raw_target, ""),
+    };
+    let query = parse_query_params(query_str);
+
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some((name, val)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = val.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+    }
+
+    let mut body = vec![0u8; content_length.min(32 * 1024 * 1024)];
+    if !body.is_empty() {
+        reader.read_exact(&mut body)?;
+    }
+
+    match (method, path) {
+        ("GET", "/" | "/index.html" | "/viewer.html") => {
+            let html = viewer_path
+                .as_ref()
+                .and_then(|p| fs::read(p).ok())
+                .unwrap_or_else(|| DEFAULT_VIEWER_HTML.as_bytes().to_vec());
+            write_http_response(&mut stream, 200, "text/html; charset=utf-8", &[], &html)
+        }
+        ("GET", "/status" | "/state") => {
+            let state = session.snapshot();
+            let val = serde_json::to_value(state).unwrap_or_else(|_| json!({}));
+            write_json_response(&mut stream, 200, &val)
+        }
+        ("GET", "/frame.png") => match session.png_frame() {
+            Ok(png) => write_http_response(&mut stream, 200, "image/png", &[], &png),
+            Err(e) => write_json_response(&mut stream, 500, &json!({ "ok": false, "error": e })),
+        },
+        ("GET", "/audio.wav" | "/audio/stream.wav") => {
+            let after_seq = query
+                .get("after")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let (latest_seq, wav) = session.audio_wav_since(after_seq);
+            let seq_str = latest_seq.to_string();
+            write_http_response(
+                &mut stream,
+                200,
+                "audio/wav",
+                &[("X-Audio-Seq", &seq_str)],
+                &wav,
+            )
+        }
+        ("GET", "/clipboard") => {
+            let snap = session.snapshot();
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({
+                    "ok": true,
+                    "local_text": snap.clipboard_local,
+                    "remote_text": snap.clipboard_remote,
+                    "updates_sent": snap.clipboard_updates_sent,
+                    "updates_received": snap.clipboard_updates_received
+                }),
+            )
+        }
+        ("GET", "/files") => {
+            let snap = session.snapshot();
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({
+                    "ok": true,
+                    "transfers": snap.file_transfers,
+                    "chat_messages": snap.chat_messages
+                }),
+            )
+        }
+        ("GET", "/files/download") => {
+            let file_id = query.get("file_id").cloned().unwrap_or_default();
+            if let Some((name, bytes)) = session.downloaded_file_bytes(&file_id) {
+                let disp = format!("attachment; filename=\"{}\"", name.replace('"', ""));
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "application/octet-stream",
+                    &[("Content-Disposition", &disp)],
+                    &bytes,
+                )
+            } else {
+                write_json_response(
+                    &mut stream,
+                    404,
+                    &json!({ "ok": false, "error": "File transfer not found" }),
+                )
+            }
+        }
+        ("POST", "/connect") => {
+            let req: ConnectRequest = serde_json::from_slice(&body).unwrap_or_default();
+            let pid = if !req.id.trim().is_empty() {
+                &req.id
+            } else {
+                &req.partner_id
+            };
+            let pwd = if !req.pass.trim().is_empty() {
+                &req.pass
+            } else {
+                &req.password
+            };
+            match session.start_connect(pid, pwd) {
+                Ok(state) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "state": state }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/disconnect") => {
+            session.disconnect();
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({ "ok": true, "state": session.snapshot() }),
+            )
+        }
+        ("POST", "/event" | "/input") => {
+            let evt: InputEvent = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": format!("Invalid input JSON: {}", e) }),
+                    )
+                }
+            };
+            match session.send_input(evt) {
+                Ok(wire) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "bytes_sent": wire.len() }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/audio/toggle") => {
+            let req: AudioToggleRequest = serde_json::from_slice(&body).unwrap_or_default();
+            match session.toggle_remote_sound(req.enable) {
+                Ok(wire) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "audio_enabled": req.enable,
+                        "bytes_sent": wire.len(),
+                        "state": session.snapshot()
+                    }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/clipboard") => {
+            let req: ClipboardUpdateRequest = serde_json::from_slice(&body).unwrap_or_default();
+            let res = if req.sync_from_system {
+                session
+                    .sync_from_system_clipboard()
+                    .map(|t| (t, true))
+            } else {
+                session
+                    .send_clipboard(&req.text, true)
+                    .map(|_| (req.text.clone(), false))
+            };
+            match res {
+                Ok((text, from_sys)) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "text": text,
+                        "synced_from_system": from_sys,
+                        "state": session.snapshot()
+                    }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/files/send") => {
+            let req: FileSendRequest = serde_json::from_slice(&body).unwrap_or_default();
+            let result = if !req.file_path.trim().is_empty() {
+                session.offer_file_from_path(Path::new(req.file_path.trim()))
+            } else {
+                match decode_base64(&req.data_base64) {
+                    Ok(bytes) => {
+                        let name = if req.file_name.trim().is_empty() {
+                            "upload.bin"
+                        } else {
+                            req.file_name.trim()
+                        };
+                        session.offer_file_bytes(name, bytes)
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+            match result {
+                Ok(file_id) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "file_id": file_id,
+                        "state": session.snapshot()
+                    }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/files/accept") => {
+            let req: FileActionRequest = serde_json::from_slice(&body).unwrap_or_default();
+            match session.accept_file(&req.file_id) {
+                Ok(_) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "state": session.snapshot() }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/files/cancel") => {
+            let req: FileActionRequest = serde_json::from_slice(&body).unwrap_or_default();
+            match session.cancel_file(&req.file_id) {
+                Ok(_) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "state": session.snapshot() }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/chat") => {
+            let req: ChatSendRequest = serde_json::from_slice(&body).unwrap_or_default();
+            match session.send_chat(&req.text) {
+                Ok(_) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "state": session.snapshot() }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        _ => write_json_response(&mut stream, 404, &json!({ "error": "Not found" })),
+    }
+}

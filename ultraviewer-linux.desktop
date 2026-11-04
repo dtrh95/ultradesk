@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=UltraViewer
+GenericName=Remote Desktop Controller
+Comment=UltraViewer Remote Desktop Controller for Linux (Rust)
+Exec=/home/hieudoan/apps/ultraviewer-linux-rust/run.sh
+Path=/home/hieudoan/apps/ultraviewer-linux-rust
+Icon=ultraviewer-linux
+Terminal=false
+Categories=Network;RemoteAccess;Utility;
+Keywords=ultraviewer;remote;desktop;support;control;
+StartupNotify=true
+StartupWMClass=ultraviewer-linux
