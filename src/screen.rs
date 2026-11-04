@@ -217,7 +217,7 @@ pub struct RGB555Screen {
 
 impl Default for RGB555Screen {
     fn default() -> Self {
-        Self::new((1024, 768), ZstdDictionaryDecoder::default(), 1000, 32)
+        Self::new((1024, 768), ZstdDictionaryDecoder::default(), 1000, 16)
     }
 }
 
@@ -408,11 +408,39 @@ impl RGB555Screen {
                 check_bounds(x, y, w, h, canvas.width, canvas.height)?;
                 rectangles.push((x, y, w, h));
             }
-            for (x, y, w, h, sx, sy) in atlas_layout(&rectangles, self.block_size, ah as i32)? {
-                if (sx + w) as u32 > aw || (sy + h) as u32 > ah {
-                    return Err("JPEG tile outside atlas".to_string());
+            let mut chosen_layout = None;
+            for candidate_bs in [self.block_size, 16, 32, 64] {
+                if candidate_bs <= 0 {
+                    continue;
                 }
-                let tile = flipped.crop(sx as u32, sy as u32, w as u32, h as u32);
+                if let Ok(layout) = atlas_layout(&rectangles, candidate_bs, ah as i32) {
+                    if layout
+                        .iter()
+                        .all(|&(_, _, w, h, sx, sy)| (sx + w) as u32 <= aw && (sy + h) as u32 <= ah)
+                    {
+                        self.block_size = candidate_bs;
+                        chosen_layout = Some(layout);
+                        break;
+                    }
+                }
+            }
+            let layout = match chosen_layout {
+                Some(l) => l,
+                None => atlas_layout(&rectangles, self.block_size, ah as i32)?,
+            };
+            for (x, y, w, h, sx, sy) in layout {
+                if (sx as u32) >= aw || (sy as u32) >= ah {
+                    if strict_small {
+                        return Err("JPEG tile outside atlas".to_string());
+                    }
+                    continue;
+                }
+                let cw = (w as u32).min(aw.saturating_sub(sx as u32));
+                let ch = (h as u32).min(ah.saturating_sub(sy as u32));
+                if cw == 0 || ch == 0 {
+                    continue;
+                }
+                let tile = flipped.crop(sx as u32, sy as u32, cw, ch);
                 canvas.paste(&tile, x as u32, y as u32);
                 count += 1;
             }
