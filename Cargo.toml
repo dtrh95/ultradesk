@@ -1,0 +1,25 @@
+[package]
+name = "ultraviewer-linux"
+version = "0.2.0"
+edition = "2021"
+description = "Linux-native UltraViewer remote desktop controller written in Rust with Screen, Input, Audio, Clipboard Sync, and File Transfer"
+
+[lib]
+name = "ultraviewer_linux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ultraviewer-linux"
+path = "src/main.rs"
+
+[dependencies]
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+cipher = { version = "0.4", features = ["alloc", "block-padding"] }
+des = "0.8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+md-5 = "0.10"
+native-tls = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zstd = "0.13"
