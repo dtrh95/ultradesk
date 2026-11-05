@@ -1,0 +1,20 @@
+pkgbase = ultradesk-rust
+	pkgdesc = Remote desktop controller and host for Linux (Rust Edition)
+	pkgver = 0.2.0
+	pkgrel = 1
+	url = https://github.com/ultradesk/ultradesk-rust
+	arch = x86_64
+	license = MIT
+	makedepends = cargo
+	makedepends = pkgconf
+	depends = gcc-libs
+	depends = openssl
+	depends = libxcb
+	depends = python
+	depends = python-gobject
+	depends = gtk3
+	depends = webkit2gtk-4.1
+	source = ultradesk-rust-0.2.0.tar.gz::https://github.com/ultradesk/ultradesk-rust/archive/v0.2.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = ultradesk-rust
