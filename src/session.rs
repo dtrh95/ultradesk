@@ -1091,6 +1091,23 @@ impl ControlSession {
         unicode_bytes: bool,
         event: Option<InputEvent>,
     ) -> Result<(), String> {
+        let is_move = event
+            .as_ref()
+            .map(|e| e.event_type == "move")
+            .unwrap_or(false);
+        if is_move {
+            if let Some(last) = inner.outbound_queue.last_mut() {
+                if last
+                    .2
+                    .as_ref()
+                    .map(|e| e.event_type == "move")
+                    .unwrap_or(false)
+                {
+                    *last = (payload.to_vec(), unicode_bytes, event);
+                    return Ok(());
+                }
+            }
+        }
         inner
             .outbound_queue
             .push((payload.to_vec(), unicode_bytes, event));
@@ -1264,6 +1281,13 @@ impl ControlSession {
                 .active_bounds(&guard.screen.monitor_selection);
             event.x = event.x.saturating_add(bounds.left);
             event.y = event.y.saturating_add(bounds.top);
+            let _ = guard
+                .cursor
+                .handle_command(crate::cursor::CursorCommand::Position {
+                    x: event.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                    y: event.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                });
+            Self::sync_state_fields(&mut guard);
         }
         let payload = event.to_wire()?;
         Self::dispatch_payload(&mut guard, &payload, false, Some(event))?;
@@ -1706,7 +1730,7 @@ impl ControlSession {
             Some(&salt),
         )?;
         relay.send_relay(&login_payload, &route.public_ip, route.tcp_port, true)?;
-        relay.set_timeout(0.15);
+        relay.set_timeout(0.015);
 
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1727,7 +1751,16 @@ impl ControlSession {
             .screen
             .layout
             .active_bounds(&guard.screen.monitor_selection);
-        let payload = mouse_move(x.saturating_add(bounds.left), y.saturating_add(bounds.top))?;
+        let rx = x.saturating_add(bounds.left);
+        let ry = y.saturating_add(bounds.top);
+        let _ = guard
+            .cursor
+            .handle_command(crate::cursor::CursorCommand::Position {
+                x: rx.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                y: ry.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            });
+        Self::sync_state_fields(&mut guard);
+        let payload = mouse_move(rx, ry)?;
         Self::dispatch_payload(&mut guard, &payload, false, None)?;
         Ok(payload)
     }
