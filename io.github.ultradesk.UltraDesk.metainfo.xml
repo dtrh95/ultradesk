@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component type="desktop-application">
+  <id>io.github.ultradesk.UltraDesk</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>UltraDesk</name>
+  <summary>Remote desktop controller and host for Linux (Rust Edition)</summary>
+  <description>
+    <p>UltraDesk is a Linux-native remote desktop controller and host written in Rust, supporting screen streaming, remote input, audio, clipboard synchronization, and file transfer.</p>
+  </description>
+  <launchable type="desktop-id">ultradesk-rust.desktop</launchable>
+  <url type="homepage">https://github.com/ultradesk/ultradesk-rust</url>
+  <url type="bugtracker">https://github.com/ultradesk/ultradesk-rust/issues</url>
+  <provides>
+    <binary>ultradesk-rust</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.2.0" date="2026-11-05" />
+  </releases>
+</component>

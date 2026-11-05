@@ -1,0 +1,46 @@
+pkgname=ultradesk-rust
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Remote desktop controller and host for Linux (Rust Edition)"
+arch=('x86_64')
+url="https://github.com/ultradesk/ultradesk-rust"
+license=('MIT')
+depends=(
+  'gcc-libs'
+  'openssl'
+  'libxcb'
+  'python'
+  'python-gobject'
+  'gtk3'
+  'webkit2gtk-4.1'
+)
+makedepends=(
+  'cargo'
+  'pkgconf'
+)
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" || true
+}
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  make build
+}
+
+check() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  export RUSTUP_TOOLCHAIN=stable
+  make check
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  make install PREFIX=/usr DESTDIR="${pkgdir}"
+}
