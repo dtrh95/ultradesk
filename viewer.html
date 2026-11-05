@@ -747,6 +747,10 @@ a.dl-link:hover {
       <span data-i18n="nav_tools">Công cụ</span>
     </button>
     <div class="pill-sep"></div>
+    <button id="btnCycleTheme" class="pill-btn" type="button" data-i18n-title="btn_theme_title" title="Bấm để đổi giao diện (Shift+Click: đổi nhanh Sáng/Tối)">
+      <svg id="themeBtnIcon" class="svg-icon" viewBox="0 0 24 24"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg>
+      <span id="themeBtnLabel">Auto</span>
+    </button>
     <select id="themeSelect" class="pill-select" data-i18n-title="theme_title" title="Giao diện màu sắc (Tự động theo giờ hệ thống)">
       <option value="auto-time" data-i18n="theme_auto_time">Auto (Theo giờ)</option>
       <option value="auto-os" data-i18n="theme_auto_os">Auto (Hệ điều hành)</option>
@@ -1012,6 +1016,7 @@ const I18N={
     show_pill_title:'Hiện thanh điều khiển',
     drag_pill_title:'Kéo để di chuyển thanh điều khiển (nhấp đúp để đặt lại)',
     theme_title:'Chọn giao diện (Tự động đổi Sáng/Tối theo giờ hệ thống 06:00-18:00)',
+    btn_theme_title:'Bấm để chuyển đổi giao diện (Shift+Click: đổi nhanh Sáng/Tối)',
     theme_auto_time:'Auto (Theo giờ)',
     theme_auto_os:'Auto (Hệ điều hành)',
     theme_onedark:'One Dark Pro',
@@ -1103,6 +1108,7 @@ const I18N={
     show_pill_title:'Show control bar',
     drag_pill_title:'Drag to move control bar (double-click to reset)',
     theme_title:'Select theme (Auto switches Light/Dark by system time 06:00-18:00)',
+    btn_theme_title:'Click to cycle theme (Shift+Click: toggle Light/Dark)',
     theme_auto_time:'Auto (System Time)',
     theme_auto_os:'Auto (OS Theme)',
     theme_onedark:'One Dark Pro',
@@ -1114,8 +1120,19 @@ const I18N={
   }
 };
 
-const VALID_THEME_MODES = ['auto-time', 'auto-os', 'onedark', 'onelight', 'vscode-dark', 'vscode-light', 'gruvbox-dark', 'gruvbox-light'];
+const VALID_THEME_MODES = ['auto-time', 'onedark', 'vscode-dark', 'vscode-light', 'onelight', 'gruvbox-dark', 'gruvbox-light', 'auto-os'];
 const VALID_PALETTES = ['onedark', 'onelight', 'vscode-dark', 'vscode-light', 'gruvbox-dark', 'gruvbox-light'];
+const LIGHT_PALETTES = ['vscode-light', 'onelight', 'gruvbox-light'];
+const THEME_SHORT_LABELS = {
+  'auto-time': 'Auto',
+  'auto-os': 'OS',
+  'onedark': 'OneDark',
+  'onelight': 'OneLight',
+  'vscode-dark': 'VS Dark',
+  'vscode-light': 'VS Light',
+  'gruvbox-dark': 'Gruvbox',
+  'gruvbox-light': 'GruvLight'
+};
 const uiState = { overlay: 'connect', toolTab: 'chat', lang: 'vi', themeMode: 'auto-time', activeTheme: 'onedark', pillCollapsed: false, pillPos: null, drag: null };
 
 function resolveActiveTheme(mode, hourOverride = null) {
@@ -1299,9 +1316,33 @@ function setTheme(mode,persist=true,hourOverride=null){
   document.documentElement.setAttribute('data-theme-mode',uiState.themeMode);
   const sel=document.querySelector('#themeSelect');
   if(sel&&sel.value!==cleanMode)sel.value=cleanMode;
+  const lbl=document.querySelector('#themeBtnLabel');
+  if(lbl)lbl.textContent=THEME_SHORT_LABELS[cleanMode]||cleanMode;
+  const icon=document.querySelector('#themeBtnIcon');
+  if(icon){
+    const isLight=LIGHT_PALETTES.includes(uiState.activeTheme);
+    if(cleanMode==='auto-time'){
+      icon.innerHTML='<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>';
+    }else if(isLight){
+      icon.innerHTML='<circle cx="12" cy="12" r="4"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/>';
+    }else{
+      icon.innerHTML='<path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/>';
+    }
+  }
   if(persist){try{localStorage.setItem('uv_theme',cleanMode);}catch(_){}}
   renderStatusBadge(lastState);
   drawIdleCanvas();
+}
+
+function cycleTheme(shiftKey=false){
+  if(shiftKey){
+    const isLight=LIGHT_PALETTES.includes(uiState.activeTheme);
+    setTheme(isLight?'onedark':'vscode-light',true);
+    return;
+  }
+  const idx=VALID_THEME_MODES.indexOf(uiState.themeMode);
+  const nextIdx=(idx+1)%VALID_THEME_MODES.length;
+  setTheme(VALID_THEME_MODES[nextIdx],true);
 }
 
 function setLanguage(lang){
@@ -1341,6 +1382,7 @@ document.querySelectorAll('[data-tool-tab]').forEach(btn=>{
 });
 document.querySelector('#btnLangVi').onclick=()=>setLanguage('vi');
 document.querySelector('#btnLangEn').onclick=()=>setLanguage('en');
+document.querySelector('#btnCycleTheme').onclick=e=>cycleTheme(!!(e&&e.shiftKey));
 document.querySelector('#themeSelect').onchange=e=>setTheme(e.target.value,true);
 if(window.matchMedia){
   try{
