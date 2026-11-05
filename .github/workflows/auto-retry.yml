@@ -3,7 +3,7 @@ name: Auto Retry Failed Builds
 on:
   workflow_run:
     workflows:
-      ['CI', 'Build on Nix', 'Build & Release']
+      ['CI', 'Build on Nix', 'Build & Release', 'Publish to AUR']
     types: [completed]
 
 permissions:

@@ -461,3 +461,71 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy repo --project-name=ultradesk-rust --branch=main --commit-dirty=true
+
+  publish-aur:
+    name: Publish to AUR
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release]
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install Arch packaging tools
+        run: |
+          pacman -Syu --noconfirm base-devel git openssh pacman-contrib curl
+
+      - uses: actions/checkout@v7
+
+      - name: Update and push AUR PKGBUILD and .SRCINFO
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME || 'GitHub Actions' }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL || 'actions@github.com' }}
+          REPO_SLUG: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_PRIVATE_KEY}" ]; then
+            echo "AUR_SSH_PRIVATE_KEY secret is not configured; skipping AUR publish."
+            exit 0
+          fi
+
+          VERSION="${REF_NAME#v}"
+          REPO_URL="https://github.com/${REPO_SLUG}"
+          TARBALL_URL="${REPO_URL}/archive/v${VERSION}.tar.gz"
+          SHA256=$(curl -fsSL "${TARBALL_URL}" | sha256sum | awk '{print $1}')
+
+          useradd -m builder
+          mkdir -p /home/builder/.ssh
+          printf "%s\n" "${AUR_SSH_PRIVATE_KEY}" > /home/builder/.ssh/id_aur
+          chmod 600 /home/builder/.ssh/id_aur
+          cat > /home/builder/.ssh/config << 'EOF'
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/id_aur
+            User aur
+            StrictHostKeyChecking accept-new
+          EOF
+          chmod 600 /home/builder/.ssh/config
+          chown -R builder:builder /home/builder/.ssh
+
+          su builder -c "git clone ssh://aur@aur.archlinux.org/ultradesk-rust.git /tmp/aur-pkg"
+          cp packaging/arch/PKGBUILD /tmp/aur-pkg/PKGBUILD
+          sed -i \
+            -e "s|^pkgver=.*|pkgver=${VERSION}|" \
+            -e "s|^pkgrel=.*|pkgrel=1|" \
+            -e "s|^url=.*|url=\"${REPO_URL}\"|" \
+            -e "s|^sha256sums=.*|sha256sums=('${SHA256}')|" \
+            /tmp/aur-pkg/PKGBUILD
+          chown -R builder:builder /tmp/aur-pkg
+
+          su builder -c "cd /tmp/aur-pkg && makepkg --printsrcinfo > .SRCINFO"
+          cd /tmp/aur-pkg
+          git config user.name "${AUR_USERNAME}"
+          git config user.email "${AUR_EMAIL}"
+          git add PKGBUILD .SRCINFO
+          if git diff --staged --quiet; then
+            echo "AUR package ultradesk-rust is already up to date at ${VERSION}-1."
+          else
+            git commit -m "chore(aur): update ultradesk-rust to ${VERSION}-1"
+            su builder -c "cd /tmp/aur-pkg && git push origin master"
+          fi
