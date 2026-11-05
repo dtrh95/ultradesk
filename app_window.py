@@ -69,6 +69,10 @@ def main(port=8765):
 
     clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
     clip_state = {"remote": "", "host": "", "seeded": False, "connected": False}
+    viewer_file = Path(__file__).with_name("viewer.html")
+    viewer_state = {
+        "mtime": viewer_file.stat().st_mtime if viewer_file.exists() else 0.0
+    }
 
     def on_gtk_text(_clip, text):
         if not text:
@@ -99,6 +103,16 @@ def main(port=8765):
                 pass
 
     def sync_gtk_clipboard():
+        try:
+            if viewer_file.exists():
+                mt = viewer_file.stat().st_mtime
+                if viewer_state["mtime"] and mt > viewer_state["mtime"]:
+                    viewer_state["mtime"] = mt
+                    webview.reload_bypass_cache()
+                else:
+                    viewer_state["mtime"] = mt
+        except Exception:
+            pass
         try:
             with urllib.request.urlopen(f"{url}/status", timeout=0.25) as resp:
                 status = json.loads(resp.read().decode("utf-8", errors="replace"))

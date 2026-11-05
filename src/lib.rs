@@ -829,6 +829,8 @@ mod tests {
 
         let resp_evt = http_post(&addr, "/event", "{\"type\":\"move\",\"x\":150,\"y\":250}");
         assert!(resp_evt.contains("\"ok\":true"));
+        let snap_after_move = session.snapshot();
+        assert_eq!((snap_after_move.cursor_x, snap_after_move.cursor_y), (150, 250));
 
         let resp_html = http_get(&addr, "/");
         assert!(resp_html.contains("UltraDesk (Rust)"));
@@ -840,6 +842,9 @@ mod tests {
         assert!(resp_html.contains("data-theme=\"vscode-light\""));
         assert!(resp_html.contains("resolveActiveTheme"));
         assert!(resp_html.contains("cycleTheme"));
+        assert!(resp_html.contains("canvasContentRect"));
+        assert!(resp_html.contains("scheduleMove"));
+        assert!(!resp_html.contains("drawImage(cursorImg"));
 
         let resp_icon = http_get(&addr, "/ultradesk-rust.png");
         assert!(resp_icon.contains("Content-Type: image/png"));
