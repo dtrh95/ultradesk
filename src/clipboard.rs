@@ -36,22 +36,11 @@ impl Default for ClipboardState {
     }
 }
 
-/// Encodes an outbound UltraViewer clipboard packet for the live Windows partner (`uv_unpacked.exe` at `0x6c9be8`):
-/// - Short clipboard (`<= 150` UTF-16 code units): UTF-16LE string `"|||5" + text` (`unicode_bytes = true`).
-/// - Long clipboard (`> 150` UTF-16 code units): 2-field `ByteArray` `["|||33|||<utf16_byte_len>|||", zstd_compressed_utf16le]` (`unicode_bytes = false`).
+/// Encodes an outbound UltraViewer clipboard packet for the live Windows partner (`VServer::ManipulatePacket` at `0x6afd24`):
+/// - `VServer` splits `packet_str` by `"|||"` and checks `parts[0] == "5"`, reading `parts[1]` as a Unicode `BSTR` (`unicode_bytes = true`).
 pub fn encode_clipboard_for_remote(text: &str) -> Result<(Vec<u8>, bool), String> {
-    let utf16_len = text.encode_utf16().count();
-    if utf16_len <= 150 {
-        let cmd = format!("|||5{}", text);
-        Ok((encode_senddata_string(&cmd, true), true))
-    } else {
-        let utf16_bytes = encode_senddata_string(text, true);
-        let compressed = zstd::bulk::compress(&utf16_bytes, 1)
-            .map_err(|e| format!("Clipboard Zstd compress failed: {}", e))?;
-        let header = encode_senddata_string(&format!("|||33|||{}|||", utf16_bytes.len()), false);
-        let pkt = encode_byte_array_fields(&[&header, &compressed])?;
-        Ok((pkt, false))
-    }
+    let cmd = format!("5|||{}", text);
+    Ok((encode_senddata_string(&cmd, true), true))
 }
 
 /// Encodes an outbound UltraViewer clipboard packet using the 2-field byte-array wire format
@@ -71,10 +60,10 @@ pub fn encode_clipboard_modern_packet(client_id: i32, text: &str) -> Result<Vec<
 }
 
 /// Decodes an inbound UltraViewer clipboard packet from any of the wire representations:
-/// 1. Kind 5 short clipboard (`[[5], utf16le_text]`) or UTF-16LE/ASCII `"|||5<text>"`
+/// 1. Kind 5 short clipboard (`[[5], utf16le_text]`) or UTF-16LE/ASCII `"5|||<text>"` / `"|||5<text>"`
 /// 2. Kind 33 3-field byte-array (`[[33], uncompressed_len_or_client_id_i32_le, zstd_or_raw_utf16le_text]`)
-/// 3. Kind 33 2-field byte-array (`[b"|||33|||<len_or_id>|||", zstd_or_raw_utf16le_text]`)
-/// 4. Direct or single-field command string (`"|||33|||<client_id>|||<text>"`)
+/// 3. Kind 33 2-field byte-array (`[b"|||33|||<len_or_id>|||", zstd_or_raw_utf16le_text]` or `[b"33|||<len_or_id>|||", ...]`)
+/// 4. Direct or single-field command string (`"33|||<client_id>|||<text>"` or `"|||33|||<client_id>|||<text>"`)
 pub fn decode_clipboard_packet(payload: &[u8]) -> Option<ClipboardMessage> {
     if let Ok(fields) = decode_byte_array_fields(payload) {
         if fields.len() >= 2 && fields[0].as_slice() == [PACKET_CLIPBOARD_SHORT] {
@@ -103,7 +92,12 @@ pub fn decode_clipboard_packet(payload: &[u8]) -> Option<ClipboardMessage> {
                 text,
             });
         }
-        if fields.len() >= 2 && fields[0].starts_with(b"|||33|||") {
+        if fields.len() >= 2
+            && (fields[0].starts_with(b"|||33|||")
+                || fields[0].starts_with(b"33|||")
+                || fields[0].starts_with(b"|||11|||")
+                || fields[0].starts_with(b"11|||"))
+        {
             let header_str = String::from_utf8_lossy(&fields[0]);
             let parts = parse_command_fields(&header_str);
             let meta = parts
@@ -124,7 +118,11 @@ pub fn decode_clipboard_packet(payload: &[u8]) -> Option<ClipboardMessage> {
         }
     }
     let s = decode_clipboard_text_bytes(payload, 0);
-    if s.starts_with("|||33") || s.starts_with("|||5") {
+    if s.starts_with("|||33")
+        || s.starts_with("|||5")
+        || s.starts_with("33|||")
+        || s.starts_with("5|||")
+    {
         return parse_legacy_clipboard_str(&s);
     }
     None
@@ -150,6 +148,12 @@ fn decode_clipboard_text_bytes(raw: &[u8], expected_uncompressed: usize) -> Stri
 }
 
 fn parse_legacy_clipboard_str(text: &str) -> Option<ClipboardMessage> {
+    if let Some(rest) = text.strip_prefix("5|||") {
+        return Some(ClipboardMessage {
+            client_id: 0,
+            text: rest.to_string(),
+        });
+    }
     if let Some(rest) = text.strip_prefix("|||5") {
         let clean = rest.strip_prefix("|||").unwrap_or(rest);
         return Some(ClipboardMessage {
@@ -178,31 +182,50 @@ fn parse_legacy_clipboard_str(text: &str) -> Option<ClipboardMessage> {
     None
 }
 
-pub fn set_linux_system_clipboard(text: &str) -> bool {
-    let candidates: &[(&str, &[&str])] = &[
-        ("wl-copy", &[]),
-        ("xclip", &["-selection", "clipboard"]),
-        ("xsel", &["--clipboard", "--input"]),
-    ];
-    for (bin, args) in candidates {
-        if let Ok(mut child) = Command::new(bin)
-            .args(*args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            if let Ok(status) = child.wait() {
-                if status.success() {
-                    return true;
-                }
-            }
+fn run_clipboard_write(bin: &str, args: &[&str], text: &str) -> bool {
+    if let Ok(mut child) = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        if let Ok(status) = child.wait() {
+            return status.success();
         }
     }
     false
+}
+
+pub fn clipboard_text_eq(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let norm_a = a.replace("\r\n", "\n");
+    let norm_b = b.replace("\r\n", "\n");
+    norm_a.trim_end_matches(&['\r', '\n'][..]) == norm_b.trim_end_matches(&['\r', '\n'][..])
+}
+
+const GTK_CLIPBOARD_SET_PY: &str = "import sys, gi; gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); from gi.repository import Gtk, Gdk; Gtk.init_check(); c = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD); t = sys.stdin.read(); c.set_text(t, -1); c.store()";
+const GTK_CLIPBOARD_GET_PY: &str = "import sys, gi; gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); from gi.repository import Gtk, Gdk; Gtk.init_check(); c = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD); t = c.wait_for_text(); sys.stdout.write(t if t is not None else '')";
+
+pub fn set_linux_system_clipboard(text: &str) -> bool {
+    let mut any_ok = false;
+    if run_clipboard_write("wl-copy", &[], text) {
+        any_ok = true;
+    }
+    if run_clipboard_write("xclip", &["-selection", "clipboard"], text)
+        || run_clipboard_write("xsel", &["--clipboard", "--input"], text)
+    {
+        any_ok = true;
+    }
+    if !any_ok && run_clipboard_write("python3", &["-c", GTK_CLIPBOARD_SET_PY], text) {
+        any_ok = true;
+    }
+    any_ok
 }
 
 pub fn get_linux_system_clipboard() -> Option<String> {
@@ -210,13 +233,22 @@ pub fn get_linux_system_clipboard() -> Option<String> {
         ("wl-paste", &["--no-newline"]),
         ("xclip", &["-selection", "clipboard", "-o"]),
         ("xsel", &["--clipboard", "--output"]),
+        ("python3", &["-c", GTK_CLIPBOARD_GET_PY]),
     ];
+    let mut saw_empty_success = false;
     for (bin, args) in candidates {
         if let Ok(output) = Command::new(bin).args(*args).output() {
             if output.status.success() {
-                return Some(String::from_utf8_lossy(&output.stdout).to_string());
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+                saw_empty_success = true;
             }
         }
+    }
+    if saw_empty_success {
+        return Some(String::new());
     }
     None
 }

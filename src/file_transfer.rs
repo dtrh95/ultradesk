@@ -16,12 +16,20 @@ pub const PACKET_FILE_ACK: u8 = 21;
 
 pub const DEFAULT_FILE_CHUNK_SIZE: usize = 16_384;
 
-/// Returns `true` when `payload` is a UTF-16LE string command starting with `"|||"`,
-/// which requires `unicode_bytes = true` (`body[1] = 1`) on `SessionTransport::send_relay`.
 pub fn is_utf16_string_packet(payload: &[u8]) -> bool {
-    payload.len() >= 6
-        && payload.len() % 2 == 0
-        && &payload[..6] == b"|\x00|\x00|\x00"
+    if payload.len() < 6 || payload.len() % 2 != 0 {
+        return false;
+    }
+    if &payload[..6] == b"|\x00|\x00|\x00" {
+        return true;
+    }
+    let prefix = decode_utf16le_lossy(&payload[..payload.len().min(16)]);
+    for code in ["12|||", "13|||", "14|||", "16|||", "21|||", "5|||", "33|||"] {
+        if prefix.starts_with(code) {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +85,8 @@ pub struct FileTransferEntry {
     pub status: TransferStatus,
     pub saved_path: Option<String>,
     #[serde(skip)]
+    pub remote_target_id: Option<String>,
+    #[serde(skip)]
     pub buffer: Vec<u8>,
 }
 
@@ -93,7 +103,6 @@ impl FileTransferEntry {
     }
 }
 
-/// Encodes a File Offer packet (Kind `13`, `SendFile_Up` at `0x747469`).
 pub fn encode_file_offer(
     file_id: &str,
     file_name: &str,
@@ -109,12 +118,11 @@ pub fn encode_file_offer(
             &size_bytes,
         ])
     } else {
-        let cmd = format!("|||13{}|||{}|||{}", file_id, file_name, file_size);
+        let cmd = format!("13|||{}|||{}|||{}", file_id, file_name, file_size);
         Ok(encode_senddata_string(&cmd, true))
     }
 }
 
-/// Encodes a File Accept packet (Kind `14`, `SaveUpload` at `0x757b2e`).
 pub fn encode_file_accept(
     file_id: &str,
     accept_flag: i32,
@@ -123,14 +131,15 @@ pub fn encode_file_accept(
     if modern {
         let flag_bytes = accept_flag.to_le_bytes();
         encode_byte_array_fields(&[&[PACKET_FILE_ACCEPT], file_id.as_bytes(), &flag_bytes])
+    } else if accept_flag <= 1 {
+        let cmd = format!("14|||{}|||{}", file_id, file_id);
+        Ok(encode_senddata_string(&cmd, true))
     } else {
-        let cmd = format!("|||14{}|||{}", file_id, accept_flag);
+        let cmd = format!("14|||{}|||{}", file_id, accept_flag);
         Ok(encode_senddata_string(&cmd, true))
     }
 }
 
-/// Encodes a File Chunk packet (Kind `15`) using the 2-field format (`["|||15<id>|||<offset>|||", chunk]`)
-/// from `0x701a25` or the 4-field `Form1.ManipulatePacket` format (`[[15], id, offset_le, chunk]`) from `0x701c85`.
 pub fn encode_file_chunk(
     file_id: &str,
     offset: u64,
@@ -146,39 +155,37 @@ pub fn encode_file_chunk(
             data,
         ])
     } else {
-        let header = format!("|||15{}|||{}|||", file_id, offset);
-        encode_byte_array_fields(&[header.as_bytes(), data])
+        let mut pkt = format!("15|||{}|||{}|||", file_id, offset).into_bytes();
+        pkt.extend_from_slice(data);
+        Ok(pkt)
     }
 }
 
-/// Encodes a File Ack / Next-Chunk packet (Kind `21` at `0x755722`).
 pub fn encode_file_ack(file_id: &str, next_offset: u64, modern: bool) -> Result<Vec<u8>, String> {
     if modern {
         let offset_bytes = (next_offset as i64).to_le_bytes();
         encode_byte_array_fields(&[&[PACKET_FILE_ACK], file_id.as_bytes(), &offset_bytes])
     } else {
-        let cmd = format!("|||21{}", file_id);
+        let cmd = format!("21|||{}|||{}", file_id, next_offset);
         Ok(encode_senddata_string(&cmd, true))
     }
 }
 
-/// Encodes a File Cancel packet (Kind `16`, `VCB_cancelUpload` at `0x753908`).
 pub fn encode_file_cancel(file_id: &str, modern: bool) -> Result<Vec<u8>, String> {
     if modern {
         encode_byte_array_fields(&[&[PACKET_FILE_CANCEL], file_id.as_bytes()])
     } else {
-        let cmd = format!("|||16{}", file_id);
+        let cmd = format!("16|||{}", file_id);
         Ok(encode_senddata_string(&cmd, true))
     }
 }
 
-/// Encodes a Chat Text Message packet (Kind `12` at `0x700e4d`).
 pub fn encode_chat_message(text: &str, modern: bool) -> Result<Vec<u8>, String> {
     if modern {
         let utf16 = encode_senddata_string(text, true);
         encode_byte_array_fields(&[&[PACKET_CHAT_MESSAGE], &utf16])
     } else {
-        let cmd = format!("|||12{}", text);
+        let cmd = format!("12|||{}", text);
         Ok(encode_senddata_string(&cmd, true))
     }
 }
@@ -224,63 +231,70 @@ fn decode_text_field(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
 }
 
-/// Decodes any inbound UltraViewer file transfer or chat packet (both modern byte-array and legacy `|||`).
 pub fn decode_file_transfer_packet(payload: &[u8]) -> Option<FileTransferPacket> {
+    if let Some(chunk_pkt) = decode_raw_file_chunk_stream(payload) {
+        return Some(chunk_pkt);
+    }
     if let Ok(fields) = decode_byte_array_fields(payload) {
-        if !fields.is_empty() && fields[0].len() == 1 {
-            let kind = fields[0][0];
-            match kind {
-                PACKET_CHAT_MESSAGE if fields.len() >= 2 => {
-                    return Some(FileTransferPacket::ChatMessage {
-                        text: decode_text_field(&fields[1]),
-                    });
+        if !fields.is_empty() {
+            let kind_opt = if fields[0].len() == 1 {
+                Some(fields[0][0])
+            } else {
+                decode_text_field(&fields[0]).trim().parse::<u8>().ok()
+            };
+            if let Some(kind) = kind_opt {
+                match kind {
+                    PACKET_CHAT_MESSAGE if fields.len() >= 2 => {
+                        return Some(FileTransferPacket::ChatMessage {
+                            text: decode_text_field(&fields[1]),
+                        });
+                    }
+                    PACKET_FILE_OFFER if fields.len() >= 4 => {
+                        return Some(FileTransferPacket::Offer {
+                            file_id: decode_text_field(&fields[1]),
+                            file_name: sanitize_file_name(&decode_text_field(&fields[2])),
+                            file_size: decode_int_le(&fields[3]),
+                        });
+                    }
+                    PACKET_FILE_ACCEPT if fields.len() >= 2 => {
+                        let resume = if fields.len() >= 3 {
+                            let v = decode_int_le(&fields[2]);
+                            if v <= 1 { 0 } else { v }
+                        } else {
+                            0
+                        };
+                        return Some(FileTransferPacket::Accept {
+                            file_id: decode_text_field(&fields[1]),
+                            resume_offset: resume,
+                        });
+                    }
+                    PACKET_FILE_CHUNK if fields.len() >= 4 => {
+                        return Some(FileTransferPacket::Chunk {
+                            file_id: decode_text_field(&fields[1]),
+                            offset: decode_int_le(&fields[2]),
+                            data: fields[3].clone(),
+                        });
+                    }
+                    PACKET_FILE_CANCEL if fields.len() >= 2 => {
+                        return Some(FileTransferPacket::Cancel {
+                            file_id: decode_text_field(&fields[1]),
+                        });
+                    }
+                    PACKET_FILE_ACK if fields.len() >= 2 => {
+                        let next_offset = if fields.len() >= 3 {
+                            decode_int_le(&fields[2])
+                        } else {
+                            0
+                        };
+                        return Some(FileTransferPacket::Ack {
+                            file_id: decode_text_field(&fields[1]),
+                            next_offset,
+                        });
+                    }
+                    _ => {}
                 }
-                PACKET_FILE_OFFER if fields.len() >= 4 => {
-                    return Some(FileTransferPacket::Offer {
-                        file_id: decode_text_field(&fields[1]),
-                        file_name: sanitize_file_name(&decode_text_field(&fields[2])),
-                        file_size: decode_int_le(&fields[3]),
-                    });
-                }
-                PACKET_FILE_ACCEPT if fields.len() >= 2 => {
-                    let resume = if fields.len() >= 3 {
-                        let v = decode_int_le(&fields[2]);
-                        if v <= 1 { 0 } else { v }
-                    } else {
-                        0
-                    };
-                    return Some(FileTransferPacket::Accept {
-                        file_id: decode_text_field(&fields[1]),
-                        resume_offset: resume,
-                    });
-                }
-                PACKET_FILE_CHUNK if fields.len() >= 4 => {
-                    return Some(FileTransferPacket::Chunk {
-                        file_id: decode_text_field(&fields[1]),
-                        offset: decode_int_le(&fields[2]),
-                        data: fields[3].clone(),
-                    });
-                }
-                PACKET_FILE_CANCEL if fields.len() >= 2 => {
-                    return Some(FileTransferPacket::Cancel {
-                        file_id: decode_text_field(&fields[1]),
-                    });
-                }
-                PACKET_FILE_ACK if fields.len() >= 2 => {
-                    let next_offset = if fields.len() >= 3 {
-                        decode_int_le(&fields[2])
-                    } else {
-                        0
-                    };
-                    return Some(FileTransferPacket::Ack {
-                        file_id: decode_text_field(&fields[1]),
-                        next_offset,
-                    });
-                }
-                _ => {}
             }
         }
-        // Check 2-field chunk packet: ["|||15<file_id>|||<offset>|||" or "15|||<file_id>|||<offset>|||", chunk_bytes]
         if fields.len() >= 2
             && (fields[0].starts_with(b"|||15") || fields[0].starts_with(b"15|||"))
         {
@@ -303,22 +317,81 @@ pub fn decode_file_transfer_packet(payload: &[u8]) -> Option<FileTransferPacket>
         }
         if fields.len() == 1 {
             let s = decode_text_field(&fields[0]);
-            if s.starts_with("|||") {
-                return parse_legacy_file_command(&s);
+            if let Some(pkt) = parse_legacy_file_command(&s) {
+                return Some(pkt);
             }
         }
     }
     let s = decode_text_field(payload);
-    if s.starts_with("|||") {
-        return parse_legacy_file_command(&s);
+    parse_legacy_file_command(&s)
+}
+
+fn find_nth_delimiter(haystack: &[u8], needle: &[u8], n: usize) -> Option<usize> {
+    if needle.is_empty() || n == 0 {
+        return None;
+    }
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            count += 1;
+            if count == n {
+                return Some(i);
+            }
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn decode_raw_file_chunk_stream(payload: &[u8]) -> Option<FileTransferPacket> {
+    if payload.starts_with(b"15|||") {
+        let pos2 = find_nth_delimiter(payload, b"|||", 2)?;
+        let pos3 = find_nth_delimiter(payload, b"|||", 3)?;
+        let file_id = String::from_utf8_lossy(&payload[5..pos2]).to_string();
+        let offset = String::from_utf8_lossy(&payload[pos2 + 3..pos3])
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+        let data = payload[pos3 + 3..].to_vec();
+        return Some(FileTransferPacket::Chunk {
+            file_id,
+            offset,
+            data,
+        });
+    }
+    if payload.starts_with(b"|||15") {
+        let pos3 = find_nth_delimiter(payload, b"|||", 3)?;
+        let header = String::from_utf8_lossy(&payload[..pos3]);
+        let parts = parse_command_fields(&header);
+        if parts.len() >= 2 {
+            let (file_id, offset) = if parts[0] == "15" && parts.len() >= 3 {
+                (parts[1].clone(), parts[2].parse::<u64>().unwrap_or(0))
+            } else if let Some(stripped) = parts[0].strip_prefix("15") {
+                (stripped.to_string(), parts[1].parse::<u64>().unwrap_or(0))
+            } else {
+                return None;
+            };
+            let data = payload[pos3 + 3..].to_vec();
+            return Some(FileTransferPacket::Chunk {
+                file_id,
+                offset,
+                data,
+            });
+        }
     }
     None
 }
 
 fn parse_legacy_file_command(text: &str) -> Option<FileTransferPacket> {
-    let trimmed = text.strip_prefix("|||")?;
+    let trimmed = text.strip_prefix("|||").unwrap_or(text);
     for code in ["12", "13", "14", "16", "21"] {
         if let Some(rest) = trimmed.strip_prefix(code) {
+            if !text.starts_with("|||") && !rest.starts_with("|||") {
+                continue;
+            }
             let rest = rest.strip_prefix("|||").unwrap_or(rest);
             let parts: Vec<&str> = if rest.is_empty() {
                 Vec::new()
@@ -380,8 +453,8 @@ pub struct FileTransferManager {
 impl Default for FileTransferManager {
     fn default() -> Self {
         let default_dir = std::env::var("HOME")
-            .map(|h| PathBuf::from(h).join("Downloads").join("UltraViewer"))
-            .unwrap_or_else(|_| std::env::temp_dir().join("ultraviewer-downloads"));
+            .map(|h| PathBuf::from(h).join("Downloads").join("UltraDesk"))
+            .unwrap_or_else(|_| std::env::temp_dir().join("ultradesk-downloads"));
         Self::new(default_dir)
     }
 }
@@ -419,6 +492,7 @@ impl FileTransferManager {
                 direction: TransferDirection::Send,
                 status: TransferStatus::Offered,
                 saved_path: None,
+                remote_target_id: None,
                 buffer: data,
             },
         );
@@ -454,8 +528,6 @@ impl FileTransferManager {
         encode_file_cancel(file_id, self.modern_protocol)
     }
 
-    /// Generates up to `max_chunks` outbound chunk packets for an active upload (`Send` transfer),
-    /// matching `uv_unpacked.exe` at `0x70186a` which sends 2 chunks upon accept and streams on ack.
     pub fn pop_outbound_chunks(
         &mut self,
         file_id: &str,
@@ -476,6 +548,10 @@ impl FileTransferManager {
         entry.status = TransferStatus::Transferring;
 
         let mut packets = Vec::new();
+        let target_id = entry
+            .remote_target_id
+            .clone()
+            .unwrap_or_else(|| file_id.to_string());
         for _ in 0..max_chunks.max(1) {
             let offset = entry.transferred_bytes as usize;
             if offset >= entry.buffer.len() {
@@ -484,7 +560,7 @@ impl FileTransferManager {
             }
             let end = (offset + chunk_sz).min(entry.buffer.len());
             let slice = &entry.buffer[offset..end];
-            let pkt = encode_file_chunk(file_id, offset as u64, slice, self.modern_protocol)?;
+            let pkt = encode_file_chunk(&target_id, offset as u64, slice, self.modern_protocol)?;
             packets.push(pkt);
             entry.transferred_bytes = end as u64;
             if entry.transferred_bytes >= entry.file_size {
@@ -495,7 +571,40 @@ impl FileTransferManager {
         Ok(packets)
     }
 
-    /// Processes an inbound file transfer packet and returns any automatic reply packets to send.
+    fn resolve_transfer_key(&self, id_or_remote: &str) -> Option<String> {
+        if self.transfers.contains_key(id_or_remote) {
+            return Some(id_or_remote.to_string());
+        }
+        self.transfers
+            .values()
+            .find(|e| e.remote_target_id.as_deref() == Some(id_or_remote))
+            .map(|e| e.file_id.clone())
+    }
+
+    fn extract_accept_remote_target(payload: &[u8]) -> Option<String> {
+        if let Ok(fields) = decode_byte_array_fields(payload) {
+            if fields.len() >= 3 {
+                let s = decode_text_field(&fields[2]).trim().to_string();
+                if !s.is_empty() && s.parse::<u64>().is_err() && fields[2].len() > 4 {
+                    return Some(s);
+                }
+            }
+        }
+        let s = decode_text_field(payload);
+        let trimmed = s.strip_prefix("|||").unwrap_or(&s);
+        if let Some(rest) = trimmed.strip_prefix("14") {
+            let rest = rest.strip_prefix("|||").unwrap_or(rest);
+            let parts: Vec<&str> = rest.split("|||").collect();
+            if parts.len() >= 2 {
+                let dst = parts[1].trim();
+                if !dst.is_empty() && dst.parse::<u64>().is_err() {
+                    return Some(dst.to_string());
+                }
+            }
+        }
+        None
+    }
+
     pub fn handle_packet(&mut self, payload: &[u8]) -> Result<Option<(FileTransferPacket, Vec<Vec<u8>>)>, String> {
         let pkt = match decode_file_transfer_packet(payload) {
             Some(p) => p,
@@ -528,6 +637,7 @@ impl FileTransferManager {
                         direction: TransferDirection::Receive,
                         status,
                         saved_path: None,
+                        remote_target_id: None,
                         buffer: Vec::with_capacity((*file_size as usize).min(16 * 1024 * 1024)),
                     },
                 );
@@ -536,8 +646,13 @@ impl FileTransferManager {
                 file_id,
                 resume_offset,
             } => {
-                if self.transfers.contains_key(file_id) {
-                    let chunks = self.pop_outbound_chunks(file_id, Some(*resume_offset), 2)?;
+                if let Some(key) = self.resolve_transfer_key(file_id) {
+                    if let Some(remote_target) = Self::extract_accept_remote_target(payload) {
+                        if let Some(entry) = self.transfers.get_mut(&key) {
+                            entry.remote_target_id = Some(remote_target);
+                        }
+                    }
+                    let chunks = self.pop_outbound_chunks(&key, Some(*resume_offset), 2)?;
                     replies.extend(chunks);
                 }
             }
@@ -545,13 +660,13 @@ impl FileTransferManager {
                 file_id,
                 next_offset,
             } => {
-                if self.transfers.contains_key(file_id) {
+                if let Some(key) = self.resolve_transfer_key(file_id) {
                     let start = if *next_offset > 0 {
                         Some(*next_offset)
                     } else {
                         None
                     };
-                    let chunks = self.pop_outbound_chunks(file_id, start, 1)?;
+                    let chunks = self.pop_outbound_chunks(&key, start, 1)?;
                     replies.extend(chunks);
                 }
             }
@@ -560,35 +675,39 @@ impl FileTransferManager {
                 offset,
                 data,
             } => {
-                if let Some(entry) = self.transfers.get_mut(file_id) {
-                    let off = *offset as usize;
-                    let needed = off + data.len();
-                    if entry.buffer.len() < needed {
-                        entry.buffer.resize(needed, 0);
-                    }
-                    entry.buffer[off..needed].copy_from_slice(data);
-                    entry.transferred_bytes = entry.buffer.len() as u64;
-                    entry.status = TransferStatus::Transferring;
+                if let Some(key) = self.resolve_transfer_key(file_id) {
+                    if let Some(entry) = self.transfers.get_mut(&key) {
+                        let off = *offset as usize;
+                        let needed = off + data.len();
+                        if entry.buffer.len() < needed {
+                            entry.buffer.resize(needed, 0);
+                        }
+                        entry.buffer[off..needed].copy_from_slice(data);
+                        entry.transferred_bytes = entry.buffer.len() as u64;
+                        entry.status = TransferStatus::Transferring;
 
-                    replies.push(encode_file_ack(
-                        file_id,
-                        entry.transferred_bytes,
-                        false,
-                    )?);
+                        replies.push(encode_file_ack(
+                            &key,
+                            entry.transferred_bytes,
+                            false,
+                        )?);
 
-                    if entry.transferred_bytes >= entry.file_size {
-                        entry.status = TransferStatus::Completed;
-                        let _ = fs::create_dir_all(&self.download_dir);
-                        let target = self.download_dir.join(&entry.file_name);
-                        if fs::write(&target, &entry.buffer).is_ok() {
-                            entry.saved_path = Some(target.to_string_lossy().to_string());
+                        if entry.transferred_bytes >= entry.file_size {
+                            entry.status = TransferStatus::Completed;
+                            let _ = fs::create_dir_all(&self.download_dir);
+                            let target = self.download_dir.join(&entry.file_name);
+                            if fs::write(&target, &entry.buffer).is_ok() {
+                                entry.saved_path = Some(target.to_string_lossy().to_string());
+                            }
                         }
                     }
                 }
             }
             FileTransferPacket::Cancel { file_id } => {
-                if let Some(entry) = self.transfers.get_mut(file_id) {
-                    entry.status = TransferStatus::Cancelled;
+                if let Some(key) = self.resolve_transfer_key(file_id) {
+                    if let Some(entry) = self.transfers.get_mut(&key) {
+                        entry.status = TransferStatus::Cancelled;
+                    }
                 }
             }
         }

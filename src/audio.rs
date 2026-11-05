@@ -383,7 +383,7 @@ impl G722CodecState {
 }
 
 pub fn encode_sound_toggle_command(enable: bool) -> Vec<u8> {
-    let text = if enable { "|||31|||" } else { "|||32|||" };
+    let text = if enable { "31|||" } else { "32|||" };
     encode_senddata_string(text, false)
 }
 
