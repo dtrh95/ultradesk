@@ -130,12 +130,12 @@ pub struct DisplayLayout {
 impl DisplayLayout {
     pub fn parse_from_login(fields: &[Vec<u8>]) -> Option<Self> {
         let (width, height) = desktop_size_from_login(fields).ok()?;
-        let virtual_left = if fields.len() > 9 && fields[9].len() == 4 {
+        let mut virtual_left = if fields.len() > 9 && fields[9].len() == 4 {
             i32::from_le_bytes([fields[9][0], fields[9][1], fields[9][2], fields[9][3]])
         } else {
             0
         };
-        let virtual_top = if fields.len() > 10 && fields[10].len() == 4 {
+        let mut virtual_top = if fields.len() > 10 && fields[10].len() == 4 {
             i32::from_le_bytes([fields[10][0], fields[10][1], fields[10][2], fields[10][3]])
         } else {
             0
@@ -169,6 +169,10 @@ impl DisplayLayout {
                 }
             }
         }
+        for m in &monitors {
+            virtual_left = virtual_left.min(m.left);
+            virtual_top = virtual_top.min(m.top);
+        }
         if monitors.is_empty() {
             monitors.push(MonitorRect {
                 left: virtual_left,
@@ -185,13 +189,99 @@ impl DisplayLayout {
             monitors,
         })
     }
+
+    pub fn selected_indices(&self, selection: &MonitorSelection) -> Vec<usize> {
+        let total = self.monitors.len();
+        if total == 0 {
+            return Vec::new();
+        }
+        match selection {
+            MonitorSelection::All => (0..total).collect(),
+            MonitorSelection::Index(idx) => {
+                if *idx < total {
+                    vec![*idx]
+                } else {
+                    (0..total).collect()
+                }
+            }
+            MonitorSelection::Subset(list) => {
+                let mut valid: Vec<usize> =
+                    list.iter().copied().filter(|&i| i < total).collect();
+                valid.sort_unstable();
+                valid.dedup();
+                if valid.is_empty() {
+                    (0..total).collect()
+                } else {
+                    valid
+                }
+            }
+        }
+    }
+
+    pub fn active_bounds(&self, selection: &MonitorSelection) -> MonitorRect {
+        let indices = self.selected_indices(selection);
+        let full = MonitorRect {
+            left: self.virtual_left,
+            top: self.virtual_top,
+            right: self.virtual_left + self.width as i32,
+            bottom: self.virtual_top + self.height as i32,
+        };
+        if indices.is_empty() || indices.len() >= self.monitors.len() {
+            return full;
+        }
+        let mut left = i32::MAX;
+        let mut top = i32::MAX;
+        let mut right = i32::MIN;
+        let mut bottom = i32::MIN;
+        for idx in indices {
+            if let Some(m) = self.monitors.get(idx) {
+                left = left.min(m.left);
+                top = top.min(m.top);
+                right = right.max(m.right);
+                bottom = bottom.max(m.bottom);
+            }
+        }
+        if right > left && bottom > top {
+            MonitorRect {
+                left,
+                top,
+                right,
+                bottom,
+            }
+        } else {
+            full
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum MonitorSelection {
     #[default]
     All,
     Index(usize),
+    Subset(Vec<usize>),
+}
+
+impl MonitorSelection {
+    pub fn from_indices(indices: Option<&[usize]>, total: usize) -> Self {
+        let Some(raw) = indices else {
+            return Self::All;
+        };
+        let mut valid: Vec<usize> = raw
+            .iter()
+            .copied()
+            .filter(|&i| total == 0 || i < total)
+            .collect();
+        valid.sort_unstable();
+        valid.dedup();
+        if valid.is_empty() || (total > 0 && valid.len() >= total) {
+            Self::All
+        } else if valid.len() == 1 {
+            Self::Index(valid[0])
+        } else {
+            Self::Subset(valid)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -653,24 +743,44 @@ impl RGB555Screen {
     }
 
     pub fn active_view_buffer(&self) -> Cow<'_, RgbBuffer> {
-        match self.monitor_selection {
-            MonitorSelection::All => Cow::Borrowed(&self.canvas),
-            MonitorSelection::Index(idx) => {
-                if let Some(m) = self.layout.monitors.get(idx) {
-                    let crop_x = (m.left - self.layout.virtual_left).max(0) as u32;
-                    let crop_y = (m.top - self.layout.virtual_top).max(0) as u32;
-                    let crop_w = m.width().min(self.canvas.width.saturating_sub(crop_x));
-                    let crop_h = m.height().min(self.canvas.height.saturating_sub(crop_y));
-                    if crop_w > 0 && crop_h > 0 {
-                        Cow::Owned(self.canvas.crop(crop_x, crop_y, crop_w, crop_h))
-                    } else {
-                        Cow::Borrowed(&self.canvas)
-                    }
-                } else {
-                    Cow::Borrowed(&self.canvas)
+        let indices = self.layout.selected_indices(&self.monitor_selection);
+        if indices.is_empty() || indices.len() >= self.layout.monitors.len() {
+            return Cow::Borrowed(&self.canvas);
+        }
+        if indices.len() == 1 {
+            if let Some(m) = self.layout.monitors.get(indices[0]) {
+                let crop_x = (m.left - self.layout.virtual_left).max(0) as u32;
+                let crop_y = (m.top - self.layout.virtual_top).max(0) as u32;
+                let crop_w = m.width().min(self.canvas.width.saturating_sub(crop_x));
+                let crop_h = m.height().min(self.canvas.height.saturating_sub(crop_y));
+                if crop_w > 0 && crop_h > 0 {
+                    return Cow::Owned(self.canvas.crop(crop_x, crop_y, crop_w, crop_h));
+                }
+            }
+            return Cow::Borrowed(&self.canvas);
+        }
+        let bounds = self.layout.active_bounds(&self.monitor_selection);
+        let bw = bounds.width();
+        let bh = bounds.height();
+        if bw == 0 || bh == 0 {
+            return Cow::Borrowed(&self.canvas);
+        }
+        let mut out = RgbBuffer::new(bw, bh);
+        for idx in indices {
+            if let Some(m) = self.layout.monitors.get(idx) {
+                let src_x = (m.left - self.layout.virtual_left).max(0) as u32;
+                let src_y = (m.top - self.layout.virtual_top).max(0) as u32;
+                let cw = m.width().min(self.canvas.width.saturating_sub(src_x));
+                let ch = m.height().min(self.canvas.height.saturating_sub(src_y));
+                if cw > 0 && ch > 0 {
+                    let tile = self.canvas.crop(src_x, src_y, cw, ch);
+                    let dst_x = (m.left - bounds.left).max(0) as u32;
+                    let dst_y = (m.top - bounds.top).max(0) as u32;
+                    out.paste(&tile, dst_x, dst_y);
                 }
             }
         }
+        Cow::Owned(out)
     }
 
     pub fn get_or_encode_jpeg(&mut self, quality: u8) -> Result<(u64, Vec<u8>), String> {
@@ -1087,6 +1197,49 @@ mod tests {
         assert_eq!(v_jpeg1, 2);
         let (v_jpeg2, _) = screen.get_or_encode_jpeg(75).unwrap();
         assert_eq!(v_jpeg2, 2);
+    }
+
+    #[test]
+    fn test_monitor_subset_selection_and_active_bounds() {
+        let bounds_str = b"0:0:1920:1080|1920:0:3840:1080|3840:0:5760:1200|\0";
+        let fields = vec![
+            vec![0u8],
+            5760i32.to_le_bytes().to_vec(),
+            1200i32.to_le_bytes().to_vec(),
+            Vec::new(),
+            Vec::new(),
+            vec![0u8],
+            b"6.6.133".to_vec(),
+            vec![3u8],
+            bounds_str.to_vec(),
+            0i32.to_le_bytes().to_vec(),
+            0i32.to_le_bytes().to_vec(),
+        ];
+        let layout = DisplayLayout::parse_from_login(&fields).unwrap();
+        assert_eq!(layout.monitors.len(), 3);
+        let sel = MonitorSelection::from_indices(Some(&[2, 1, 1]), 3);
+        assert_eq!(sel, MonitorSelection::Subset(vec![1, 2]));
+        let active = layout.active_bounds(&sel);
+        assert_eq!(
+            active,
+            MonitorRect {
+                left: 1920,
+                top: 0,
+                right: 5760,
+                bottom: 1200,
+            }
+        );
+
+        let mut screen = RGB555Screen::new((5760, 1200), ZstdDictionaryDecoder::default(), 100, 32);
+        screen.layout = layout;
+        screen.set_monitor_selection(sel);
+        let view = screen.active_view_buffer();
+        assert_eq!(view.width, 3840);
+        assert_eq!(view.height, 1200);
+        assert_eq!(
+            MonitorSelection::from_indices(Some(&[0, 1, 2]), 3),
+            MonitorSelection::All
+        );
     }
 
     #[test]

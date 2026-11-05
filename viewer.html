@@ -181,6 +181,69 @@ canvas#screen {
 .pill-select:focus {
   border-color: var(--primary);
 }
+.monitor-quick-bar {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 2px;
+}
+.mon-chip {
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mon-chip:hover {
+  color: var(--text);
+  background: var(--surface-variant);
+}
+.mon-chip.active {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.mon-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mon-card {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  padding: 5px 9px;
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mon-card:hover {
+  border-color: var(--primary);
+  color: var(--text);
+}
+.mon-card.active {
+  background: rgba(184, 187, 38, 0.16);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.mon-card input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  margin: 0;
+}
 .lang-switch {
   display: inline-flex;
   background: var(--bg);
@@ -542,6 +605,7 @@ a.dl-link:hover {
     </button>
     <span id="status" class="status-badge">Chưa kết nối</span>
     <div class="pill-sep"></div>
+    <div id="monitorQuickBar" class="monitor-quick-bar"></div>
     <select id="monitorSelect" class="pill-select" data-i18n-title="monitor_title" title="Chọn màn hình đối tác">
       <option value="">Tất cả màn hình</option>
     </select>
@@ -611,6 +675,10 @@ a.dl-link:hover {
         <input type="password" id="masterPassInput" class="mono" data-i18n-placeholder="master_pass_placeholder" placeholder="Mật khẩu riêng (8-64 ký tự)...">
         <button id="btnSetMasterPass" class="secondary" type="button" data-i18n="save">Lưu</button>
       </div>
+      <div class="col">
+        <label class="field-label" data-i18n="host_monitors_label">Màn hình chia sẻ</label>
+        <div id="hostMonitorsBox" class="mon-grid"></div>
+      </div>
       <div id="hostStatusInfo" class="muted">Backend: Headless</div>
     </div>
 
@@ -644,6 +712,10 @@ a.dl-link:hover {
         <select id="savedRemotes" data-i18n-title="saved_remotes_title" title="Chọn nhanh máy đối tác đã lưu">
           <option value="">-- Lịch sử đối tác --</option>
         </select>
+      </div>
+      <div class="col">
+        <label class="field-label" data-i18n="remote_monitors_label">Màn hình đối tác (F9 đổi nhanh)</label>
+        <div id="remoteMonitorsBox" class="mon-grid"></div>
       </div>
     </div>
   </div>
@@ -727,9 +799,15 @@ const I18N={
     status_disconnected:'Chưa kết nối',
     status_initiating:'Đang khởi tạo kết nối...',
     status_lost:'Mất kết nối server',
-    monitor_title:'Chọn màn hình đối tác',
+    monitor_title:'Chọn màn hình đối tác (Shift/Ctrl để chọn nhiều màn)',
     all_monitors:'Tất cả màn hình',
+    all_monitors_short:'Tất cả',
     monitor_item:'Màn hình {idx} ({w}x{h})',
+    monitor_short:'M{idx}',
+    monitor_subset:'Màn hình ({list})',
+    host_monitors_label:'Màn hình chia sẻ',
+    remote_monitors_label:'Màn hình đối tác (F9 đổi nhanh)',
+    remote_monitors_empty:'Kết nối đối tác để chọn màn hình',
     win_key_title:'Mở Start Menu trên máy đối tác (VK_LWIN)',
     host_title:'Cho phép điều khiển',
     your_id:'ID của bạn',
@@ -803,9 +881,15 @@ const I18N={
     status_disconnected:'Disconnected',
     status_initiating:'Initiating connection...',
     status_lost:'Server connection lost',
-    monitor_title:'Select remote monitor',
+    monitor_title:'Select remote monitor (Shift/Ctrl for multi-select)',
     all_monitors:'All monitors',
+    all_monitors_short:'All',
     monitor_item:'Monitor {idx} ({w}x{h})',
+    monitor_short:'M{idx}',
+    monitor_subset:'Monitors ({list})',
+    host_monitors_label:'Shared Monitors',
+    remote_monitors_label:'Remote Monitors (F9 quick cycle)',
+    remote_monitors_empty:'Connect to a partner to select monitors',
     win_key_title:'Open Start Menu on remote peer (VK_LWIN)',
     host_title:'Allow Remote Control',
     your_id:'Your ID',
@@ -959,7 +1043,7 @@ function positionToolsPopover(){
 }
 
 const screen=document.querySelector('#screen'),ctx=screen.getContext('2d'),held=new Set(),buttons=new Set();
-let busy=false,lastMove=0,lastPtX=-1,lastPtY=-1,lastFrameVersion=0,frameToggle=false,audioPlaying=true,lastAudioSeq=0,audioCtx=null,credsInitialized=false,savedRemotesCache=[],monitorsSig='',cursorImg=null,lastCursorHash=null,lastState=null,lastApprovalAutoOpened=false;
+let busy=false,lastMove=0,lastPtX=-1,lastPtY=-1,lastFrameVersion=0,frameToggle=false,audioPlaying=true,lastAudioSeq=0,audioCtx=null,credsInitialized=false,savedRemotesCache=[],monitorsSig='',hostMonitorsSig='',cursorImg=null,lastCursorHash=null,lastState=null,lastApprovalAutoOpened=false;
 
 function drawIdleCanvas(){
   if(lastState&&lastState.frames>0)return;
@@ -1044,6 +1128,7 @@ function setLanguage(lang){
     el.setAttribute('title',t(el.getAttribute('data-i18n-title')));
   });
   monitorsSig='';
+  hostMonitorsSig='';
   updateSavedRemotesDropdown(savedRemotesCache,true);
   renderStatusBadge(lastState);
   if(lastState)renderSidebar(lastState);
@@ -1258,6 +1343,11 @@ function onKeyDown(e){
     return;
   }
   if(isEditable(e.target))return;
+  if(e.key==='F9'&&!e.ctrlKey&&!e.altKey&&!e.metaKey){
+    e.preventDefault();
+    cycleRemoteMonitor();
+    return;
+  }
   const vk=keycode(e);
   if(vk===null)return;
   e.preventDefault();
@@ -1342,9 +1432,126 @@ document.querySelector('#btnSendChat').onclick=async()=>{
 document.querySelector('#chatInput').onkeydown=e=>{
   if(e.key==='Enter'){e.preventDefault();document.querySelector('#btnSendChat').click();}
 };
+function normalizeSelectedIndices(monitors,selectedMonitor,selectedMonitors){
+  const total=Array.isArray(monitors)?monitors.length:0;
+  if(total===0)return[];
+  if(Array.isArray(selectedMonitors)&&selectedMonitors.length>0){
+    const valid=selectedMonitors.map(Number).filter(i=>Number.isInteger(i)&&i>=0&&i<total);
+    if(valid.length>0)return Array.from(new Set(valid)).sort((a,b)=>a-b);
+  }
+  if(selectedMonitor!==null&&selectedMonitor!==undefined&&Number.isInteger(Number(selectedMonitor))){
+    const idx=Number(selectedMonitor);
+    if(idx>=0&&idx<total)return[idx];
+  }
+  return Array.from({length:total},(_,i)=>i);
+}
+function selectRemoteMonitors(indices){
+  const payload=Array.isArray(indices)?{indices}:{index:null,indices:null};
+  post('/monitor',payload).catch(()=>{});
+}
+function selectHostMonitors(indices){
+  const payload=Array.isArray(indices)?{indices}:{index:null,indices:null};
+  post('/host/monitor',payload).catch(()=>{});
+}
+function toggleMonitorSelection(total,currentSelected,idx,forceToggle){
+  if(total<=1)return null;
+  const allSelected=currentSelected.length===0||currentSelected.length>=total;
+  if(!forceToggle){
+    if(!allSelected&&currentSelected.length===1&&currentSelected[0]===idx){
+      return null;
+    }
+    return[idx];
+  }
+  let next=allSelected?[idx]:currentSelected.slice();
+  if(!allSelected){
+    if(next.includes(idx)){
+      next=next.filter(x=>x!==idx);
+    }else{
+      next.push(idx);
+    }
+  }
+  next=Array.from(new Set(next)).sort((a,b)=>a-b);
+  if(next.length===0||next.length>=total)return null;
+  return next;
+}
+function cycleRemoteMonitor(){
+  if(!lastState||!Array.isArray(lastState.monitors)||lastState.monitors.length<=1)return;
+  const total=lastState.monitors.length;
+  const sel=normalizeSelectedIndices(lastState.monitors,lastState.selected_monitor,lastState.selected_monitors);
+  if(sel.length>=total){
+    selectRemoteMonitors([0]);
+  }else if(sel.length===1&&sel[0]+1<total){
+    selectRemoteMonitors([sel[0]+1]);
+  }else{
+    selectRemoteMonitors(null);
+  }
+}
+function renderMonitorGrid(containerSelector,monitors,selectedMonitor,selectedMonitors,isHost){
+  const box=document.querySelector(containerSelector);
+  if(!box)return;
+  if(!Array.isArray(monitors)||monitors.length===0){
+    box.innerHTML=`<span class="muted">${t('remote_monitors_empty')}</span>`;
+    return;
+  }
+  const total=monitors.length;
+  const sel=normalizeSelectedIndices(monitors,selectedMonitor,selectedMonitors);
+  const allActive=sel.length>=total;
+  const fnName=isHost?'onHostMonClick':'onRemoteMonClick';
+  const chkName=isHost?'onHostMonCheck':'onRemoteMonCheck';
+  const allBtn=`<button type="button" class="mon-card ${allActive?'active':''}" onclick="${fnName}(-1,event)"><span>${t('all_monitors_short')} (${total})</span></button>`;
+  const items=monitors.map((m,i)=>{
+    const w=m[2]-m[0],h=m[3]-m[1];
+    const checked=sel.includes(i);
+    const active=!allActive&&checked;
+    return `<div class="mon-card ${active?'active':''}" onclick="${fnName}(${i},event)">
+      <input type="checkbox" ${checked?'checked':''} onclick="${chkName}(${i},event)" title="${t('monitor_title')}">
+      <span>${t('monitor_item',{idx:i+1,w,h})}</span>
+    </div>`;
+  }).join('');
+  box.innerHTML=allBtn+items;
+}
+window.onRemoteMonClick=(idx,e)=>{
+  if(e)e.stopPropagation();
+  if(!lastState||!Array.isArray(lastState.monitors))return;
+  if(idx<0){selectRemoteMonitors(null);return;}
+  const sel=normalizeSelectedIndices(lastState.monitors,lastState.selected_monitor,lastState.selected_monitors);
+  const next=toggleMonitorSelection(lastState.monitors.length,sel,idx,!!(e&&(e.shiftKey||e.ctrlKey||e.metaKey)));
+  selectRemoteMonitors(next);
+};
+window.onRemoteMonCheck=(idx,e)=>{
+  if(e)e.stopPropagation();
+  if(!lastState||!Array.isArray(lastState.monitors))return;
+  const sel=normalizeSelectedIndices(lastState.monitors,lastState.selected_monitor,lastState.selected_monitors);
+  const next=toggleMonitorSelection(lastState.monitors.length,sel,idx,true);
+  selectRemoteMonitors(next);
+};
+window.onHostMonClick=(idx,e)=>{
+  if(e)e.stopPropagation();
+  const hs=lastState&&lastState.host_status;
+  if(!hs||!Array.isArray(hs.monitors))return;
+  if(idx<0){selectHostMonitors(null);return;}
+  const sel=normalizeSelectedIndices(hs.monitors,hs.selected_monitor,hs.selected_monitors);
+  const next=toggleMonitorSelection(hs.monitors.length,sel,idx,!!(e&&(e.shiftKey||e.ctrlKey||e.metaKey)));
+  selectHostMonitors(next);
+};
+window.onHostMonCheck=(idx,e)=>{
+  if(e)e.stopPropagation();
+  const hs=lastState&&lastState.host_status;
+  if(!hs||!Array.isArray(hs.monitors))return;
+  const sel=normalizeSelectedIndices(hs.monitors,hs.selected_monitor,hs.selected_monitors);
+  const next=toggleMonitorSelection(hs.monitors.length,sel,idx,true);
+  selectHostMonitors(next);
+};
 document.querySelector('#monitorSelect').onchange=e=>{
   const val=e.target.value;
-  post('/monitor',{index:val===''?null:Number(val)}).catch(()=>{});
+  if(val===''){
+    selectRemoteMonitors(null);
+  }else if(val.startsWith('subset:')){
+    const indices=val.slice(7).split(',').map(Number).filter(Number.isInteger);
+    selectRemoteMonitors(indices);
+  }else{
+    selectRemoteMonitors([Number(val)]);
+  }
 };
 document.querySelector('#btnSendUnicode').onclick=async()=>{
   const el=document.querySelector('#unicodeTextInput');
@@ -1416,14 +1623,40 @@ function renderSidebar(s){
       appBox.style.display='none';
       lastApprovalAutoOpened=false;
     }
+    const hmSig=JSON.stringify(hs.monitors||[])+':'+String(hs.selected_monitor)+':'+JSON.stringify(hs.selected_monitors||[])+':'+uiState.lang;
+    if(hmSig!==hostMonitorsSig){
+      hostMonitorsSig=hmSig;
+      renderMonitorGrid('#hostMonitorsBox',hs.monitors||[],hs.selected_monitor,hs.selected_monitors,true);
+    }
   }
   if(Array.isArray(s.monitors)){
-    const mSig=JSON.stringify(s.monitors)+':'+String(s.selected_monitor)+':'+uiState.lang;
+    const mSig=JSON.stringify(s.monitors)+':'+String(s.selected_monitor)+':'+JSON.stringify(s.selected_monitors||[])+':'+uiState.lang;
     if(mSig!==monitorsSig){
       monitorsSig=mSig;
+      const total=s.monitors.length;
+      const sel=normalizeSelectedIndices(s.monitors,s.selected_monitor,s.selected_monitors);
+      const allActive=total===0||sel.length>=total;
+      const isSubset=!allActive&&sel.length>1;
       const mSel=document.querySelector('#monitorSelect');
-      mSel.innerHTML='<option value="" '+(s.selected_monitor===null||s.selected_monitor===undefined?'selected':'')+'>'+t('all_monitors')+' ('+s.monitors.length+')</option>'+
-        s.monitors.map((m,i)=>`<option value="${i}" ${s.selected_monitor===i?'selected':''}>${t('monitor_item',{idx:i+1,w:m[2]-m[0],h:m[3]-m[1]})}</option>`).join('');
+      let opts='<option value="" '+(allActive?'selected':'')+'>'+t('all_monitors')+' ('+total+')</option>';
+      opts+=s.monitors.map((m,i)=>`<option value="${i}" ${!allActive&&sel.length===1&&sel[0]===i?'selected':''}>${t('monitor_item',{idx:i+1,w:m[2]-m[0],h:m[3]-m[1]})}</option>`).join('');
+      if(isSubset){
+        const listStr=sel.map(i=>t('monitor_short',{idx:i+1})).join('+');
+        opts+=`<option value="subset:${sel.join(',')}" selected>${t('monitor_subset',{list:listStr})}</option>`;
+      }
+      mSel.innerHTML=opts;
+      const qBar=document.querySelector('#monitorQuickBar');
+      if(qBar){
+        if(total>1){
+          qBar.style.display='inline-flex';
+          qBar.innerHTML=`<button type="button" class="mon-chip ${allActive?'active':''}" onclick="onRemoteMonClick(-1,event)" title="${t('all_monitors')}">${t('all_monitors_short')}</button>`+
+            s.monitors.map((m,i)=>`<button type="button" class="mon-chip ${!allActive&&sel.includes(i)?'active':''}" onclick="onRemoteMonClick(${i},event)" title="${t('monitor_item',{idx:i+1,w:m[2]-m[0],h:m[3]-m[1]})} (Shift/Ctrl)">${t('monitor_short',{idx:i+1})}</button>`).join('');
+        }else{
+          qBar.style.display='none';
+          qBar.innerHTML='';
+        }
+      }
+      renderMonitorGrid('#remoteMonitorsBox',s.monitors,s.selected_monitor,s.selected_monitors,false);
     }
   }
   if(s.cursor_png_base64&&s.cursor_hash!==lastCursorHash){

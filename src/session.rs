@@ -654,6 +654,8 @@ pub struct SessionState {
     #[serde(default)]
     pub selected_monitor: Option<usize>,
     #[serde(default)]
+    pub selected_monitors: Vec<usize>,
+    #[serde(default)]
     pub cursor_x: i16,
     #[serde(default)]
     pub cursor_y: i16,
@@ -714,6 +716,7 @@ impl Default for SessionState {
             frame_version: 1,
             monitors: vec![(0, 0, 1024, 768)],
             selected_monitor: None,
+            selected_monitors: vec![0],
             cursor_x: 0,
             cursor_y: 0,
             cursor_hot_x: 0,
@@ -885,6 +888,35 @@ impl ControlSession {
         guard.state.clone()
     }
 
+    pub fn select_monitors(&self, indices: Option<&[usize]>) -> SessionState {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let total = guard.screen.layout.monitors.len();
+        let sel = MonitorSelection::from_indices(indices, total);
+        guard.screen.set_monitor_selection(sel);
+        Self::sync_state_fields(&mut guard);
+        guard.state.clone()
+    }
+
+    pub fn host_select_monitors(
+        &self,
+        index: Option<usize>,
+        indices: Option<&[usize]>,
+    ) -> HostStatus {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let total = guard.host_session.status().monitors.len();
+        let sel = if indices.is_some() {
+            MonitorSelection::from_indices(indices, total)
+        } else {
+            match index {
+                None => MonitorSelection::All,
+                Some(idx) => MonitorSelection::Index(idx),
+            }
+        };
+        let st = guard.host_session.select_monitors(sel);
+        Self::sync_state_fields(&mut guard);
+        st
+    }
+
     pub fn send_text(&self, text: &str, caps_lock: bool) -> Result<usize, String> {
         let packets = encode_unicode_text_packets(text, caps_lock);
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -992,13 +1024,26 @@ impl ControlSession {
             .iter()
             .map(|m| (m.left, m.top, m.right, m.bottom))
             .collect();
-        inner.state.selected_monitor = match inner.screen.monitor_selection {
-            MonitorSelection::All => None,
-            MonitorSelection::Index(i) => Some(i),
+        let total_mons = inner.screen.layout.monitors.len();
+        let selected_indices = inner
+            .screen
+            .layout
+            .selected_indices(&inner.screen.monitor_selection);
+        inner.state.selected_monitors = selected_indices.clone();
+        inner.state.selected_monitor = match &inner.screen.monitor_selection {
+            MonitorSelection::Index(i) if *i < total_mons => Some(*i),
+            _ if selected_indices.len() == 1 && total_mons > 1 => Some(selected_indices[0]),
+            _ => None,
         };
+        let bounds = inner
+            .screen
+            .layout
+            .active_bounds(&inner.screen.monitor_selection);
         let (cx, cy) = inner.cursor.position();
-        inner.state.cursor_x = cx;
-        inner.state.cursor_y = cy;
+        inner.state.cursor_x =
+            (cx as i32 - bounds.left).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        inner.state.cursor_y =
+            (cy as i32 - bounds.top).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         inner.state.cursor_hash = inner.cursor.active_hash();
         if let Some(cur) = inner.cursor.current_cursor() {
             inner.state.cursor_hot_x = cur.hot_x;
@@ -1074,9 +1119,11 @@ impl ControlSession {
                         } else {
                             32
                         };
+                        let prev_version = guard.screen.version;
                         let decoder =
                             ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
                         let mut new_screen = RGB555Screen::new((w, h), decoder, 1000, effective_bs);
+                        new_screen.version = prev_version.wrapping_add(1);
                         if let Some(layout) = DisplayLayout::parse_from_login(&fields) {
                             new_screen.layout = layout;
                         }
@@ -1192,8 +1239,16 @@ impl ControlSession {
         Self::sync_state_fields(&mut guard);
     }
 
-    pub fn send_input(&self, event: InputEvent) -> Result<Vec<u8>, String> {
+    pub fn send_input(&self, mut event: InputEvent) -> Result<Vec<u8>, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if event.event_type == "move" {
+            let bounds = guard
+                .screen
+                .layout
+                .active_bounds(&guard.screen.monitor_selection);
+            event.x = event.x.saturating_add(bounds.left);
+            event.y = event.y.saturating_add(bounds.top);
+        }
         let payload = event.to_wire()?;
         Self::dispatch_payload(&mut guard, &payload, false, Some(event))?;
         Ok(payload)
@@ -1649,8 +1704,12 @@ impl ControlSession {
     }
 
     pub fn move_pointer(&self, x: i32, y: i32) -> Result<Vec<u8>, String> {
-        let payload = mouse_move(x, y)?;
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let bounds = guard
+            .screen
+            .layout
+            .active_bounds(&guard.screen.monitor_selection);
+        let payload = mouse_move(x.saturating_add(bounds.left), y.saturating_add(bounds.top))?;
         Self::dispatch_payload(&mut guard, &payload, false, None)?;
         Ok(payload)
     }
