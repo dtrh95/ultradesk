@@ -36,44 +36,37 @@ impl Default for ClipboardState {
     }
 }
 
-/// Encodes an outbound UltraViewer clipboard packet for the live Windows partner (`VServer::ManipulatePacket` at `0x6afd24`):
-/// - `VServer` splits `packet_str` by `"|||"` and checks `parts[0] == "5"`, reading `parts[1]` as a Unicode `BSTR` (`unicode_bytes = true`).
 pub fn encode_clipboard_for_remote(text: &str) -> Result<(Vec<u8>, bool), String> {
     let cmd = format!("5|||{}", text);
     Ok((encode_senddata_string(&cmd, true), true))
 }
 
-/// Encodes an outbound UltraViewer clipboard packet using the 2-field byte-array wire format
-/// (`["|||33|||<client_id>|||", utf16le_text]`) from `uv_unpacked.exe` at `0x6c9be8`.
 pub fn encode_clipboard_packet(client_id: i32, text: &str) -> Result<Vec<u8>, String> {
     let header = encode_senddata_string(&format!("|||33|||{}|||", client_id), false);
     let body = encode_senddata_string(text, true);
     encode_byte_array_fields(&[&header, &body])
 }
 
-/// Encodes an outbound UltraViewer clipboard packet using the 3-field `Form1.ManipulatePacket`
-/// wire format (`[[33], client_id_i32_le, utf16le_text]`) from `uv_unpacked.exe` at `0x7047ce`.
 pub fn encode_clipboard_modern_packet(client_id: i32, text: &str) -> Result<Vec<u8>, String> {
     let id_bytes = client_id.to_le_bytes();
     let body = encode_senddata_string(text, true);
     encode_byte_array_fields(&[&[PACKET_CLIPBOARD_SYNC], &id_bytes, &body])
 }
 
-/// Decodes an inbound UltraViewer clipboard packet from any of the wire representations:
-/// 1. Kind 5 short clipboard (`[[5], utf16le_text]`) or UTF-16LE/ASCII `"5|||<text>"` / `"|||5<text>"`
-/// 2. Kind 33 3-field byte-array (`[[33], uncompressed_len_or_client_id_i32_le, zstd_or_raw_utf16le_text]`)
-/// 3. Kind 33 2-field byte-array (`[b"|||33|||<len_or_id>|||", zstd_or_raw_utf16le_text]` or `[b"33|||<len_or_id>|||", ...]`)
-/// 4. Direct or single-field command string (`"33|||<client_id>|||<text>"` or `"|||33|||<client_id>|||<text>"`)
 pub fn decode_clipboard_packet(payload: &[u8]) -> Option<ClipboardMessage> {
     if let Ok(fields) = decode_byte_array_fields(payload) {
-        if fields.len() >= 2 && fields[0].as_slice() == [PACKET_CLIPBOARD_SHORT] {
+        let kind_opt = match fields.first().map(|f| f.as_slice()) {
+            Some([b]) | Some([b, 0]) | Some([b, 0, 0, 0]) => Some(*b),
+            _ => None,
+        };
+        if fields.len() >= 2 && kind_opt == Some(PACKET_CLIPBOARD_SHORT) {
             let text = decode_clipboard_text_bytes(&fields[1], 0);
             return Some(ClipboardMessage {
                 client_id: 0,
                 text,
             });
         }
-        if fields.len() >= 3 && fields[0].as_slice() == [PACKET_CLIPBOARD_SYNC] {
+        if fields.len() >= 3 && kind_opt == Some(PACKET_CLIPBOARD_SYNC) {
             let meta = if fields[1].len() >= 4 {
                 i32::from_le_bytes([fields[1][0], fields[1][1], fields[1][2], fields[1][3]])
             } else {
@@ -85,7 +78,7 @@ pub fn decode_clipboard_packet(payload: &[u8]) -> Option<ClipboardMessage> {
                 text,
             });
         }
-        if fields.len() == 2 && fields[0].as_slice() == [PACKET_CLIPBOARD_SYNC] {
+        if fields.len() == 2 && kind_opt == Some(PACKET_CLIPBOARD_SYNC) {
             let text = decode_clipboard_text_bytes(&fields[1], 0);
             return Some(ClipboardMessage {
                 client_id: 0,
@@ -114,6 +107,25 @@ pub fn decode_clipboard_packet(payload: &[u8]) -> Option<ClipboardMessage> {
             let s = decode_clipboard_text_bytes(&fields[0], 0);
             if let Some(msg) = parse_legacy_clipboard_str(&s) {
                 return Some(msg);
+            }
+        }
+    }
+    if payload.starts_with(b"33|||") || payload.starts_with(b"|||33|||") {
+        let stripped = payload.strip_prefix(b"|||").unwrap_or(payload);
+        if let Some(rest) = stripped.strip_prefix(b"33|||") {
+            if let Some(pos) = rest.windows(3).position(|w| w == b"|||") {
+                if let Ok(len_str) = std::str::from_utf8(&rest[..pos]) {
+                    if let Ok(meta) = len_str.parse::<i32>() {
+                        let body = &rest[pos + 3..];
+                        if body.starts_with(b"\x28\xb5\x2f\xfd") {
+                            let text = decode_clipboard_text_bytes(body, meta.max(0) as usize);
+                            return Some(ClipboardMessage {
+                                client_id: meta,
+                                text,
+                            });
+                        }
+                    }
+                }
             }
         }
     }

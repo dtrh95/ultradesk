@@ -183,7 +183,7 @@ pub fn encode_file_cancel(file_id: &str, modern: bool) -> Result<Vec<u8>, String
 pub fn encode_chat_message(text: &str, modern: bool) -> Result<Vec<u8>, String> {
     if modern {
         let utf16 = encode_senddata_string(text, true);
-        encode_byte_array_fields(&[&[PACKET_CHAT_MESSAGE], &utf16])
+        encode_byte_array_fields(&[&[PACKET_CHAT_MESSAGE, 0], &utf16])
     } else {
         let cmd = format!("12|||{}", text);
         Ok(encode_senddata_string(&cmd, true))
@@ -237,17 +237,19 @@ pub fn decode_file_transfer_packet(payload: &[u8]) -> Option<FileTransferPacket>
     }
     if let Ok(fields) = decode_byte_array_fields(payload) {
         if !fields.is_empty() {
-            let kind_opt = if fields[0].len() == 1 {
-                Some(fields[0][0])
-            } else {
-                decode_text_field(&fields[0]).trim().parse::<u8>().ok()
+            let kind_opt = match fields[0].as_slice() {
+                [b] | [b, 0] | [b, 0, 0, 0] => Some(*b),
+                other => decode_text_field(other).trim().parse::<u8>().ok(),
             };
             if let Some(kind) = kind_opt {
                 match kind {
                     PACKET_CHAT_MESSAGE if fields.len() >= 2 => {
-                        return Some(FileTransferPacket::ChatMessage {
-                            text: decode_text_field(&fields[1]),
-                        });
+                        let text = if fields[1].len() % 2 == 0 {
+                            decode_utf16le_lossy(&fields[1])
+                        } else {
+                            decode_text_field(&fields[1])
+                        };
+                        return Some(FileTransferPacket::ChatMessage { text });
                     }
                     PACKET_FILE_OFFER if fields.len() >= 4 => {
                         return Some(FileTransferPacket::Offer {

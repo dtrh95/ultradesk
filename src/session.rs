@@ -1060,6 +1060,15 @@ impl ControlSession {
             }
             inner.state.cursor_png_base64 = cached_b64;
         }
+        let (host_chats, host_clip) = inner.host_session.drain_auxiliary_events();
+        if !host_chats.is_empty() {
+            inner.files.chat_messages.extend(host_chats);
+        }
+        if let Some(clip_text) = host_clip {
+            inner.clipboard.remote_text = clip_text.clone();
+            inner.clipboard.local_text = clip_text;
+            inner.clipboard.updates_received += 1;
+        }
         inner.state.host_status = Some(inner.host_session.status());
         inner.state.client_synthetic_mac = inner.client_profile.synthetic_mac.clone();
         inner.state.host_hardware_mac = inner.host_profile.hardware_mac.clone();
@@ -1227,6 +1236,13 @@ impl ControlSession {
         }
 
         if let Ok(Some((ft_pkt, replies))) = guard.files.handle_packet(payload) {
+            if matches!(ft_pkt, crate::file_transfer::FileTransferPacket::ChatMessage { .. }) {
+                if let Some(last) = guard.files.chat_messages.last_mut() {
+                    if !last.starts_with("Partner: ") && !last.starts_with("Me: ") {
+                        *last = format!("Partner: {}", last);
+                    }
+                }
+            }
             guard.state.last_message = format!("File/chat event: {:?}", ft_pkt);
             for reply in replies {
                 let is_utf16 = is_utf16_string_packet(&reply);
@@ -1275,6 +1291,7 @@ impl ControlSession {
         if sync_system {
             let _ = set_linux_system_clipboard(text);
         }
+        let _ = guard.host_session.send_clipboard(text);
         let (payload, unicode_bytes) = encode_clipboard_for_remote(text)?;
         Self::dispatch_payload(&mut guard, &payload, unicode_bytes, None)?;
         guard.state.last_message = format!("Sent clipboard to remote ({} chars)", text.len());
@@ -1334,6 +1351,7 @@ impl ControlSession {
         let pkt = encode_chat_message(text, modern)?;
         let is_utf16 = is_utf16_string_packet(&pkt);
         guard.files.chat_messages.push(format!("Me: {}", text));
+        let _ = guard.host_session.send_chat(text);
         Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
         guard.state.last_message = format!("Sent chat message ({} chars)", text.len());
         Self::sync_state_fields(&mut guard);

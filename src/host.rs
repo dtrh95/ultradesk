@@ -458,6 +458,22 @@ pub fn encode_host_keepalive_reply() -> Vec<u8> {
     encode_byte_array_fields(&[&[20]]).unwrap()
 }
 
+pub fn encode_host_chat(text: &str) -> Vec<u8> {
+    let utf16 = crate::protocol::encode_senddata_string(text, true);
+    encode_byte_array_fields(&[&[12, 0], &utf16]).unwrap()
+}
+
+pub fn encode_host_clipboard(text: &str) -> Vec<u8> {
+    let utf16 = crate::protocol::encode_senddata_string(text, true);
+    if text.chars().count() < 150 {
+        encode_byte_array_fields(&[&[5, 0], &utf16]).unwrap()
+    } else {
+        let zstd_bytes = zstd::bulk::compress(&utf16, 1).unwrap_or_else(|_| utf16.clone());
+        let len_bytes = (utf16.len() as i32).to_le_bytes();
+        encode_byte_array_fields(&[&[33, 0], &len_bytes, &zstd_bytes]).unwrap()
+    }
+}
+
 pub fn encode_host_frame(
     rect: (u32, u32, u32, u32),
     rgb555_top_down: &[u8],
@@ -514,6 +530,8 @@ pub enum HostAction {
     RequestCapture,
     InjectInput(Vec<u8>),
     ReleaseAllInput,
+    ChatReceived(String),
+    ClipboardReceived(String),
     SessionEnded(String),
 }
 
@@ -669,6 +687,23 @@ impl HostCore {
                 actions.push(HostAction::InjectInput(payload.to_vec()));
             }
             return actions;
+        }
+
+        if matches!(self.phase, HostPhase::Starting | HostPhase::Streaming) {
+            if tag == b"12" {
+                let stripped = payload.strip_prefix(b"|||").unwrap_or(payload);
+                if let Some(rest) = stripped.strip_prefix(b"12|||") {
+                    let text = String::from_utf8_lossy(rest).to_string();
+                    actions.push(HostAction::ChatReceived(text));
+                    return actions;
+                }
+            }
+            if tag == b"5" || tag == b"33" {
+                if let Some(clip) = crate::clipboard::decode_clipboard_packet(payload) {
+                    actions.push(HostAction::ClipboardReceived(clip.text));
+                    return actions;
+                }
+            }
         }
 
         actions
@@ -2391,6 +2426,8 @@ struct HostSessionInner {
     full_monitors: Vec<MonitorRect>,
     monitor_selection: MonitorSelection,
     outbound_peer_packets: Vec<Vec<u8>>,
+    pending_chats: Vec<String>,
+    pending_clipboard: Option<String>,
     capture_needed: bool,
     last_frame: Vec<u8>,
 }
@@ -2537,6 +2574,8 @@ impl HostSession {
             full_monitors: initial_monitors,
             monitor_selection: MonitorSelection::All,
             outbound_peer_packets: Vec::new(),
+            pending_chats: Vec::new(),
+            pending_clipboard: None,
             capture_needed: false,
             last_frame: Vec::new(),
         };
@@ -2631,9 +2670,43 @@ impl HostSession {
                 HostAction::ReleaseAllInput => {
                     s.backend.injector.release_all();
                 }
+                HostAction::ChatReceived(text) => {
+                    s.pending_chats.push(format!("Partner: {}", text));
+                }
+                HostAction::ClipboardReceived(text) => {
+                    let _ = crate::clipboard::set_linux_system_clipboard(text);
+                    s.pending_clipboard = Some(text.clone());
+                }
                 _ => {}
             }
         }
+    }
+
+    pub fn send_chat(&self, text: &str) -> bool {
+        let mut s = self.inner.lock().unwrap();
+        if matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
+            s.outbound_peer_packets.push(encode_host_chat(text));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn send_clipboard(&self, text: &str) -> bool {
+        let mut s = self.inner.lock().unwrap();
+        if matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
+            s.outbound_peer_packets.push(encode_host_clipboard(text));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn drain_auxiliary_events(&self) -> (Vec<String>, Option<String>) {
+        let mut s = self.inner.lock().unwrap();
+        let chats = std::mem::take(&mut s.pending_chats);
+        let clip = s.pending_clipboard.take();
+        (chats, clip)
     }
 
     pub fn start(&self) -> HostStatus {
@@ -3597,5 +3670,17 @@ mod tests {
         let st_m1 = session.select_monitors(MonitorSelection::Index(1));
         assert_eq!(st_m1.selected_monitor, Some(1));
         assert_eq!(st_m1.selected_monitors, vec![1]);
+
+        let login = sample_login_payload("81617177", "2", 0);
+        session.handle_peer_payload(&login).unwrap();
+        let actions_chat = session.handle_peer_payload(b"12|||hello cc").unwrap();
+        assert_eq!(
+            actions_chat,
+            vec![HostAction::ChatReceived("hello cc".to_string())]
+        );
+        let (chats, clip) = session.drain_auxiliary_events();
+        assert_eq!(chats, vec!["Partner: hello cc".to_string()]);
+        assert_eq!(clip, None);
+        assert!(session.send_chat("xin chào"));
     }
 }

@@ -704,6 +704,18 @@ mod tests {
             })
         );
 
+        let host_chat_i16 = encode_byte_array_fields(&[
+            &[12u8, 0u8],
+            &encode_senddata_string("hello cc đồng ý", true),
+        ])
+        .unwrap();
+        assert_eq!(
+            decode_file_transfer_packet(&host_chat_i16),
+            Some(FileTransferPacket::ChatMessage {
+                text: "hello cc đồng ý".to_string(),
+            })
+        );
+
         let tmp_dir = std::env::temp_dir().join(format!("uv_ft_test_{}", std::process::id()));
         let mut sender = FileTransferManager::new(tmp_dir.clone());
         assert!(sender.modern_protocol);
@@ -775,6 +787,16 @@ mod tests {
 
         let clip_pkt = encode_clipboard_modern_packet(1, "Remote clip 123").unwrap();
         session.handle_session_payload(&clip_pkt);
+        let host_chat_pkt = encode_byte_array_fields(&[
+            &[12u8, 0u8],
+            &encode_senddata_string("hello cc", true),
+        ])
+        .unwrap();
+        session.handle_session_payload(&host_chat_pkt);
+        assert_eq!(
+            session.snapshot().chat_messages,
+            vec!["Partner: hello cc".to_string()]
+        );
         let audio_pkt =
             encode_audio_packet(WaveSource::PcSound, &64i32.to_le_bytes(), true).unwrap();
         session.handle_session_payload(&audio_pkt);
