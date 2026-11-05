@@ -905,8 +905,12 @@ impl ControlSession {
     }
 
     pub fn host_start(&self) -> HostStatus {
+        let hs = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.host_session.clone()
+        };
+        let st = hs.start();
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let st = guard.host_session.start();
         Self::sync_state_fields(&mut guard);
         st
     }
@@ -940,16 +944,20 @@ impl ControlSession {
     }
 
     pub fn host_set_master_password(&self, password: Option<&str>) -> Result<HostStatus, String> {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let cleaned = password.map(|s| s.trim()).filter(|s| !s.is_empty());
-        guard.profile_manager.set_master_password(cleaned)?;
-        let proof = guard.profile_manager.master_password_proof()?;
-        guard.host_profile.master_password_proof = proof.clone();
-        guard.host_session.set_master_password_proof(proof);
-        if guard.host_session.status().running {
-            let _ = guard.host_session.stop();
-            let _ = guard.host_session.start();
+        let hs = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let cleaned = password.map(|s| s.trim()).filter(|s| !s.is_empty());
+            guard.profile_manager.set_master_password(cleaned)?;
+            let proof = guard.profile_manager.master_password_proof()?;
+            guard.host_profile.master_password_proof = proof.clone();
+            guard.host_session.set_master_password_proof(proof);
+            guard.host_session.clone()
+        };
+        if hs.status().running {
+            let _ = hs.stop();
+            let _ = hs.start();
         }
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         Self::sync_state_fields(&mut guard);
         Ok(guard.host_session.status())
     }
