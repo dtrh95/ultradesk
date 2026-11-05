@@ -159,6 +159,8 @@ struct ChatSendRequest {
 struct MonitorSelectRequest {
     #[serde(default, alias = "monitor")]
     index: Option<usize>,
+    #[serde(default, alias = "monitors")]
+    indices: Option<Vec<usize>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -707,8 +709,21 @@ fn handle_http_client(
         }
         ("POST", "/monitor") => {
             let req: MonitorSelectRequest = serde_json::from_slice(&body).unwrap_or_default();
-            let state = session.select_monitor(req.index);
+            let state = if let Some(ref indices) = req.indices {
+                session.select_monitors(Some(indices.as_slice()))
+            } else {
+                session.select_monitor(req.index)
+            };
             write_json_response(&mut stream, 200, &json!({ "ok": true, "state": state }))
+        }
+        ("POST", "/host/monitor") => {
+            let req: MonitorSelectRequest = serde_json::from_slice(&body).unwrap_or_default();
+            let host = session.host_select_monitors(req.index, req.indices.as_deref());
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({ "ok": true, "host": host, "state": session.snapshot() }),
+            )
         }
         ("POST", "/text") => {
             let req: TextSendRequest = serde_json::from_slice(&body).unwrap_or_default();

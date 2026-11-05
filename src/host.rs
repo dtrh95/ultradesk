@@ -3,7 +3,7 @@ use crate::protocol::{
     decode_command_fields, decode_transport_body, encode_byte_array_fields, md5_hex_lower,
     DEFAULT_REGISTRATION_HOST,
 };
-use crate::screen::{compress_rgb555_standard, DisplayLayout, MonitorRect};
+use crate::screen::{compress_rgb555_standard, DisplayLayout, MonitorRect, MonitorSelection};
 use crate::server::encode_base64;
 use crate::session::{detect_local_ip, RegistrationTransport, SessionTransport};
 use serde::{Deserialize, Serialize};
@@ -372,23 +372,25 @@ impl LoginThrottle {
 pub fn encode_host_screen_init(layout: &DisplayLayout) -> Vec<u8> {
     let width_bytes = (layout.width as i32).to_le_bytes();
     let height_bytes = (layout.height as i32).to_le_bytes();
+    let ox = layout.virtual_left;
+    let oy = layout.virtual_top;
     let monitor_bounds = if layout.monitors.is_empty() {
-        format!(
-            "{}:{}:{}:{}|",
-            layout.virtual_left,
-            layout.virtual_top,
-            layout.virtual_left + layout.width as i32,
-            layout.virtual_top + layout.height as i32
-        )
+        format!("0:0:{}:{}|", layout.width as i32, layout.height as i32)
     } else {
         let mut s = String::new();
         for m in &layout.monitors {
-            s.push_str(&format!("{}:{}:{}:{}|", m.left, m.top, m.right, m.bottom));
+            s.push_str(&format!(
+                "{}:{}:{}:{}|",
+                m.left - ox,
+                m.top - oy,
+                m.right - ox,
+                m.bottom - oy
+            ));
         }
         s
     };
-    let vl_bytes = layout.virtual_left.to_le_bytes();
-    let vt_bytes = layout.virtual_top.to_le_bytes();
+    let vl_bytes = 0i32.to_le_bytes();
+    let vt_bytes = 0i32.to_le_bytes();
     let fields: [&[u8]; 11] = [
         &[0],
         &width_bytes,
@@ -403,6 +405,41 @@ pub fn encode_host_screen_init(layout: &DisplayLayout) -> Vec<u8> {
         &vt_bytes,
     ];
     encode_byte_array_fields(&fields).unwrap()
+}
+
+pub fn offset_host_input_packet(packet: &[u8], offset_x: i32, offset_y: i32) -> Vec<u8> {
+    if offset_x == 0 && offset_y == 0 {
+        return packet.to_vec();
+    }
+    if let Some(HostInputEvent::Mouse {
+        msg,
+        wparam,
+        x,
+        y,
+        ..
+    }) = decode_host_input(packet)
+    {
+        if msg == 0x0200 {
+            return format!(
+                "8|||{}|||{}|||{}|||{}",
+                0x0200,
+                wparam,
+                x.saturating_add(offset_x),
+                y.saturating_add(offset_y)
+            )
+            .into_bytes();
+        }
+        if let Ok(text) = std::str::from_utf8(packet) {
+            if text.split("|||").count() == 4 {
+                let lp = crate::input::pack_lparam(
+                    x.saturating_add(offset_x),
+                    y.saturating_add(offset_y),
+                );
+                return format!("8|||{}|||{}|||{}", msg, wparam, lp).into_bytes();
+            }
+        }
+    }
+    packet.to_vec()
 }
 
 pub fn encode_host_control_permission(allow_control: bool) -> Vec<u8> {
@@ -675,6 +712,24 @@ impl HostCore {
             actions.push(HostAction::ReleaseAllInput);
         }
         actions.push(HostAction::SendPeer(encode_host_control_permission(allowed)));
+        actions
+    }
+
+    pub fn update_layout(&mut self, layout: DisplayLayout) -> Vec<HostAction> {
+        let mut actions = Vec::new();
+        if self.layout == layout {
+            return actions;
+        }
+        self.layout = layout;
+        if matches!(self.phase, HostPhase::Starting | HostPhase::Streaming) {
+            self.phase = HostPhase::Starting;
+            self.waiting_ack = false;
+            actions.push(HostAction::ReleaseAllInput);
+            actions.push(HostAction::SendPeer(encode_host_screen_init(&self.layout)));
+            actions.push(HostAction::SendPeer(encode_host_control_permission(
+                self.control_allowed,
+            )));
+        }
         actions
     }
 
@@ -1664,6 +1719,51 @@ impl WaylandGrimCapturer {
     }
 }
 
+pub fn parse_niri_outputs_json(json_text: &str) -> Vec<MonitorRect> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        return Vec::new();
+    };
+    let Some(obj) = val.as_object() else {
+        return Vec::new();
+    };
+    let mut raw_rects = Vec::new();
+    for out in obj.values() {
+        let Some(logical) = out.get("logical") else {
+            continue;
+        };
+        let Some(x) = logical.get("x").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        let Some(y) = logical.get("y").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        let Some(w) = logical.get("width").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        let Some(h) = logical.get("height").and_then(|v| v.as_i64()) else {
+            continue;
+        };
+        if w > 0 && h > 0 {
+            raw_rects.push((x as i32, y as i32, w as i32, h as i32));
+        }
+    }
+    if raw_rects.is_empty() {
+        return Vec::new();
+    }
+    raw_rects.sort_by_key(|&(x, y, _, _)| (x, y));
+    let min_x = raw_rects.iter().map(|r| r.0).min().unwrap_or(0);
+    let min_y = raw_rects.iter().map(|r| r.1).min().unwrap_or(0);
+    raw_rects
+        .into_iter()
+        .map(|(x, y, w, h)| MonitorRect {
+            left: x - min_x,
+            top: y - min_y,
+            right: x - min_x + w,
+            bottom: y - min_y + h,
+        })
+        .collect()
+}
+
 impl Capturer for WaylandGrimCapturer {
     fn enumerate_displays(&mut self) -> Result<Vec<MonitorRect>, String> {
         let (mut w, mut h) = *self.shared_size.lock().unwrap();
@@ -1685,6 +1785,16 @@ impl Capturer for WaylandGrimCapturer {
                 let max_r = mons.iter().map(|m| m.right).max().unwrap_or(0) as u32;
                 let max_b = mons.iter().map(|m| m.bottom).max().unwrap_or(0) as u32;
                 if !mons.is_empty() && max_r == w && max_b == h {
+                    return Ok(mons);
+                }
+            }
+        }
+        if let Ok(out) = Command::new("niri").args(["msg", "-j", "outputs"]).output() {
+            if out.status.success() {
+                let mons = parse_niri_outputs_json(&String::from_utf8_lossy(&out.stdout));
+                let max_r = mons.iter().map(|m| m.right).max().unwrap_or(0) as u32;
+                let max_b = mons.iter().map(|m| m.bottom).max().unwrap_or(0) as u32;
+                if !mons.is_empty() && (w == 0 || (max_r == w && max_b == h)) {
                     return Ok(mons);
                 }
             }
@@ -1713,11 +1823,28 @@ impl Capturer for WaylandGrimCapturer {
         *self.shared_size.lock().unwrap() = (w, h);
         let target_w = rect.width() as usize;
         let target_h = rect.height() as usize;
-        if w as usize == target_w && h as usize == target_h {
-            return Ok(pixels);
-        }
         let src_w = w as usize;
         let src_h = h as usize;
+        if rect.left == 0 && rect.top == 0 && src_w == target_w && src_h == target_h {
+            return Ok(pixels);
+        }
+        if rect.left >= 0
+            && rect.top >= 0
+            && (rect.right as usize) <= src_w
+            && (rect.bottom as usize) <= src_h
+        {
+            let start_x = rect.left as usize;
+            let start_y = rect.top as usize;
+            let mut cropped = vec![0u8; target_w * target_h * 2];
+            let row_bytes = target_w * 2;
+            for row in 0..target_h {
+                let src_start = ((start_y + row) * src_w + start_x) * 2;
+                let dst_start = row * row_bytes;
+                cropped[dst_start..dst_start + row_bytes]
+                    .copy_from_slice(&pixels[src_start..src_start + row_bytes]);
+            }
+            return Ok(cropped);
+        }
         let mut resized = vec![0u8; target_w * target_h * 2];
         for y in 0..target_h {
             let sy = (y * src_h / target_h.max(1)).min(src_h.saturating_sub(1));
@@ -2244,6 +2371,12 @@ pub struct HostStatus {
     pub frame_seq: i32,
     pub is_locked: bool,
     pub backend_name: String,
+    #[serde(default)]
+    pub monitors: Vec<(i32, i32, i32, i32)>,
+    #[serde(default)]
+    pub selected_monitor: Option<usize>,
+    #[serde(default)]
+    pub selected_monitors: Vec<usize>,
 }
 
 struct HostSessionInner {
@@ -2255,6 +2388,8 @@ struct HostSessionInner {
     hardware_mac: String,
     core: HostCore,
     backend: DesktopBackend,
+    full_monitors: Vec<MonitorRect>,
+    monitor_selection: MonitorSelection,
     outbound_peer_packets: Vec<Vec<u8>>,
     capture_needed: bool,
     last_frame: Vec<u8>,
@@ -2375,66 +2510,112 @@ impl HostSession {
         layout: DisplayLayout,
         backend: DesktopBackend,
     ) -> Self {
+        let initial_monitors = layout.monitors.clone();
         let mut core = HostCore::new(temp_password, master_password_proof, layout);
         core.auto_approve = true;
+        let mut inner = HostSessionInner {
+            running: false,
+            generation: 0,
+            device_id: if device_id.len() == 32 {
+                device_id.to_string()
+            } else {
+                "FEDCBA9876543210FEDCBA9876543210".to_string()
+            },
+            display_name: if display_name.is_empty() {
+                "UltraDesk".to_string()
+            } else {
+                display_name.to_string()
+            },
+            host_id: host_id.to_string(),
+            hardware_mac: if hardware_mac.len() == 12 {
+                hardware_mac.to_string()
+            } else {
+                "001122334455".to_string()
+            },
+            core,
+            backend,
+            full_monitors: initial_monitors,
+            monitor_selection: MonitorSelection::All,
+            outbound_peer_packets: Vec::new(),
+            capture_needed: false,
+            last_frame: Vec::new(),
+        };
+        Self::refresh_display_layout(&mut inner);
         Self {
-            inner: Arc::new(Mutex::new(HostSessionInner {
-                running: false,
-                generation: 0,
-                device_id: if device_id.len() == 32 {
-                    device_id.to_string()
-                } else {
-                    "FEDCBA9876543210FEDCBA9876543210".to_string()
-                },
-                display_name: if display_name.is_empty() {
-                    "UltraDesk".to_string()
-                } else {
-                    display_name.to_string()
-                },
-                host_id: host_id.to_string(),
-                hardware_mac: if hardware_mac.len() == 12 {
-                    hardware_mac.to_string()
-                } else {
-                    "001122334455".to_string()
-                },
-                core,
-                backend,
-                outbound_peer_packets: Vec::new(),
-                capture_needed: false,
-                last_frame: Vec::new(),
-            })),
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
+    fn compute_shared_layout(
+        full_monitors: &[MonitorRect],
+        selection: &MonitorSelection,
+        fallback: &DisplayLayout,
+    ) -> DisplayLayout {
+        if full_monitors.is_empty() {
+            return fallback.clone();
+        }
+        let min_left = full_monitors.iter().map(|m| m.left).min().unwrap_or(0);
+        let min_top = full_monitors.iter().map(|m| m.top).min().unwrap_or(0);
+        let max_right = full_monitors
+            .iter()
+            .map(|m| m.right)
+            .max()
+            .unwrap_or(fallback.width as i32);
+        let max_bottom = full_monitors
+            .iter()
+            .map(|m| m.bottom)
+            .max()
+            .unwrap_or(fallback.height as i32);
+        let full_layout = DisplayLayout {
+            width: (max_right - min_left).max(1) as u32,
+            height: (max_bottom - min_top).max(1) as u32,
+            virtual_left: min_left,
+            virtual_top: min_top,
+            monitors: full_monitors.to_vec(),
+        };
+        let indices = full_layout.selected_indices(selection);
+        let selected_rects: Vec<MonitorRect> = indices
+            .iter()
+            .filter_map(|&idx| full_monitors.get(idx).copied())
+            .collect();
+        let bounds = full_layout.active_bounds(selection);
+        DisplayLayout {
+            width: bounds.width().max(1),
+            height: bounds.height().max(1),
+            virtual_left: bounds.left,
+            virtual_top: bounds.top,
+            monitors: if selected_rects.is_empty() {
+                full_monitors.to_vec()
+            } else {
+                selected_rects
+            },
         }
     }
 
     fn refresh_display_layout(s: &mut HostSessionInner) {
         if let Ok(monitors) = s.backend.capturer.enumerate_displays() {
-            if !monitors.is_empty() {
-                let min_left = monitors.iter().map(|m| m.left).min().unwrap_or(0);
-                let min_top = monitors.iter().map(|m| m.top).min().unwrap_or(0);
-                let max_right = monitors
-                    .iter()
-                    .map(|m| m.right)
-                    .max()
-                    .unwrap_or(s.core.layout.width as i32);
-                let max_bottom = monitors
-                    .iter()
-                    .map(|m| m.bottom)
-                    .max()
-                    .unwrap_or(s.core.layout.height as i32);
-                let w = (max_right - min_left).max(1) as u32;
-                let h = (max_bottom - min_top).max(1) as u32;
-                s.core.layout = DisplayLayout {
-                    width: w,
-                    height: h,
-                    virtual_left: min_left,
-                    virtual_top: min_top,
-                    monitors,
-                };
+            if !monitors.is_empty()
+                && (s.backend.name != "HeadlessBackend" || s.full_monitors.is_empty())
+            {
+                s.full_monitors = monitors;
             }
+        }
+        if s.full_monitors.is_empty() {
+            s.full_monitors = s.core.layout.monitors.clone();
+        }
+        let new_layout =
+            Self::compute_shared_layout(&s.full_monitors, &s.monitor_selection, &s.core.layout);
+        if matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
+            let actions = s.core.update_layout(new_layout);
+            Self::record_actions(s, &actions);
+        } else {
+            s.core.layout = new_layout;
         }
     }
 
     fn record_actions(s: &mut HostSessionInner, actions: &[HostAction]) {
+        let ox = s.core.layout.virtual_left;
+        let oy = s.core.layout.virtual_top;
         for act in actions {
             match act {
                 HostAction::SendPeer(bytes) => {
@@ -2444,7 +2625,8 @@ impl HostSession {
                     s.capture_needed = true;
                 }
                 HostAction::InjectInput(pkt) => {
-                    let _ = s.backend.injector.inject_event(pkt);
+                    let translated = offset_host_input_packet(pkt, ox, oy);
+                    let _ = s.backend.injector.inject_event(&translated);
                 }
                 HostAction::ReleaseAllInput => {
                     s.backend.injector.release_all();
@@ -2765,9 +2947,44 @@ impl HostSession {
         s.core.auto_approve = auto_approve;
     }
 
+    pub fn select_monitors(&self, selection: MonitorSelection) -> HostStatus {
+        {
+            let mut s = self.inner.lock().unwrap();
+            s.monitor_selection = selection;
+            Self::refresh_display_layout(&mut s);
+        }
+        self.status()
+    }
+
     pub fn status(&self) -> HostStatus {
         let s = self.inner.lock().unwrap();
         let now = Instant::now();
+        let total = s.full_monitors.len();
+        let selected_monitors = match &s.monitor_selection {
+            MonitorSelection::All => (0..total).collect(),
+            MonitorSelection::Index(idx) => {
+                if *idx < total {
+                    vec![*idx]
+                } else {
+                    (0..total).collect()
+                }
+            }
+            MonitorSelection::Subset(v) => {
+                let mut valid: Vec<usize> = v.iter().copied().filter(|&i| i < total).collect();
+                valid.sort_unstable();
+                valid.dedup();
+                if valid.is_empty() {
+                    (0..total).collect()
+                } else {
+                    valid
+                }
+            }
+        };
+        let selected_monitor = match &s.monitor_selection {
+            MonitorSelection::Index(idx) if *idx < total => Some(*idx),
+            _ if selected_monitors.len() == 1 && total > 1 => Some(selected_monitors[0]),
+            _ => None,
+        };
         HostStatus {
             running: s.running,
             host_id: s.host_id.clone(),
@@ -2783,6 +3000,13 @@ impl HostSession {
             frame_seq: s.core.next_frame_seq,
             is_locked: s.core.throttle.is_locked(now),
             backend_name: s.backend.name.to_string(),
+            monitors: s
+                .full_monitors
+                .iter()
+                .map(|m| (m.left, m.top, m.right, m.bottom))
+                .collect(),
+            selected_monitor,
+            selected_monitors,
         }
     }
 
@@ -3307,5 +3531,71 @@ mod tests {
 
         assert_eq!(vk_to_evdev(0x41), Some(30));
         assert_eq!(ascii_to_evdev(b'A' as u16), Some((30, true)));
+    }
+
+    #[test]
+    fn test_host_multi_monitor_selection_and_input_offset() {
+        let niri_json = r#"{
+            "eDP-1": {"logical": {"x": 3720, "y": 0, "width": 1920, "height": 1200}},
+            "DP-2": {"logical": {"x": 1800, "y": 0, "width": 1920, "height": 1080}}
+        }"#;
+        let mons = parse_niri_outputs_json(niri_json);
+        assert_eq!(
+            mons,
+            vec![
+                MonitorRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                MonitorRect {
+                    left: 1920,
+                    top: 0,
+                    right: 3840,
+                    bottom: 1200,
+                },
+            ]
+        );
+
+        let move_pkt = crate::input::mouse_move(100, 250).unwrap();
+        let shifted = offset_host_input_packet(&move_pkt, 1920, 0);
+        assert_eq!(
+            decode_host_input(&shifted),
+            Some(HostInputEvent::Mouse {
+                msg: 0x0200,
+                wparam: 0,
+                x: 2020,
+                y: 250,
+                wheel: 0,
+            })
+        );
+
+        let layout = DisplayLayout {
+            width: 3840,
+            height: 1200,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: mons.clone(),
+        };
+        let backend = DesktopBackend::headless(3840, 1200);
+        let session = HostSession::with_profile(
+            "FEDCBA9876543210FEDCBA9876543210",
+            "",
+            "001122334455",
+            "81617177",
+            None,
+            "UltraDeskHost",
+            layout,
+            backend,
+        );
+        let st_all = session.status();
+        assert_eq!(st_all.monitors.len(), 2);
+        assert_eq!(st_all.selected_monitor, None);
+        assert_eq!(st_all.selected_monitors, vec![0, 1]);
+
+        let st_m1 = session.select_monitors(MonitorSelection::Index(1));
+        assert_eq!(st_m1.selected_monitor, Some(1));
+        assert_eq!(st_m1.selected_monitors, vec![1]);
     }
 }
