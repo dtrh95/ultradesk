@@ -214,11 +214,20 @@ fn main() {
         if sub == "id" {
             let host_prof = pm.load_or_create_host().expect("Failed to load host profile");
             let client_prof = pm.load_or_create_client().expect("Failed to load client profile");
-            println!("Host Profile Path: {}", host_prof.path.display());
-            println!("Host Device ID:    {}", host_prof.device_id);
-            println!("Temp Password:     {}", host_prof.temp_password);
-            println!("Hardware MAC:      {}", host_prof.hardware_mac);
-            println!("Client Synth MAC:  {}", client_prof.synthetic_mac);
+            let live_id = ultradesk_rust::host::query_live_host_id(
+                &host_prof.device_id,
+                &host_prof.hardware_mac,
+                &host_prof.temp_password,
+                host_prof.master_password_proof.as_deref(),
+                &host_prof.display_name,
+            )
+            .unwrap_or_else(|_| "offline".to_string());
+            println!("Host UltraViewer ID: {}", live_id);
+            println!("Temp Password:       {}", host_prof.temp_password);
+            println!("Host Profile Path:   {}", host_prof.path.display());
+            println!("Host Device ID:      {}", host_prof.device_id);
+            println!("Hardware MAC:        {}", host_prof.hardware_mac);
+            println!("Client Synth MAC:    {}", client_prof.synthetic_mac);
             return;
         }
         if sub == "master-password" {
@@ -266,13 +275,13 @@ fn main() {
 
     let session = ControlSession::with_profiles(reg_profile, partner_profile, dict_bytes);
 
-    if args.subcommand.as_deref() == Some("host") {
-        if args.auto_approve {
-            if let Ok(guard) = session.inner.lock() {
-                guard.host_session.set_auto_approve(true);
-            }
+    if args.auto_approve {
+        if let Ok(guard) = session.inner.lock() {
+            guard.host_session.set_auto_approve(true);
         }
-        let hs = session.host_start();
+    }
+    let hs = session.host_start();
+    if args.subcommand.as_deref() == Some("host") || !hs.host_id.is_empty() {
         println!(
             "UltraDesk Host Mode active (ID: {}, Temp Password: {}, Backend: {})",
             hs.host_id, hs.temp_password, hs.backend_name

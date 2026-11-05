@@ -61,30 +61,27 @@ impl ZstdDictionaryDecoder {
         if expected_size == 0 || expected_size > self.max_output {
             return Err("decoded image exceeds allocation policy".to_string());
         }
-        if self.dictionary.as_slice() == RGB555_DICT_BYTES {
+        let dict_result = if self.dictionary.as_slice() == RGB555_DICT_BYTES {
             let dict = RGB555_STATIC_DICT
                 .get_or_init(|| zstd::dict::DecoderDictionary::copy(RGB555_DICT_BYTES));
             let mut decompressor = zstd::bulk::Decompressor::with_prepared_dictionary(dict)
                 .map_err(|e| format!("Zstandard dictionary init failed: {}", e))?;
-            let out = decompressor
-                .decompress(payload, expected_size)
-                .map_err(|_| "Zstandard decoding failed or image size differs".to_string())?;
-            if out.len() != expected_size {
-                return Err("Zstandard decoding failed or image size differs".to_string());
-            }
-            Ok(out)
+            decompressor.decompress(payload, expected_size)
         } else {
             let custom_dict = zstd::dict::DecoderDictionary::copy(&self.dictionary);
             let mut decompressor = zstd::bulk::Decompressor::with_prepared_dictionary(&custom_dict)
                 .map_err(|e| format!("Zstandard dictionary init failed: {}", e))?;
-            let out = decompressor
-                .decompress(payload, expected_size)
-                .map_err(|_| "Zstandard decoding failed or image size differs".to_string())?;
-            if out.len() != expected_size {
-                return Err("Zstandard decoding failed or image size differs".to_string());
-            }
-            Ok(out)
+            decompressor.decompress(payload, expected_size)
+        };
+        let out = match dict_result {
+            Ok(bytes) => bytes,
+            Err(_) => zstd::bulk::decompress(payload, expected_size)
+                .map_err(|_| "Zstandard decoding failed or image size differs".to_string())?,
+        };
+        if out.len() != expected_size {
+            return Err("Zstandard decoding failed or image size differs".to_string());
         }
+        Ok(out)
     }
 }
 
@@ -94,6 +91,11 @@ pub fn compress_rgb555_with_dict(raw: &[u8], level: i32) -> Result<Vec<u8>, Stri
     compressor
         .compress(raw)
         .map_err(|e| format!("Zstd dictionary compression failed: {}", e))
+}
+
+pub fn compress_rgb555_standard(raw: &[u8], level: i32) -> Result<Vec<u8>, String> {
+    zstd::bulk::compress(raw, level)
+        .map_err(|e| format!("Zstd standard compression failed: {}", e))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -755,7 +757,6 @@ impl RGB555Screen {
 
         let mut count = 0usize;
 
-        // 1. Scroll-copy (fields[6])
         if !fields[6].is_empty() {
             if fields[6].len() < 10 || (fields[6].len() - 10) % 8 != 0 {
                 return Err("invalid scroll-copy record length".to_string());
@@ -792,7 +793,6 @@ impl RGB555Screen {
             }
         }
 
-        // 2. Cache references (fields[9]) and BitBlt regions (fields[5])
         if !fields[9].is_empty() {
             if !fields[5].is_empty() {
                 let mut clip_rects = Vec::with_capacity(fields[5].len() / 8);
@@ -859,7 +859,6 @@ impl RGB555Screen {
             }
         }
 
-        // 3. JPEG bottom-up atlas (fields[7] & fields[8])
         if !fields[7].is_empty() || !fields[8].is_empty() {
             if !fields[7].starts_with(b"\xff\xd8")
                 || fields[8].is_empty()
@@ -932,7 +931,6 @@ impl RGB555Screen {
             }
         }
 
-        // 4. RGB555 Zstandard rectangles (fields[1] & fields[2])
         if !fields[1].is_empty() && !fields[2].is_empty() {
             let mut pixel_fields = fields[..5].to_vec();
             pixel_fields.extend(vec![Vec::new(); 6]);
@@ -941,7 +939,6 @@ impl RGB555Screen {
             })?;
         }
 
-        // 5. Cache additions (fields[10])
         for chunk in fields[10].chunks_exact(12) {
             let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
             let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
