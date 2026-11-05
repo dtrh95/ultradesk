@@ -833,11 +833,13 @@ mod tests {
         let resp_html = http_get(&addr, "/");
         assert!(resp_html.contains("UltraDesk (Rust)"));
         assert!(resp_html.contains("ControlLeft:17"));
+        assert!(resp_html.contains("id=\"btnCycleTheme\""));
         assert!(resp_html.contains("id=\"themeSelect\""));
         assert!(resp_html.contains("data-theme=\"onedark\""));
         assert!(resp_html.contains("data-theme=\"vscode-dark\""));
         assert!(resp_html.contains("data-theme=\"vscode-light\""));
         assert!(resp_html.contains("resolveActiveTheme"));
+        assert!(resp_html.contains("cycleTheme"));
 
         let resp_icon = http_get(&addr, "/ultradesk-rust.png");
         assert!(resp_icon.contains("Content-Type: image/png"));
