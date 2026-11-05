@@ -284,7 +284,7 @@ pub fn parse_viewer_login(text: &str) -> Option<ViewerLogin> {
         viewer_height,
         claimed_id,
         display_name,
-        wants_control: control_mode == 1,
+        wants_control: control_mode != 2,
         custom_password_proof,
         color_mode,
         client_version,
@@ -508,7 +508,7 @@ impl HostCore {
             auto_approve_master: true,
             throttle: LoginThrottle::default(),
             active_viewer: None,
-            control_allowed: false,
+            control_allowed: true,
             waiting_ack: false,
             next_frame_seq: FIRST_FRAME_NUMBER,
             layout,
@@ -561,6 +561,7 @@ impl HostCore {
             if self.phase == HostPhase::Streaming && self.active_viewer.is_some() {
                 self.active_viewer = Some(login.clone());
                 self.phase = HostPhase::Starting;
+                self.control_allowed = login.wants_control;
                 self.next_frame_seq = FIRST_FRAME_NUMBER;
                 self.waiting_ack = false;
                 actions.push(HostAction::ReleaseAllInput);
@@ -1579,6 +1580,584 @@ impl Injector for X11Injector {
     }
 }
 
+pub fn is_wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t.eq_ignore_ascii_case("wayland"))
+}
+
+pub fn parse_ppm_to_rgb555_top_down(ppm: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    if ppm.len() < 11 || &ppm[..2] != b"P6" {
+        return Err("invalid PPM magic".to_string());
+    }
+    let mut idx = 2usize;
+    let mut tokens: [u32; 3] = [0; 3];
+    for slot in &mut tokens {
+        while idx < ppm.len() {
+            if ppm[idx] == b'#' {
+                while idx < ppm.len() && ppm[idx] != b'\n' {
+                    idx += 1;
+                }
+            } else if ppm[idx].is_ascii_whitespace() {
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+        let start = idx;
+        while idx < ppm.len() && ppm[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        if start == idx {
+            return Err("malformed PPM header token".to_string());
+        }
+        let val = std::str::from_utf8(&ppm[start..idx])
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or_else(|| "invalid PPM numeric header".to_string())?;
+        *slot = val;
+    }
+    if idx >= ppm.len() || !ppm[idx].is_ascii_whitespace() {
+        return Err("missing PPM header delimiter".to_string());
+    }
+    idx += 1;
+    let width = tokens[0];
+    let height = tokens[1];
+    let maxval = tokens[2];
+    if width == 0 || height == 0 || maxval != 255 {
+        return Err("unsupported PPM dimensions or maxval".to_string());
+    }
+    let pixel_count = (width as usize).saturating_mul(height as usize);
+    let expected_rgb = pixel_count.saturating_mul(3);
+    if ppm.len().saturating_sub(idx) < expected_rgb {
+        return Err("PPM pixel payload truncated".to_string());
+    }
+    let rgb = &ppm[idx..idx + expected_rgb];
+    let mut out = Vec::with_capacity(pixel_count * 2);
+    for px in rgb.chunks_exact(3) {
+        let w = (((px[0] as u16) >> 3) << 10)
+            | (((px[1] as u16) >> 3) << 5)
+            | ((px[2] as u16) >> 3);
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+    Ok((width, height, out))
+}
+
+pub struct WaylandGrimCapturer {
+    shared_size: Arc<Mutex<(u32, u32)>>,
+}
+
+impl WaylandGrimCapturer {
+    pub fn probe(shared_size: Arc<Mutex<(u32, u32)>>) -> Result<Self, String> {
+        if !is_wayland_session() {
+            return Err("not a Wayland session".to_string());
+        }
+        let out = Command::new("grim")
+            .args(["-t", "ppm", "-s", "1", "-"])
+            .output()
+            .map_err(|e| format!("grim launch failed: {e}"))?;
+        if !out.status.success() {
+            return Err("grim returned non-zero status".to_string());
+        }
+        let (w, h, _) = parse_ppm_to_rgb555_top_down(&out.stdout)?;
+        *shared_size.lock().unwrap() = (w, h);
+        Ok(Self { shared_size })
+    }
+}
+
+impl Capturer for WaylandGrimCapturer {
+    fn enumerate_displays(&mut self) -> Result<Vec<MonitorRect>, String> {
+        let (mut w, mut h) = *self.shared_size.lock().unwrap();
+        if w == 0 || h == 0 {
+            let out = Command::new("grim")
+                .args(["-t", "ppm", "-s", "1", "-"])
+                .output()
+                .map_err(|e| format!("grim launch failed: {e}"))?;
+            if out.status.success() {
+                if let Ok((pw, ph, _)) = parse_ppm_to_rgb555_top_down(&out.stdout) {
+                    w = pw;
+                    h = ph;
+                    *self.shared_size.lock().unwrap() = (w, h);
+                }
+            }
+        }
+        if let Ok(mut x11) = X11Capturer::connect() {
+            if let Ok(mons) = x11.enumerate_displays() {
+                let max_r = mons.iter().map(|m| m.right).max().unwrap_or(0) as u32;
+                let max_b = mons.iter().map(|m| m.bottom).max().unwrap_or(0) as u32;
+                if !mons.is_empty() && max_r == w && max_b == h {
+                    return Ok(mons);
+                }
+            }
+        }
+        if w > 0 && h > 0 {
+            Ok(vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: w as i32,
+                bottom: h as i32,
+            }])
+        } else {
+            Err("unable to determine Wayland display dimensions".to_string())
+        }
+    }
+
+    fn capture_screen(&mut self, rect: MonitorRect) -> Result<Vec<u8>, String> {
+        let out = Command::new("grim")
+            .args(["-t", "ppm", "-s", "1", "-"])
+            .output()
+            .map_err(|e| format!("grim capture failed: {e}"))?;
+        if !out.status.success() {
+            return Err("grim capture exited with error".to_string());
+        }
+        let (w, h, pixels) = parse_ppm_to_rgb555_top_down(&out.stdout)?;
+        *self.shared_size.lock().unwrap() = (w, h);
+        let target_w = rect.width() as usize;
+        let target_h = rect.height() as usize;
+        if w as usize == target_w && h as usize == target_h {
+            return Ok(pixels);
+        }
+        let src_w = w as usize;
+        let src_h = h as usize;
+        let mut resized = vec![0u8; target_w * target_h * 2];
+        for y in 0..target_h {
+            let sy = (y * src_h / target_h.max(1)).min(src_h.saturating_sub(1));
+            for x in 0..target_w {
+                let sx = (x * src_w / target_w.max(1)).min(src_w.saturating_sub(1));
+                let src_idx = (sy * src_w + sx) * 2;
+                let dst_idx = (y * target_w + x) * 2;
+                resized[dst_idx] = pixels[src_idx];
+                resized[dst_idx + 1] = pixels[src_idx + 1];
+            }
+        }
+        Ok(resized)
+    }
+}
+
+pub fn vk_to_evdev(vk: u8) -> Option<u16> {
+    Some(match vk {
+        0x08 => 14,
+        0x09 => 15,
+        0x0d => 28,
+        0x10 | 0xa0 => 42,
+        0xa1 => 54,
+        0x11 | 0xa2 => 29,
+        0xa3 => 97,
+        0x12 | 0xa4 => 56,
+        0xa5 => 100,
+        0x14 => 58,
+        0x1b => 1,
+        0x20 => 57,
+        0x21 => 104,
+        0x22 => 109,
+        0x23 => 107,
+        0x24 => 102,
+        0x25 => 105,
+        0x26 => 103,
+        0x27 => 106,
+        0x28 => 108,
+        0x2d => 110,
+        0x2e => 111,
+        0x30 => 11,
+        0x31..=0x39 => (vk - 0x31 + 2) as u16,
+        0x41 => 30,
+        0x42 => 48,
+        0x43 => 46,
+        0x44 => 32,
+        0x45 => 18,
+        0x46 => 33,
+        0x47 => 34,
+        0x48 => 35,
+        0x49 => 23,
+        0x4a => 36,
+        0x4b => 37,
+        0x4c => 38,
+        0x4d => 50,
+        0x4e => 49,
+        0x4f => 24,
+        0x50 => 25,
+        0x51 => 16,
+        0x52 => 19,
+        0x53 => 31,
+        0x54 => 20,
+        0x55 => 22,
+        0x56 => 47,
+        0x57 => 17,
+        0x58 => 45,
+        0x59 => 21,
+        0x5a => 44,
+        0x5b => 125,
+        0x5c => 126,
+        0x70..=0x79 => (vk - 0x70 + 59) as u16,
+        0x7a => 87,
+        0x7b => 88,
+        0xba => 39,
+        0xbb => 13,
+        0xbc => 51,
+        0xbd => 12,
+        0xbe => 52,
+        0xbf => 53,
+        0xc0 => 41,
+        0xdb => 26,
+        0xdc => 43,
+        0xdd => 27,
+        0xde => 40,
+        _ => return None,
+    })
+}
+
+pub fn ascii_to_evdev(ch: u16) -> Option<(u16, bool)> {
+    let b = u8::try_from(ch).ok()?;
+    Some(match b {
+        b'a'..=b'z' => (vk_to_evdev(b - 32)?, false),
+        b'A'..=b'Z' => (vk_to_evdev(b)?, true),
+        b'0'..=b'9' => (vk_to_evdev(b)?, false),
+        b'!' => (2, true),
+        b'@' => (3, true),
+        b'#' => (4, true),
+        b'$' => (5, true),
+        b'%' => (6, true),
+        b'^' => (7, true),
+        b'&' => (8, true),
+        b'*' => (9, true),
+        b'(' => (10, true),
+        b')' => (11, true),
+        b'-' => (12, false),
+        b'_' => (12, true),
+        b'=' => (13, false),
+        b'+' => (13, true),
+        b'[' => (26, false),
+        b'{' => (26, true),
+        b']' => (27, false),
+        b'}' => (27, true),
+        b'\\' => (43, false),
+        b'|' => (43, true),
+        b';' => (39, false),
+        b':' => (39, true),
+        b'\'' => (40, false),
+        b'"' => (40, true),
+        b'`' => (41, false),
+        b'~' => (41, true),
+        b',' => (51, false),
+        b'<' => (51, true),
+        b'.' => (52, false),
+        b'>' => (52, true),
+        b'/' => (53, false),
+        b'?' => (53, true),
+        b' ' => (57, false),
+        b'\n' | b'\r' => (28, false),
+        b'\t' => (15, false),
+        _ => return None,
+    })
+}
+
+#[repr(C)]
+struct UinputInputId {
+    bustype: u16,
+    vendor: u16,
+    product: u16,
+    version: u16,
+}
+
+#[repr(C)]
+struct UinputSetup {
+    id: UinputInputId,
+    name: [u8; 80],
+    ff_effects_max: u32,
+}
+
+#[repr(C)]
+struct UinputAbsinfo {
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+    fuzz: i32,
+    flat: i32,
+    resolution: i32,
+}
+
+#[repr(C)]
+struct UinputAbsSetup {
+    code: u16,
+    absinfo: UinputAbsinfo,
+}
+
+#[repr(C)]
+struct RawLinuxInputEvent {
+    tv_sec: libc::time_t,
+    tv_usec: libc::suseconds_t,
+    type_: u16,
+    code: u16,
+    value: i32,
+}
+
+const UI_SET_EVBIT: libc::c_ulong = 0x4004_5564;
+const UI_SET_KEYBIT: libc::c_ulong = 0x4004_5565;
+const UI_SET_RELBIT: libc::c_ulong = 0x4004_5566;
+const UI_SET_ABSBIT: libc::c_ulong = 0x4004_5567;
+const UI_DEV_SETUP: libc::c_ulong = 0x405c_5503;
+const UI_ABS_SETUP: libc::c_ulong = 0x401c_5504;
+const UI_DEV_CREATE: libc::c_ulong = 0x5501;
+const UI_DEV_DESTROY: libc::c_ulong = 0x5502;
+const UINPUT_ABS_MAX: i32 = 65535;
+
+pub struct UinputInjector {
+    pointer_fd: i32,
+    keyboard_fd: i32,
+    shared_size: Arc<Mutex<(u32, u32)>>,
+    held_keys: Vec<u16>,
+    held_buttons: Vec<u16>,
+    wheel_remainder: i32,
+}
+
+impl UinputInjector {
+    pub fn connect(shared_size: Arc<Mutex<(u32, u32)>>) -> Result<Self, String> {
+        unsafe {
+            let pointer_fd = libc::open(
+                c"/dev/uinput".as_ptr(),
+                libc::O_WRONLY | libc::O_NONBLOCK,
+            );
+            if pointer_fd < 0 {
+                return Err("cannot open /dev/uinput for pointer".to_string());
+            }
+            let keyboard_fd = libc::open(
+                c"/dev/uinput".as_ptr(),
+                libc::O_WRONLY | libc::O_NONBLOCK,
+            );
+            if keyboard_fd < 0 {
+                libc::close(pointer_fd);
+                return Err("cannot open /dev/uinput for keyboard".to_string());
+            }
+
+            for ev in [0x00i32, 0x01, 0x02, 0x03] {
+                libc::ioctl(pointer_fd, UI_SET_EVBIT, ev);
+            }
+            for btn in [0x110i32, 0x111, 0x112] {
+                libc::ioctl(pointer_fd, UI_SET_KEYBIT, btn);
+            }
+            libc::ioctl(pointer_fd, UI_SET_RELBIT, 0x08i32);
+            libc::ioctl(pointer_fd, UI_SET_ABSBIT, 0x00i32);
+            libc::ioctl(pointer_fd, UI_SET_ABSBIT, 0x01i32);
+
+            for axis in [0u16, 1u16] {
+                let abs_setup = UinputAbsSetup {
+                    code: axis,
+                    absinfo: UinputAbsinfo {
+                        value: 0,
+                        minimum: 0,
+                        maximum: UINPUT_ABS_MAX,
+                        fuzz: 0,
+                        flat: 0,
+                        resolution: 0,
+                    },
+                };
+                libc::ioctl(pointer_fd, UI_ABS_SETUP, &abs_setup as *const UinputAbsSetup);
+            }
+
+            let mut p_name = [0u8; 80];
+            let p_label = b"UltraDesk Virtual Pointer";
+            p_name[..p_label.len()].copy_from_slice(p_label);
+            let p_setup = UinputSetup {
+                id: UinputInputId {
+                    bustype: 0x03,
+                    vendor: 0x1d6b,
+                    product: 0x0104,
+                    version: 1,
+                },
+                name: p_name,
+                ff_effects_max: 0,
+            };
+            if libc::ioctl(pointer_fd, UI_DEV_SETUP, &p_setup as *const UinputSetup) < 0
+                || libc::ioctl(pointer_fd, UI_DEV_CREATE) < 0
+            {
+                libc::close(pointer_fd);
+                libc::close(keyboard_fd);
+                return Err("failed to create uinput pointer device".to_string());
+            }
+
+            for ev in [0x00i32, 0x01] {
+                libc::ioctl(keyboard_fd, UI_SET_EVBIT, ev);
+            }
+            for k in 1i32..249 {
+                libc::ioctl(keyboard_fd, UI_SET_KEYBIT, k);
+            }
+            let mut k_name = [0u8; 80];
+            let k_label = b"UltraDesk Virtual Keyboard";
+            k_name[..k_label.len()].copy_from_slice(k_label);
+            let k_setup = UinputSetup {
+                id: UinputInputId {
+                    bustype: 0x03,
+                    vendor: 0x1d6b,
+                    product: 0x0105,
+                    version: 1,
+                },
+                name: k_name,
+                ff_effects_max: 0,
+            };
+            if libc::ioctl(keyboard_fd, UI_DEV_SETUP, &k_setup as *const UinputSetup) < 0
+                || libc::ioctl(keyboard_fd, UI_DEV_CREATE) < 0
+            {
+                libc::ioctl(pointer_fd, UI_DEV_DESTROY);
+                libc::close(pointer_fd);
+                libc::close(keyboard_fd);
+                return Err("failed to create uinput keyboard device".to_string());
+            }
+
+            Ok(Self {
+                pointer_fd,
+                keyboard_fd,
+                shared_size,
+                held_keys: Vec::new(),
+                held_buttons: Vec::new(),
+                wheel_remainder: 0,
+            })
+        }
+    }
+
+    fn emit(fd: i32, type_: u16, code: u16, value: i32) {
+        let ev = RawLinuxInputEvent {
+            tv_sec: 0,
+            tv_usec: 0,
+            type_,
+            code,
+            value,
+        };
+        unsafe {
+            let _ = libc::write(
+                fd,
+                &ev as *const RawLinuxInputEvent as *const libc::c_void,
+                std::mem::size_of::<RawLinuxInputEvent>(),
+            );
+        }
+    }
+
+    fn syn(fd: i32) {
+        Self::emit(fd, 0x00, 0x00, 0);
+    }
+
+    fn set_button(&mut self, btn_code: u16, pressed: bool) {
+        if pressed {
+            if !self.held_buttons.contains(&btn_code) {
+                self.held_buttons.push(btn_code);
+            }
+        } else if let Some(idx) = self.held_buttons.iter().position(|&b| b == btn_code) {
+            self.held_buttons.remove(idx);
+        } else {
+            return;
+        }
+        Self::emit(self.pointer_fd, 0x01, btn_code, if pressed { 1 } else { 0 });
+        Self::syn(self.pointer_fd);
+    }
+
+    fn set_key(&mut self, keycode: u16, pressed: bool) {
+        if pressed {
+            if !self.held_keys.contains(&keycode) {
+                self.held_keys.push(keycode);
+            }
+        } else if let Some(idx) = self.held_keys.iter().position(|&k| k == keycode) {
+            self.held_keys.remove(idx);
+        } else {
+            return;
+        }
+        Self::emit(self.keyboard_fd, 0x01, keycode, if pressed { 1 } else { 0 });
+        Self::syn(self.keyboard_fd);
+    }
+}
+
+impl Drop for UinputInjector {
+    fn drop(&mut self) {
+        self.release_all();
+        unsafe {
+            libc::ioctl(self.pointer_fd, UI_DEV_DESTROY);
+            libc::close(self.pointer_fd);
+            libc::ioctl(self.keyboard_fd, UI_DEV_DESTROY);
+            libc::close(self.keyboard_fd);
+        }
+    }
+}
+
+impl Injector for UinputInjector {
+    fn inject_event(&mut self, packet: &[u8]) -> Result<(), String> {
+        let Some(event) = decode_host_input(packet) else {
+            return Ok(());
+        };
+        match pointer_action(&event, &mut self.wheel_remainder) {
+            PointerAction::Move(x, y) => {
+                let (w, h) = {
+                    let g = *self.shared_size.lock().unwrap();
+                    (g.0.max(1) as i64, g.1.max(1) as i64)
+                };
+                let cx = (x as i64).clamp(0, (w - 1).max(0));
+                let cy = (y as i64).clamp(0, (h - 1).max(0));
+                let abs_x = ((cx * UINPUT_ABS_MAX as i64) / (w - 1).max(1)) as i32;
+                let abs_y = ((cy * UINPUT_ABS_MAX as i64) / (h - 1).max(1)) as i32;
+                Self::emit(self.pointer_fd, 0x03, 0x00, abs_x);
+                Self::emit(self.pointer_fd, 0x03, 0x01, abs_y);
+                Self::syn(self.pointer_fd);
+            }
+            PointerAction::Button(b, pressed) => {
+                let code = match b {
+                    1 => 0x110,
+                    2 => 0x112,
+                    _ => 0x111,
+                };
+                self.set_button(code, pressed);
+            }
+            PointerAction::Wheel(steps) => {
+                Self::emit(self.pointer_fd, 0x02, 0x08, steps);
+                Self::syn(self.pointer_fd);
+            }
+            PointerAction::None => {}
+        }
+        if let HostInputEvent::Key {
+            kind, vk, scan, ch, ..
+        } = event
+        {
+            let down = kind == KEY_DOWN || kind == SYS_KEY_DOWN;
+            if vk == VK_PACKET {
+                if down {
+                    if let Some((code, shift)) = ascii_to_evdev(ch) {
+                        if shift {
+                            Self::emit(self.keyboard_fd, 0x01, 42, 1);
+                            Self::syn(self.keyboard_fd);
+                        }
+                        Self::emit(self.keyboard_fd, 0x01, code, 1);
+                        Self::syn(self.keyboard_fd);
+                        Self::emit(self.keyboard_fd, 0x01, code, 0);
+                        Self::syn(self.keyboard_fd);
+                        if shift {
+                            Self::emit(self.keyboard_fd, 0x01, 42, 0);
+                            Self::syn(self.keyboard_fd);
+                        }
+                    }
+                }
+            } else if let Some(code) = evdev_keycode(scan)
+                .map(|c| c as u16)
+                .or_else(|| vk_to_evdev(vk))
+            {
+                if down && self.held_keys.contains(&code) {
+                    Self::emit(self.keyboard_fd, 0x01, code, 2);
+                    Self::syn(self.keyboard_fd);
+                } else {
+                    self.set_key(code, down);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn release_all(&mut self) {
+        for code in std::mem::take(&mut self.held_keys).into_iter().rev() {
+            Self::emit(self.keyboard_fd, 0x01, code, 0);
+        }
+        Self::syn(self.keyboard_fd);
+        for btn in std::mem::take(&mut self.held_buttons) {
+            Self::emit(self.pointer_fd, 0x01, btn, 0);
+        }
+        Self::syn(self.pointer_fd);
+        self.wheel_remainder = 0;
+    }
+}
+
 pub struct DesktopBackend {
     pub name: &'static str,
     pub capturer: Box<dyn Capturer>,
@@ -1595,17 +2174,55 @@ impl DesktopBackend {
     }
 
     pub fn auto_detect() -> Self {
-        if let (Ok(capturer), Ok(injector)) = (X11Capturer::connect(), X11Injector::connect()) {
-            let name = if capturer.shm_supported {
-                "X11ShmXtestBackend"
-            } else {
-                "X11GetImageXtestBackend"
-            };
-            return Self {
-                name,
-                capturer: Box::new(capturer),
-                injector: Box::new(injector),
-            };
+        let shared_size = Arc::new(Mutex::new((1920u32, 1080u32)));
+        if is_wayland_session() {
+            if let Ok(capturer) = WaylandGrimCapturer::probe(shared_size.clone()) {
+                if let Ok(injector) = UinputInjector::connect(shared_size.clone()) {
+                    return Self {
+                        name: "WaylandGrimUinputBackend",
+                        capturer: Box::new(capturer),
+                        injector: Box::new(injector),
+                    };
+                }
+                if let Ok(injector) = X11Injector::connect() {
+                    return Self {
+                        name: "WaylandGrimXtestBackend",
+                        capturer: Box::new(capturer),
+                        injector: Box::new(injector),
+                    };
+                }
+                return Self {
+                    name: "WaylandGrimCommandBackend",
+                    capturer: Box::new(capturer),
+                    injector: Box::new(X11CommandInjector::new(true)),
+                };
+            }
+        }
+        if let Ok(mut capturer) = X11Capturer::connect() {
+            if let Ok(mons) = capturer.enumerate_displays() {
+                let w = mons.iter().map(|m| m.right).max().unwrap_or(1920) as u32;
+                let h = mons.iter().map(|m| m.bottom).max().unwrap_or(1080) as u32;
+                *shared_size.lock().unwrap() = (w.max(1), h.max(1));
+            }
+            if let Ok(injector) = X11Injector::connect() {
+                let name = if capturer.shm_supported {
+                    "X11ShmXtestBackend"
+                } else {
+                    "X11GetImageXtestBackend"
+                };
+                return Self {
+                    name,
+                    capturer: Box::new(capturer),
+                    injector: Box::new(injector),
+                };
+            }
+            if let Ok(injector) = UinputInjector::connect(shared_size) {
+                return Self {
+                    name: "X11UinputBackend",
+                    capturer: Box::new(capturer),
+                    injector: Box::new(injector),
+                };
+            }
         }
         Self::headless(1280, 720)
     }
@@ -2666,5 +3283,29 @@ mod tests {
         server_handle.join().unwrap();
         let _ = session.stop();
         assert!(!session.status().running);
+    }
+
+    #[test]
+    fn test_wayland_ppm_parser_and_windows_control_mode_zero() {
+        let mut ppm = b"P6\n2 1\n255\n".to_vec();
+        ppm.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
+        let (w, h, rgb555) = parse_ppm_to_rgb555_top_down(&ppm).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgb555, [0x00, 0x7c, 0x1f, 0x00]);
+
+        let login_zero = sample_login_payload("mypassword", "2", 0);
+        let parsed_zero = parse_viewer_login(&String::from_utf8_lossy(&login_zero)).unwrap();
+        assert!(parsed_zero.wants_control);
+
+        let login_re = sample_login_payload("mypassword", "2", -1);
+        let parsed_re = parse_viewer_login(&String::from_utf8_lossy(&login_re)).unwrap();
+        assert!(parsed_re.wants_control);
+
+        let login_view = sample_login_payload("mypassword", "2", 2);
+        let parsed_view = parse_viewer_login(&String::from_utf8_lossy(&login_view)).unwrap();
+        assert!(!parsed_view.wants_control);
+
+        assert_eq!(vk_to_evdev(0x41), Some(30));
+        assert_eq!(ascii_to_evdev(b'A' as u16), Some((30, true)));
     }
 }

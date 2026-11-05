@@ -152,11 +152,9 @@ impl TransportChannel {
         match self {
             Self::Plain(s) => {
                 let _ = s.set_read_timeout(timeout);
-                let _ = s.set_write_timeout(timeout);
             }
             Self::Tls(s) => {
                 let _ = s.get_ref().set_read_timeout(timeout);
-                let _ = s.get_ref().set_write_timeout(timeout);
             }
         }
     }
