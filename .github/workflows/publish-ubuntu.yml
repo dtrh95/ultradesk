@@ -1,0 +1,243 @@
+name: Publish Ubuntu APT & PPA
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without v prefix (for example 0.2.0)'
+        required: false
+      publish_ppa:
+        description: 'Also upload Debian source package to Ubuntu Launchpad PPA'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-ubuntu-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-ubuntu-deb:
+    name: Ubuntu DEB [${{ matrix.codename }}]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu:22.04
+            codename: jammy
+          - distro: ubuntu:24.04
+            codename: noble
+          - distro: ubuntu:25.10
+            codename: questing
+          - distro: ubuntu:26.04
+            codename: resolute
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare debian directory for Ubuntu ${{ matrix.codename }}
+        run: |
+          cp -r packaging/debian debian
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          elif [ -n "${{ github.event.release.tag_name }}" ]; then
+            VER="${{ github.event.release.tag_name }}"
+            VER="${VER#v}"
+          else
+            VER=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+          sed -i "1s|(0\.2\.0-1)|(${VER}-1~ubuntu-${{ matrix.codename }}1)|" debian/changelog
+          sed -i "1s|unstable|${{ matrix.codename }}|" debian/changelog
+
+      - name: Build Ubuntu DEB package
+        uses: jtdor/build-deb-action@v1
+        with:
+          docker-image: ${{ matrix.distro }}
+          buildpackage-opts: --build=binary --no-sign
+
+      - name: Rename Ubuntu DEB artifact
+        run: |
+          for f in debian/artifacts/*.deb; do
+            base=$(basename "$f" .deb)
+            sudo mv "$f" "debian/artifacts/${base}_ubuntu-${{ matrix.codename }}.deb"
+          done
+
+      - name: Build Ubuntu APT repository metadata for ${{ matrix.codename }}
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y reprepro gnupg2
+
+          mkdir -p "repo/apt/ubuntu/${{ matrix.codename }}/conf"
+          SIGN_LINE=""
+          if [ -n "${GPG_PRIVATE_KEY}" ]; then
+            mkdir -p ~/.gnupg
+            chmod 700 ~/.gnupg
+            echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+            echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+            echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
+            FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep '^fpr' | head -1 | cut -d: -f10)
+            echo "${FINGERPRINT}:6:" | gpg --import-ownertrust
+            gpg-connect-agent reloadagent /bye || true
+            SIGN_LINE="SignWith: ${FINGERPRINT}"
+          fi
+
+          cat > "repo/apt/ubuntu/${{ matrix.codename }}/conf/distributions" << EOF
+          Origin: UltraDesk
+          Label: UltraDesk Ubuntu Repository
+          Codename: ${{ matrix.codename }}
+          Suite: stable
+          Components: main
+          Architectures: amd64
+          Description: UltraDesk Rust packages for Ubuntu ${{ matrix.codename }}
+          ${SIGN_LINE}
+          EOF
+
+          for deb in debian/artifacts/*.deb; do
+            [ -f "$deb" ] || continue
+            reprepro --gnupghome ~/.gnupg -b "repo/apt/ubuntu/${{ matrix.codename }}" includedeb "${{ matrix.codename }}" "$deb"
+          done
+
+          if [ -n "${GPG_PRIVATE_KEY}" ]; then
+            gpg --batch --yes --delete-secret-and-public-key "${FINGERPRINT}" || true
+          fi
+
+      - name: Upload Ubuntu DEB artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ubuntu-deb-${{ matrix.codename }}
+          path: debian/artifacts/*.deb
+          retention-days: 3
+
+      - name: Upload Ubuntu APT repo artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ubuntu-apt-repo-${{ matrix.codename }}
+          path: repo/
+          retention-days: 1
+
+  publish-ubuntu-release:
+    name: Publish Ubuntu DEBs & APT Repo
+    needs: [build-ubuntu-deb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download Ubuntu DEB artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ubuntu-deb-*
+          path: debs/
+
+      - name: Download Ubuntu APT repo slices
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ubuntu-apt-repo-*
+          path: apt-slices/
+
+      - name: Merge Ubuntu APT repository and generate installer script
+        run: |
+          mkdir -p apt-repo/ubuntu
+          for d in apt-slices/ubuntu-apt-repo-*/; do
+            if [ -d "$d" ]; then
+              cp -a "$d". apt-repo/
+            fi
+          done
+          cp packaging/pubkey.gpg apt-repo/pubkey.gpg
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO_NAME="${{ github.event.repository.name }}"
+          BASE_URL="https://${OWNER_LC}.github.io/${REPO_NAME}"
+
+          cat > apt-repo/install-ubuntu.sh << EOF
+          #!/bin/sh
+          set -eu
+          CODENAME=\$(. /etc/os-release && echo "\${VERSION_CODENAME:-noble}")
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL "${BASE_URL}/pubkey.gpg" | sudo tee /etc/apt/keyrings/ultradesk-rust.asc >/dev/null
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] ${BASE_URL}/apt/ubuntu/\${CODENAME} \${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y ultradesk-rust
+          EOF
+          chmod 755 apt-repo/install-ubuntu.sh
+
+      - name: Attach Ubuntu DEBs to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: debs/**/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload merged Ubuntu APT repository artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: merged-ubuntu-apt-repo
+          path: apt-repo/
+          retention-days: 3
+
+  publish-ubuntu-ppa:
+    name: Launchpad PPA [${{ matrix.series }}]
+    if: ${{ github.event_name == 'release' || github.event.inputs.publish_ppa == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        series: [jammy, noble]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build signed source package and upload to Launchpad PPA
+        env:
+          LAUNCHPAD_GPG_PRIVATE_KEY: ${{ secrets.LAUNCHPAD_GPG_PRIVATE_KEY || secrets.GPG_PRIVATE_KEY }}
+          LAUNCHPAD_PPA: ${{ secrets.LAUNCHPAD_PPA }}
+          DEBFULLNAME: ${{ secrets.DEBFULLNAME || 'UltraDesk Maintainers' }}
+          DEBEMAIL: ${{ secrets.DEBEMAIL || 'maintainers@ultradesk.local' }}
+          SERIES: ${{ matrix.series }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LAUNCHPAD_PPA}" ] || [ -z "${LAUNCHPAD_GPG_PRIVATE_KEY}" ]; then
+            echo "LAUNCHPAD_PPA or LAUNCHPAD_GPG_PRIVATE_KEY is not configured; skipping Launchpad PPA dput."
+            exit 0
+          fi
+
+          sudo apt-get update -qq
+          sudo apt-get install -y dpkg-dev debhelper devscripts dput gnupg2
+
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+          echo "${LAUNCHPAD_GPG_PRIVATE_KEY}" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | grep '^sec' | head -1 | cut -d: -f5)
+
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          elif [ -n "${{ github.event.release.tag_name }}" ]; then
+            VER="${{ github.event.release.tag_name }}"
+            VER="${VER#v}"
+          else
+            VER=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+
+          tar --exclude='.git' --exclude='debian' --exclude='target' \
+            -czf "../ultradesk-rust_${VER}.orig.tar.gz" .
+          cp -r packaging/debian debian
+          cat > debian/changelog << EOF
+          ultradesk-rust (${VER}-1~ppa1~${SERIES}1) ${SERIES}; urgency=medium
+
+            * Automated Launchpad PPA release for Ubuntu ${SERIES}.
+
+           -- ${DEBFULLNAME} <${DEBEMAIL}>  $(date -R)
+          EOF
+
+          dpkg-buildpackage -S -sa -k"${KEYID}" -nc
+          dput "ppa:${LAUNCHPAD_PPA}" ../ultradesk-rust_${VER}-1~ppa1~${SERIES}1_source.changes
+          gpg --batch --yes --delete-secret-and-public-key "${KEYID}" || true
