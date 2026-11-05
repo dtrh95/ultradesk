@@ -1,0 +1,164 @@
+name: Publish NixOS & Cachix
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without v prefix (for example 0.2.0)'
+        required: false
+      push_cachix:
+        description: 'Push built Nix closures to Cachix'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: publish-nixos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push-cachix:
+    name: NixOS Build & Cachix Push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix with Flakes enabled
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Configure Cachix binary cache
+        if: ${{ env.CACHIX_NAME != '' && env.CACHIX_AUTH_TOKEN != '' }}
+        env:
+          CACHIX_NAME: ${{ secrets.CACHIX_NAME }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        uses: cachix/cachix-action@v15
+        with:
+          name: ${{ secrets.CACHIX_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Check Nix Flake and NixOS Module evaluation
+        run: |
+          nix flake show
+          nix flake check --show-trace
+
+      - name: Build NixOS package from HEAD and push closure
+        run: |
+          nix build -L .#packages.x86_64-linux.ultradesk-rust-head -o result-head
+          test -x result-head/bin/ultradesk-rust
+          test -f result-head/share/applications/ultradesk-rust.desktop
+          test -f result-head/share/metainfo/io.github.ultradesk.UltraDesk.metainfo.xml
+
+      - name: Export portable Nix store archive artifact
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          STORE_PATH=$(readlink -f result-head)
+          nix-store --export $(nix-store -qR "$STORE_PATH") | xz -T0 -9 > "ultradesk-rust-${VERSION}-x86_64-nixos.nar.xz"
+
+      - name: Upload NixOS portable archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: nixos-nar-xz
+          path: ultradesk-rust-*-x86_64-nixos.nar.xz
+          retention-days: 3
+
+      - name: Attach NixOS bundle to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ultradesk-rust-*-x86_64-nixos.nar.xz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-nix-release-hash:
+    name: Update Nix Release Hash & NUR
+    if: ${{ github.event_name == 'release' || github.event.inputs.version != '' }}
+    needs: [build-and-push-cachix]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Update Nix derivation version and hash
+        id: nix-update
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          sed -i \
+            -e "s|owner = \".*\";|owner = \"${OWNER}\";|" \
+            -e "s|repo = \".*\";|repo = \"${REPO}\";|" \
+            nix/packages/ultradesk-rust/default.nix
+
+          cat > update-shim.nix << 'EOF'
+          { pkgs ? import <nixpkgs> { } }:
+          {
+            ultradesk-rust = pkgs.callPackage ./nix/packages/ultradesk-rust { };
+          }
+          EOF
+
+          nix run nixpkgs#nix-update -- \
+            --file ./update-shim.nix \
+            ultradesk-rust \
+            --version="${VERSION}"
+
+          rm -f update-shim.nix
+          nix build -L --no-link .#packages.x86_64-linux.ultradesk-rust
+
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open Pull Request with updated Nix hash
+        if: steps.nix-update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          base: main
+          commit-message: "nix: update ultradesk-rust to ${{ steps.nix-update.outputs.version }}"
+          title: "nix: update ultradesk-rust to v${{ steps.nix-update.outputs.version }}"
+          body: |
+            Automated update of `nix/packages/ultradesk-rust/default.nix` for release `v${{ steps.nix-update.outputs.version }}`.
+          branch: auto-update-nix-${{ steps.nix-update.outputs.version }}
+          delete-branch: true
+
+      - name: Trigger NUR repository sync webhook
+        if: ${{ env.NUR_REPO != '' && env.NUR_REPO_TOKEN != '' }}
+        env:
+          NUR_REPO: ${{ secrets.NUR_REPO }}
+          NUR_REPO_TOKEN: ${{ secrets.NUR_REPO_TOKEN }}
+        run: |
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${NUR_REPO_TOKEN}" \
+            "https://api.github.com/repos/${NUR_REPO}/dispatches" \
+            -d "{\"event_type\":\"update-ultradesk-rust\",\"client_payload\":{\"version\":\"${{ steps.nix-update.outputs.version }}\"}}"
