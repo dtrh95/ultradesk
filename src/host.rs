@@ -1758,7 +1758,8 @@ impl HostSession {
         layout: DisplayLayout,
         backend: DesktopBackend,
     ) -> Self {
-        let core = HostCore::new(temp_password, master_password_proof, layout);
+        let mut core = HostCore::new(temp_password, master_password_proof, layout);
+        core.auto_approve = true;
         Self {
             inner: Arc::new(Mutex::new(HostSessionInner {
                 running: false,
@@ -1852,6 +1853,7 @@ impl HostSession {
                 && !s.host_id.is_empty()
                 && s.host_id.bytes().all(|b| b.is_ascii_digit())
             {
+                drop(s);
                 return self.status();
             }
             s.running = true;
@@ -1868,7 +1870,7 @@ impl HostSession {
         thread::spawn(move || {
             host_clone.run_host_worker(gen, &host_str, reg_port, use_tls, Some(ready_tx));
         });
-        let _ = ready_rx.recv_timeout(Duration::from_millis(2500));
+        let _ = ready_rx.recv_timeout(Duration::from_secs(10));
         self.status()
     }
 
@@ -1925,184 +1927,206 @@ impl HostSession {
             return;
         };
 
-        let Ok(mut reg) = RegistrationTransport::new(5.0, 16 * 1024 * 1024, true) else {
-            if let Some(tx) = ready_tx.take() {
-                let _ = tx.send(());
-            }
-            return;
-        };
-        if reg.connect_with_tls(reg_host, reg_port, use_tls).is_err()
-            || reg.send_command(&reg_cmd).is_err()
-        {
-            if let Some(tx) = ready_tx.take() {
-                let _ = tx.send(());
-            }
-            return;
-        };
+        while self.is_worker_active(gen) {
+            let Ok(mut reg) = RegistrationTransport::new(15.0, 16 * 1024 * 1024, true) else {
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(());
+                }
+                return;
+            };
+            if reg.connect_with_tls(reg_host, reg_port, use_tls).is_err()
+                || reg.send_command(&reg_cmd).is_err()
+            {
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(());
+                }
+                reg.close();
+                if !use_tls {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            };
 
-        let mut reg_reply: Option<HostRegistrationReply> = None;
-        let reg_deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < reg_deadline && self.is_worker_active(gen) {
-            match reg.receive_mode1_payload() {
-                Ok(payload) if payload.starts_with(b"3:") => {
-                    if let Ok(parsed) = parse_host_registration_reply(&payload) {
-                        reg_reply = Some(parsed);
-                        break;
+            let mut reg_reply: Option<HostRegistrationReply> = None;
+            let reg_deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < reg_deadline && self.is_worker_active(gen) {
+                match reg.receive_mode1_payload() {
+                    Ok(payload) if payload.starts_with(b"3:") => {
+                        if let Ok(parsed) = parse_host_registration_reply(&payload) {
+                            reg_reply = Some(parsed);
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            let Some(reply) = reg_reply else {
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(());
+                }
+                reg.close();
+                if !use_tls {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            };
+
+            {
+                let mut s = self.inner.lock().unwrap();
+                if s.running && s.generation == gen {
+                    s.host_id = reply.id.clone();
+                }
+            }
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
+
+            reg.set_timeout(0.03);
+            let mut active_relay: Option<(
+                SessionTransport,
+                RelayNotification,
+                Option<(u16, String)>,
+            )> = None;
+            let mut viewer_route: Option<(String, u16)> = None;
+            let mut last_keepalive = Instant::now();
+            let mut next_capture_at = Instant::now();
+
+            while self.is_worker_active(gen) {
+                if last_keepalive.elapsed() >= Duration::from_secs(50) {
+                    last_keepalive = Instant::now();
+                    let _ = reg.send_command(b"2");
+                    if let Some((ref mut relay, _, _)) = active_relay {
+                        let _ = relay.send_system(b"ping", false);
                     }
                 }
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-        let Some(reply) = reg_reply else {
-            if let Some(tx) = ready_tx.take() {
-                let _ = tx.send(());
-            }
-            reg.close();
-            return;
-        };
 
-        {
-            let mut s = self.inner.lock().unwrap();
-            if s.running && s.generation == gen {
-                s.host_id = reply.id.clone();
-            }
-        }
-        if let Some(tx) = ready_tx.take() {
-            let _ = tx.send(());
-        }
-
-        reg.set_timeout(0.03);
-        let mut active_relay: Option<(SessionTransport, RelayNotification, Option<(u16, String)>)> =
-            None;
-        let mut viewer_route: Option<(String, u16)> = None;
-        let mut last_keepalive = Instant::now();
-        let mut next_capture_at = Instant::now();
-
-        while self.is_worker_active(gen) {
-            if last_keepalive.elapsed() >= Duration::from_secs(50) {
-                last_keepalive = Instant::now();
-                let _ = reg.send_command(b"2");
-                if let Some((ref mut relay, _, _)) = active_relay {
-                    let _ = relay.send_system(b"ping", false);
-                }
-            }
-
-            match reg.receive_mode1_payload() {
-                Ok(payload) => {
-                    let text = String::from_utf8_lossy(&payload);
-                    if let Some(notif) = parse_relay_notification_with_defaults(
-                        &text,
-                        &reply.ping_list,
-                        &reply.ping_host_name_list,
-                    ) {
-                        if let Some((_, ref cur_notif, Some((pub_port, ref pub_ip)))) = active_relay
-                        {
-                            if *cur_notif == notif {
-                                let avail = encode_availability_reply(&notif, pub_port, pub_ip);
-                                let _ = reg.send_command(&avail);
-                                continue;
-                            }
-                        }
-                        let has_active_viewer = {
-                            let s = self.inner.lock().unwrap();
-                            s.core.phase != HostPhase::None
-                        };
-                        if !has_active_viewer {
-                            let relay_port = if use_tls { 443 } else { reg_port };
-                            if let Ok(mut new_relay) =
-                                SessionTransport::new(5.0, 16 * 1024 * 1024, true)
+                match reg.receive_mode1_payload() {
+                    Ok(payload) => {
+                        let text = String::from_utf8_lossy(&payload);
+                        if let Some(notif) = parse_relay_notification_with_defaults(
+                            &text,
+                            &reply.ping_list,
+                            &reply.ping_host_name_list,
+                        ) {
+                            if let Some((_, ref cur_notif, Some((pub_port, ref pub_ip)))) =
+                                active_relay
                             {
-                                if new_relay
-                                    .connect(
-                                        &notif.relay_ip,
-                                        relay_port,
-                                        &notif.relay_host,
-                                        use_tls,
-                                    )
-                                    .is_ok()
-                                    && new_relay.send_system(b"0", true).is_ok()
+                                if *cur_notif == notif {
+                                    let avail = encode_availability_reply(&notif, pub_port, pub_ip);
+                                    let _ = reg.send_command(&avail);
+                                    continue;
+                                }
+                            }
+                            let has_active_viewer = {
+                                let s = self.inner.lock().unwrap();
+                                s.core.phase != HostPhase::None
+                            };
+                            if !has_active_viewer {
+                                let relay_port = if use_tls { 443 } else { reg_port };
+                                if let Ok(mut new_relay) =
+                                    SessionTransport::new(5.0, 16 * 1024 * 1024, true)
                                 {
-                                    new_relay.set_timeout(0.02);
-                                    active_relay = Some((new_relay, notif, None));
-                                    viewer_route = None;
+                                    if new_relay
+                                        .connect(
+                                            &notif.relay_ip,
+                                            relay_port,
+                                            &notif.relay_host,
+                                            use_tls,
+                                        )
+                                        .is_ok()
+                                        && new_relay.send_system(b"0", false).is_ok()
+                                    {
+                                        new_relay.set_timeout(0.02);
+                                        active_relay = Some((new_relay, notif, None));
+                                        viewer_route = None;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                Err(e) if e.starts_with("TimeoutError") => {}
-                Err(_) => break,
-            }
-
-            if let Some((ref mut relay, ref notif, ref mut assigned_addr)) = active_relay {
-                match relay.receive_body() {
-                    Ok(body) => match decode_transport_body(&body) {
-                        Ok(Some(pkt)) if pkt.kind == "direct" && pkt.data.starts_with(b"0:") => {
-                            if let Some((pub_port, pub_ip)) = parse_relay_address(&pkt.data) {
-                                *assigned_addr = Some((pub_port, pub_ip.clone()));
-                                let avail = encode_availability_reply(notif, pub_port, &pub_ip);
-                                let _ = reg.send_command(&avail);
-                            }
-                        }
-                        Ok(Some(pkt)) if pkt.kind == "relay" => {
-                            let peer_ip = std::net::Ipv4Addr::from(pkt.address_value).to_string();
-                            viewer_route = Some((peer_ip, pkt.port));
-                            if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
-                                let _ = self.handle_peer_payload(&decoded);
-                            }
-                        }
-                        _ => {}
-                    },
                     Err(e) if e.starts_with("TimeoutError") => {}
-                    Err(_) => {
-                        active_relay = None;
-                        viewer_route = None;
+                    Err(_) => break,
+                }
+
+                if let Some((ref mut relay, ref notif, ref mut assigned_addr)) = active_relay {
+                    match relay.receive_body() {
+                        Ok(body) => match decode_transport_body(&body) {
+                            Ok(Some(pkt))
+                                if pkt.kind == "direct" && pkt.data.starts_with(b"0:") =>
+                            {
+                                if let Some((pub_port, pub_ip)) = parse_relay_address(&pkt.data) {
+                                    *assigned_addr = Some((pub_port, pub_ip.clone()));
+                                    let avail = encode_availability_reply(notif, pub_port, &pub_ip);
+                                    let _ = reg.send_command(&avail);
+                                }
+                            }
+                            Ok(Some(pkt)) if pkt.kind == "relay" => {
+                                let peer_ip =
+                                    std::net::Ipv4Addr::from(pkt.address_value).to_string();
+                                viewer_route = Some((peer_ip, pkt.port));
+                                if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
+                                    let _ = self.handle_peer_payload(&decoded);
+                                }
+                            }
+                            _ => {}
+                        },
+                        Err(e) if e.starts_with("TimeoutError") => {}
+                        Err(_) => {
+                            active_relay = None;
+                            viewer_route = None;
+                            let mut s = self.inner.lock().unwrap();
+                            let actions = s.core.end_session("Relay disconnected");
+                            Self::record_actions(&mut s, &actions);
+                            s.outbound_peer_packets.clear();
+                        }
+                    }
+                }
+
+                let should_capture = {
+                    let s = self.inner.lock().unwrap();
+                    s.core.phase == HostPhase::Streaming
+                        && !s.core.waiting_ack
+                        && (s.capture_needed || Instant::now() >= next_capture_at)
+                };
+                if should_capture {
+                    let _ = self.step_capture();
+                    next_capture_at = Instant::now() + Duration::from_millis(40);
+                }
+
+                if let (Some((ref mut relay, _, _)), Some((ref peer_ip, peer_port))) =
+                    (&mut active_relay, &viewer_route)
+                {
+                    let outbound: Vec<Vec<u8>> = {
                         let mut s = self.inner.lock().unwrap();
-                        let actions = s.core.end_session("Relay disconnected");
-                        Self::record_actions(&mut s, &actions);
-                        s.outbound_peer_packets.clear();
+                        s.outbound_peer_packets.drain(..).collect()
+                    };
+                    for pkt in outbound {
+                        let _ = relay.send_relay(&pkt, peer_ip, *peer_port, false);
                     }
                 }
             }
 
-            let should_capture = {
-                let s = self.inner.lock().unwrap();
-                s.core.phase == HostPhase::Streaming
-                    && !s.core.waiting_ack
-                    && (s.capture_needed || Instant::now() >= next_capture_at)
-            };
-            if should_capture {
-                let _ = self.step_capture();
-                next_capture_at = Instant::now() + Duration::from_millis(40);
-            }
-
-            if let (Some((ref mut relay, _, _)), Some((ref peer_ip, peer_port))) =
-                (&mut active_relay, &viewer_route)
-            {
-                let outbound: Vec<Vec<u8>> = {
-                    let mut s = self.inner.lock().unwrap();
-                    s.outbound_peer_packets.drain(..).collect()
-                };
-                for pkt in outbound {
-                    let _ = relay.send_relay(&pkt, peer_ip, *peer_port, false);
+            if let Some((mut relay, _, _)) = active_relay {
+                if let Some((ref peer_ip, peer_port)) = viewer_route {
+                    let outbound: Vec<Vec<u8>> = {
+                        let mut s = self.inner.lock().unwrap();
+                        s.outbound_peer_packets.drain(..).collect()
+                    };
+                    for pkt in outbound {
+                        let _ = relay.send_relay(&pkt, peer_ip, peer_port, false);
+                    }
                 }
+                relay.close();
             }
-        }
-
-        if let Some((mut relay, _, _)) = active_relay {
-            if let Some((ref peer_ip, peer_port)) = viewer_route {
-                let outbound: Vec<Vec<u8>> = {
-                    let mut s = self.inner.lock().unwrap();
-                    s.outbound_peer_packets.drain(..).collect()
-                };
-                for pkt in outbound {
-                    let _ = relay.send_relay(&pkt, peer_ip, peer_port, false);
-                }
+            reg.close();
+            if !use_tls || !self.is_worker_active(gen) {
+                break;
             }
-            relay.close();
+            thread::sleep(Duration::from_secs(2));
         }
-        reg.close();
     }
 
     pub fn stop(&self) -> Vec<HostAction> {
@@ -2525,7 +2549,7 @@ mod tests {
                     }
                 }
             };
-            assert_eq!(relay_hello, b"\x000");
+            assert_eq!(relay_hello, b"0");
 
             let relay_assigned = encode_typed_transport_frame(b"0:54321:198.51.100.9:6.6.133", 1);
             relay_stream.write_all(&relay_assigned).unwrap();
@@ -2635,6 +2659,9 @@ mod tests {
         let st = session.start_with_endpoint("127.0.0.1", port, false);
         assert!(st.running);
         assert_eq!(st.host_id, "987654321");
+        let st2 = session.start_with_endpoint("127.0.0.1", port, false);
+        assert!(st2.running);
+        assert_eq!(st2.host_id, "987654321");
 
         server_handle.join().unwrap();
         let _ = session.stop();
