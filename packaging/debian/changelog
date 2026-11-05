@@ -1,0 +1,7 @@
+ultradesk-rust (0.2.0-1) unstable; urgency=medium
+
+  * Release UltraDesk (Rust Edition) 0.2.0 with multi-distro packaging
+  * Support screen streaming, remote input, audio, clipboard sync, and file transfer
+  * Add bilingual VI/EN portal and collapsible session toolbar
+
+ -- Hieu Doan <hieudoan@ultradesk.io>  Thu, 05 Nov 2026 14:45:00 +0700

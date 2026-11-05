@@ -1,0 +1,29 @@
+Source: ultradesk-rust
+Section: net
+Priority: optional
+Maintainer: Hieu Doan <hieudoan@ultradesk.io>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc,
+               pkg-config,
+               libssl-dev,
+               libxcb1-dev,
+               libxcb-shm0-dev,
+               libxcb-randr0-dev,
+               libxcb-xtest0-dev,
+               python3
+Standards-Version: 4.6.0
+Homepage: https://github.com/ultradesk/ultradesk-rust
+
+Package: ultradesk-rust
+Architecture: any
+Depends: python3,
+         python3-gi,
+         gir1.2-gtk-3.0,
+         gir1.2-webkit2-4.1 | gir1.2-webkit2-4.0,
+         ${shlibs:Depends},
+         ${misc:Depends}
+Description: Remote desktop controller and host for Linux (Rust Edition)
+ UltraDesk is a Linux-native remote desktop controller and host written in Rust,
+ supporting screen streaming, remote input, audio, clipboard synchronization,
+ and file transfer.

@@ -1,0 +1,463 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && github.run_id || (github.head_ref || github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build-deb:
+    name: DEB [${{ matrix.codename }}]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian:12
+            codename: bookworm
+          - distro: debian:13
+            codename: trixie
+          - distro: debian:testing
+            codename: forky
+          - distro: debian:unstable
+            codename: sid
+          - distro: ubuntu:22.04
+            codename: jammy
+          - distro: ubuntu:24.04
+            codename: noble
+          - distro: ubuntu:25.10
+            codename: questing
+          - distro: ubuntu:26.04
+            codename: resolute
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare debian directory
+        run: cp -r packaging/debian debian
+
+      - name: Build DEB
+        uses: jtdor/build-deb-action@v1
+        with:
+          docker-image: ${{ matrix.distro }}
+          buildpackage-opts: --build=binary --no-sign
+
+      - name: Rename DEB artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          for f in debian/artifacts/*.deb; do
+            base=$(basename "$f" .deb)
+            sudo mv "$f" "debian/artifacts/${base}_${{ matrix.codename }}.deb"
+          done
+
+      - name: Create APT Repo
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y reprepro gnupg2
+
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback"  > ~/.gnupg/gpg.conf
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+          FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep '^fpr' | head -1 | cut -d: -f10)
+          echo "${FINGERPRINT}:6:" | gpg --import-ownertrust
+          gpg-connect-agent reloadagent /bye || true
+
+          codename="${{ matrix.codename }}"
+          case "${{ matrix.distro }}" in
+            debian:unstable) suite="unstable" ;;
+            debian:testing)  suite="testing"  ;;
+            *)               suite="stable"   ;;
+          esac
+
+          mkdir -p "repo/apt/${codename}/conf"
+          cat > "repo/apt/${codename}/conf/distributions" << EOF
+          Codename: ${codename}
+          Suite: ${suite}
+          Components: main
+          Architectures: amd64
+          SignWith: ${FINGERPRINT}
+          EOF
+
+          for deb in debian/artifacts/*.deb; do
+            [ -f "$deb" ] || continue
+            reprepro --gnupghome ~/.gnupg -b "repo/apt/${codename}" includedeb "$codename" "$deb"
+          done
+
+          gpg --batch --yes --delete-secret-and-public-key "${FINGERPRINT}" || true
+
+      - name: Upload DEB artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ matrix.codename }}
+          path: debian/artifacts/*.deb
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 1 || 3 }}
+
+      - name: Upload APT Repo artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: repo-apt-${{ matrix.codename }}
+          path: repo/
+          retention-days: 1
+
+  build-rpm-fedora:
+    name: RPM [fedora-${{ matrix.releasever }}]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: fedora:43
+            releasever: 43
+          - distro: fedora:44
+            releasever: 44
+          - distro: fedora:45
+            releasever: 45
+          - distro: fedora:rawhide
+            releasever: rawhide
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Fedora RPM
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ matrix.distro }}
+          options: -v ${{ github.workspace }}:/work
+          run: |
+            set -euo pipefail
+            find / -name '*openh264*' -type f -delete 2>/dev/null || true
+            dnf clean all
+            dnf install -y rpm-build rpmdevtools dnf-plugins-core
+            rpmdev-setuptree
+            cp /work/packaging/rpm/fedora/ultradesk-rust.spec ~/rpmbuild/SPECS/
+            dnf builddep --setopt=install_weak_deps=False -y ~/rpmbuild/SPECS/ultradesk-rust.spec
+            mkdir -p ~/rpmbuild/SOURCES
+            cd /work
+            VERSION=$(grep '^Version:' packaging/rpm/fedora/ultradesk-rust.spec | awk '{print $2}')
+            tar --exclude='.git' \
+                --exclude='packaging' \
+                --exclude='target' \
+                --transform "s|^\.|ultradesk-rust-${VERSION}|" \
+                -czf ~/rpmbuild/SOURCES/ultradesk-rust-${VERSION}.tar.gz .
+            rpmbuild -bb ~/rpmbuild/SPECS/ultradesk-rust.spec
+            mkdir -p /work/output
+            if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+              for rpm in ~/rpmbuild/RPMS/**/*.rpm; do
+                base=$(basename "$rpm" .rpm)
+                mv "$rpm" "/work/output/${base}.${{ matrix.releasever }}.rpm"
+              done
+            else
+              find ~/rpmbuild/RPMS -name '*.rpm' -exec cp {} /work/output/ \;
+            fi
+
+      - name: Sign RPM packages and Create Repo
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y createrepo-c gnupg2 rpm
+
+          sudo chmod -R 777 output/
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback"  > ~/.gnupg/gpg.conf
+          gpg-connect-agent reloadagent /bye || true
+
+          KEYID=$(gpg --list-secret-keys --with-colons | grep '^sec' | head -1 | cut -d: -f5)
+
+          cat > ~/.rpmmacros << EOF
+          %_gpg_name ${KEYID}
+          %_gpg_sign_cmd_extra_args --pinentry-mode loopback
+          EOF
+
+          for rpm in output/*.rpm; do
+            rpmsign --addsign "$rpm"
+          done
+
+          releasever="${{ matrix.releasever }}"
+          dir="repo/rpm/fedora/${releasever}/x86_64"
+          mkdir -p "$dir"
+
+          for rpm in output/*.rpm; do
+            [ -f "$rpm" ] || continue
+            [[ "$rpm" == *debug* ]] && continue
+            cp "$rpm" "$dir/"
+          done
+
+          if [ "$(ls -A $dir)" ]; then
+            createrepo_c "$dir"
+            gpg --batch --yes --detach-sign --armor "$dir/repodata/repomd.xml"
+          fi
+
+          mkdir -p repo/rpm/fedora
+          cat > "repo/rpm/fedora/ultradesk-rust-${releasever}.repo" << EOF
+          [ultradesk-rust]
+          name=ultradesk-rust - Fedora ${releasever}
+          baseurl=https://ultradesk-rust.pages.dev/rpm/fedora/${releasever}/x86_64/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://ultradesk-rust.pages.dev/pubkey.gpg
+          EOF
+
+          gpg --batch --yes --delete-secret-and-public-key "$KEYID" || true
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpm-fedora-${{ matrix.releasever }}
+          path: output/*.rpm
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 1 || 3 }}
+
+      - name: Upload Fedora Repo artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: repo-rpm-fedora-${{ matrix.releasever }}
+          path: repo/
+          retention-days: 1
+
+  build-rpm-opensuse:
+    name: RPM [opensuse-${{ matrix.releasever }}]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: opensuse/tumbleweed
+            releasever: tumbleweed
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build openSUSE RPM
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ matrix.distro }}
+          options: -v ${{ github.workspace }}:/work
+          run: |
+            set -euo pipefail
+            zypper -n dup
+            zypper install -y rpm-build rpmdevtools
+            rpmdev-setuptree
+            cp /work/packaging/rpm/opensuse/ultradesk-rust.spec ~/rpmbuild/SPECS/
+            zypper -n install \
+              $(rpmspec -P ~/rpmbuild/SPECS/ultradesk-rust.spec \
+                | grep '^BuildRequires:' \
+                | awk '{print $2}' \
+                | xargs)
+            mkdir -p ~/rpmbuild/SOURCES
+            cd /work
+            VERSION=$(grep '^Version:' packaging/rpm/opensuse/ultradesk-rust.spec | awk '{print $2}')
+            tar --exclude='.git' \
+                --exclude='packaging' \
+                --exclude='target' \
+                --transform "s|^\.|ultradesk-rust-${VERSION}|" \
+                -czf ~/rpmbuild/SOURCES/ultradesk-rust-${VERSION}.tar.gz .
+            rpmbuild -bb ~/rpmbuild/SPECS/ultradesk-rust.spec
+            mkdir -p /work/output
+            if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+              for rpm in ~/rpmbuild/RPMS/**/*.rpm; do
+                base=$(basename "$rpm" .rpm)
+                mv "$rpm" "/work/output/${base}.${{ matrix.releasever }}.rpm"
+              done
+            else
+              find ~/rpmbuild/RPMS -name '*.rpm' -exec cp {} /work/output/ \;
+            fi
+
+      - name: Sign RPM packages and Create Repo
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y createrepo-c gnupg2 rpm
+
+          sudo chmod -R 777 output/
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback"  > ~/.gnupg/gpg.conf
+          gpg-connect-agent reloadagent /bye || true
+
+          KEYID=$(gpg --list-secret-keys --with-colons | grep '^sec' | head -1 | cut -d: -f5)
+
+          cat > ~/.rpmmacros << EOF
+          %_gpg_name ${KEYID}
+          %_gpg_sign_cmd_extra_args --pinentry-mode loopback
+          EOF
+
+          for rpm in output/*.rpm; do
+            rpmsign --addsign "$rpm"
+          done
+
+          releasever="${{ matrix.releasever }}"
+          dir="repo/rpm/opensuse/${releasever}/x86_64"
+          mkdir -p "$dir"
+
+          for rpm in output/*.rpm; do
+            [ -f "$rpm" ] || continue
+            [[ "$rpm" == *debug* ]] && continue
+            cp "$rpm" "$dir/"
+          done
+
+          if [ "$(ls -A $dir)" ]; then
+            createrepo_c "$dir"
+            gpg --batch --yes --detach-sign --armor "$dir/repodata/repomd.xml"
+          fi
+
+          mkdir -p repo/rpm/opensuse
+          cat > "repo/rpm/opensuse/ultradesk-rust-${releasever}.repo" << EOF
+          [ultradesk-rust]
+          name=ultradesk-rust - openSUSE ${releasever}
+          baseurl=https://ultradesk-rust.pages.dev/rpm/opensuse/${releasever}/x86_64/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://ultradesk-rust.pages.dev/pubkey.gpg
+          EOF
+
+          gpg --batch --yes --delete-secret-and-public-key "$KEYID" || true
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpm-opensuse-${{ matrix.releasever }}
+          path: output/*.rpm
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 1 || 3 }}
+
+      - name: Upload openSUSE Repo artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: repo-rpm-opensuse-${{ matrix.releasever }}
+          path: repo/
+          retention-days: 1
+
+  build-arch:
+    name: Arch Linux (zstd)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build on Arch Linux
+        uses: addnab/docker-run-action@v3
+        with:
+          image: archlinux:latest
+          options: -v ${{ github.workspace }}:/work
+          run: |
+            set -euo pipefail
+            pacman -Syu --noconfirm \
+              base-devel rust cargo openssl libxcb python \
+              make pkgconf zstd
+
+            cd /work
+            make build
+            make check
+            make install PREFIX=/usr DESTDIR=/work/arch-dist
+            find /work/arch-dist/usr/bin -type f \
+              -exec strip --strip-all {} + 2>/dev/null || true
+
+      - name: Package as tar.zst
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION//\//-}"
+          tar -c -I 'zstd -19 -T0' -f "ultradesk-rust-${VERSION}-x86_64-archlinux.tar.zst" -C arch-dist .
+
+      - name: Upload Arch artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: arch-tar-zst
+          path: ultradesk-rust-*-x86_64-archlinux.tar.zst
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 1 || 3 }}
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-deb, build-rpm-fedora, build-rpm-opensuse, build-arch]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: 'artifacts/**/*'
+
+      - name: Upload to GitHub Releases
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            artifacts/deb-*/**/*.deb
+            artifacts/rpm-*/**/*.rpm
+            artifacts/**/*.tar.zst
+          generate_release_notes: true
+          draft: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy:
+    name: Deploy to Cloudflare Pages
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all repo artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: repo-*
+          path: downloaded-repos/
+
+      - name: Merge Repos
+        run: |
+          mkdir -p repo
+          for d in downloaded-repos/repo-*/; do
+            if [ -d "$d" ]; then
+              cp -a "$d". repo/
+            fi
+          done
+
+      - name: Copy public key
+        run: cp packaging/pubkey.gpg repo/pubkey.gpg
+
+      - name: Generate index pages
+        uses: gacts/directory-listing@v1
+        with:
+          target: repo
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy repo --project-name=ultradesk-rust --branch=main --commit-dirty=true
