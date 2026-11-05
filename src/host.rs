@@ -1,10 +1,16 @@
 use crate::input::{decode_host_input, HostInputEvent, KEY_DOWN, SYS_KEY_DOWN, VK_PACKET};
-use crate::protocol::{encode_byte_array_fields, md5_hex_lower};
-use crate::screen::{compress_rgb555_with_dict, DisplayLayout, MonitorRect};
+use crate::protocol::{
+    decode_command_fields, decode_transport_body, encode_byte_array_fields, md5_hex_lower,
+    DEFAULT_REGISTRATION_HOST,
+};
+use crate::screen::{compress_rgb555_standard, DisplayLayout, MonitorRect};
+use crate::server::encode_base64;
+use crate::session::{detect_local_ip, RegistrationTransport, SessionTransport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::randr::ConnectionExt as _;
@@ -20,6 +26,94 @@ pub const MAX_FAILURES_BEFORE_LOCKOUT: u32 = 5;
 pub const LOCKOUT_DURATION: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRegistrationReply {
+    pub public_port: u16,
+    pub id: String,
+    pub public_ip: String,
+    pub status: i32,
+    pub ping_list: String,
+    pub ping_host_name_list: String,
+    pub opaque_server_token: String,
+}
+
+pub fn build_host_registration_command(
+    device_id: &str,
+    temp_password: &str,
+    local_ip: &str,
+    computer_name_b64: &str,
+    hardware_mac: &str,
+    custom_password_proof: Option<&str>,
+    user_name: &str,
+) -> Result<Vec<u8>, String> {
+    let custom_pw = custom_password_proof.unwrap_or("");
+    let fields = [
+        "3",
+        device_id,
+        temp_password,
+        "0",
+        local_ip,
+        "0",
+        computer_name_b64,
+        "6.6.133",
+        hardware_mac,
+        "",
+        "0|6|0|8|0|0",
+        "0",
+        "",
+        custom_pw,
+        "0",
+        "",
+        user_name,
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "",
+        "",
+        "",
+    ];
+    for (i, f) in fields.iter().enumerate() {
+        if !f.bytes().all(|b| (32..=126).contains(&b) && b != b':') {
+            return Err(format!("invalid host registration field {}", i));
+        }
+    }
+    Ok(fields.join(":").into_bytes())
+}
+
+pub fn parse_host_registration_reply(payload: &[u8]) -> Result<HostRegistrationReply, String> {
+    let fields = decode_command_fields(payload)?;
+    if fields.len() < 11 || fields[0] != "3" {
+        return Err("expected command 3 host registration reply".to_string());
+    }
+    let public_port = fields[1]
+        .parse::<u16>()
+        .ok()
+        .filter(|&p| p != 0 && fields[1].bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| "invalid public port in registration reply".to_string())?;
+    let id_num = fields[2]
+        .parse::<u64>()
+        .ok()
+        .filter(|&n| n != 0 && fields[2].bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| "invalid assigned ID in registration reply".to_string())?;
+    let status = fields[7]
+        .parse::<i32>()
+        .map_err(|_| "invalid status in registration reply".to_string())?;
+    Ok(HostRegistrationReply {
+        public_port,
+        id: id_num.to_string(),
+        public_ip: fields[3].clone(),
+        status,
+        ping_list: fields[6].clone(),
+        ping_host_name_list: fields[9].clone(),
+        opaque_server_token: fields[10].clone(),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayNotification {
     pub tag: Option<String>,
     pub hash: Option<String>,
@@ -28,16 +122,33 @@ pub struct RelayNotification {
 }
 
 pub fn parse_relay_notification(text: &str) -> Option<RelayNotification> {
+    parse_relay_notification_with_defaults(text, "", "")
+}
+
+pub fn parse_relay_notification_with_defaults(
+    text: &str,
+    default_ips: &str,
+    default_hosts: &str,
+) -> Option<RelayNotification> {
     let parts: Vec<&str> = text.split(':').collect();
     if parts.is_empty() {
         return None;
     }
     if parts[0] == "11" && parts.len() >= 4 {
+        let relay_ip = parts[1].trim().to_string();
+        if relay_ip.is_empty() {
+            return None;
+        }
+        let relay_host = if parts[3].trim().is_empty() {
+            DEFAULT_REGISTRATION_HOST.to_string()
+        } else {
+            parts[3].trim().to_string()
+        };
         return Some(RelayNotification {
             tag: None,
             hash: None,
-            relay_ip: parts[1].to_string(),
-            relay_host: parts[3].to_string(),
+            relay_ip,
+            relay_host,
         });
     }
     if parts[0] == "17" && parts.len() >= 5 {
@@ -51,23 +162,86 @@ pub fn parse_relay_notification(text: &str) -> Option<RelayNotification> {
         } else {
             Some(parts[2].to_string())
         };
-        let relay_ip = parts[3].split(';').next().unwrap_or("").to_string();
-        let relay_host = parts[4].split(';').next().unwrap_or("").to_string();
-        if relay_ip.is_empty() {
-            return None;
+        let ip_source = if parts[3].is_empty() {
+            default_ips
+        } else {
+            parts[3]
+        };
+        let host_source = if parts[3].is_empty() && parts[4].is_empty() {
+            default_hosts
+        } else {
+            parts[4]
+        };
+        let ips: Vec<&str> = ip_source.split(';').collect();
+        let hosts: Vec<&str> = host_source.split(';').collect();
+        for (idx, ip_candidate) in ips.iter().enumerate() {
+            let ip_trimmed = ip_candidate.trim();
+            if ip_trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
+                let host_raw = hosts.get(idx).copied().unwrap_or("").trim();
+                let relay_host = if host_raw.is_empty() {
+                    DEFAULT_REGISTRATION_HOST.to_string()
+                } else {
+                    host_raw.to_string()
+                };
+                return Some(RelayNotification {
+                    tag,
+                    hash,
+                    relay_ip: ip_trimmed.to_string(),
+                    relay_host,
+                });
+            }
         }
-        return Some(RelayNotification {
-            tag,
-            hash,
-            relay_ip,
-            relay_host: if relay_host.is_empty() {
-                "functions3.ultraviewer.net".to_string()
-            } else {
-                relay_host
-            },
-        });
     }
     None
+}
+
+pub fn parse_relay_address(payload: &[u8]) -> Option<(u16, String)> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.len() < 3 || parts[0] != "0" || !parts[1].bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let port = parts[1].parse::<u16>().ok().filter(|&p| p != 0)?;
+    let ip = parts[2].parse::<std::net::Ipv4Addr>().ok()?.to_string();
+    Some((port, ip))
+}
+
+pub fn encode_availability_reply(
+    notif: &RelayNotification,
+    public_port: u16,
+    public_ip: &str,
+) -> Vec<u8> {
+    format!(
+        "17:{}:{}:{}:{}:{}:0:|0",
+        notif.tag.as_deref().unwrap_or(""),
+        notif.hash.as_deref().unwrap_or(""),
+        notif.relay_ip,
+        public_port,
+        public_ip
+    )
+    .into_bytes()
+}
+
+pub fn decode_peer_payload(payload: &[u8], unicode_bytes: bool) -> Option<Vec<u8>> {
+    if !unicode_bytes {
+        return Some(payload.to_vec());
+    }
+    if payload.len() > 2_097_152 || payload.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = payload
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let text = String::from_utf16(&units).ok()?;
+    if text
+        .chars()
+        .all(|c| c as u32 >= 32 || matches!(c as u32, 9 | 10 | 13))
+    {
+        Some(text.into_bytes())
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,10 +372,9 @@ impl LoginThrottle {
 pub fn encode_host_screen_init(layout: &DisplayLayout) -> Vec<u8> {
     let width_bytes = (layout.width as i32).to_le_bytes();
     let height_bytes = (layout.height as i32).to_le_bytes();
-    let num_monitors = [layout.monitors.len().max(1) as u8];
     let monitor_bounds = if layout.monitors.is_empty() {
         format!(
-            "{}:{}:{}:{}|\0",
+            "{}:{}:{}:{}|",
             layout.virtual_left,
             layout.virtual_top,
             layout.virtual_left + layout.width as i32,
@@ -212,7 +385,6 @@ pub fn encode_host_screen_init(layout: &DisplayLayout) -> Vec<u8> {
         for m in &layout.monitors {
             s.push_str(&format!("{}:{}:{}:{}|", m.left, m.top, m.right, m.bottom));
         }
-        s.push('\0');
         s
     };
     let vl_bytes = layout.virtual_left.to_le_bytes();
@@ -225,7 +397,7 @@ pub fn encode_host_screen_init(layout: &DisplayLayout) -> Vec<u8> {
         &[],
         &[0],
         HOST_VERSION,
-        &num_monitors,
+        &[1],
         monitor_bounds.as_bytes(),
         &vl_bytes,
         &vt_bytes,
@@ -254,12 +426,12 @@ pub fn encode_host_frame(
     rgb555_top_down: &[u8],
     seq: i32,
 ) -> Result<Vec<u8>, String> {
-    let compressed = compress_rgb555_with_dict(rgb555_top_down, 1)?;
-    let mut rect_bytes = Vec::with_capacity(16);
-    rect_bytes.extend_from_slice(&(rect.0 as i32).to_le_bytes());
-    rect_bytes.extend_from_slice(&(rect.1 as i32).to_le_bytes());
-    rect_bytes.extend_from_slice(&(rect.2 as i32).to_le_bytes());
-    rect_bytes.extend_from_slice(&(rect.3 as i32).to_le_bytes());
+    let compressed = compress_rgb555_standard(rgb555_top_down, 1)?;
+    let mut rect_bytes = Vec::with_capacity(8);
+    rect_bytes.extend_from_slice(&(rect.0 as u16).to_le_bytes());
+    rect_bytes.extend_from_slice(&(rect.1 as u16).to_le_bytes());
+    rect_bytes.extend_from_slice(&(rect.2 as u16).to_le_bytes());
+    rect_bytes.extend_from_slice(&(rect.3 as u16).to_le_bytes());
 
     let seq_bytes = seq.to_le_bytes();
     let fields: [&[u8]; 11] = [
@@ -276,6 +448,16 @@ pub fn encode_host_frame(
         &[],
     ];
     encode_byte_array_fields(&fields)
+}
+
+fn peer_command_tag(payload: &[u8]) -> &[u8] {
+    let stripped = payload.strip_prefix(b"|||").unwrap_or(payload);
+    let tag = stripped.split(|&b| b == b'|').next().unwrap_or(&[]);
+    if !tag.is_empty() && tag.len() <= 3 && tag.iter().all(|b| b.is_ascii_digit()) {
+        tag
+    } else {
+        b"other"
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,6 +558,20 @@ impl HostCore {
                 return actions;
             }
 
+            if self.phase == HostPhase::Streaming && self.active_viewer.is_some() {
+                self.active_viewer = Some(login.clone());
+                self.phase = HostPhase::Starting;
+                self.next_frame_seq = FIRST_FRAME_NUMBER;
+                self.waiting_ack = false;
+                actions.push(HostAction::ReleaseAllInput);
+                actions.push(HostAction::SendPeer(encode_host_screen_init(&self.layout)));
+                actions.push(HostAction::SendPeer(encode_host_control_permission(
+                    self.control_allowed,
+                )));
+                actions.push(HostAction::SessionStarted(login));
+                return actions;
+            }
+
             if self.auto_approve || (is_master && self.auto_approve_master) {
                 self.active_viewer = Some(login.clone());
                 self.phase = HostPhase::Starting;
@@ -395,20 +591,22 @@ impl HostCore {
             return actions;
         }
 
-        if payload == b"17" && self.phase == HostPhase::Starting {
+        let tag = peer_command_tag(payload);
+
+        if tag == b"17" && self.phase == HostPhase::Starting {
             self.phase = HostPhase::Streaming;
             self.waiting_ack = false;
             actions.push(HostAction::RequestCapture);
             return actions;
         }
 
-        if payload == b"18" && self.phase == HostPhase::Streaming && self.waiting_ack {
+        if tag == b"18" && self.phase == HostPhase::Streaming && self.waiting_ack {
             self.waiting_ack = false;
             actions.push(HostAction::RequestCapture);
             return actions;
         }
 
-        if payload == b"19" {
+        if tag == b"19" {
             self.phase = HostPhase::None;
             self.active_viewer = None;
             self.waiting_ack = false;
@@ -419,9 +617,13 @@ impl HostCore {
             return actions;
         }
 
-        if payload == b"20" {
+        if tag == b"20" {
             actions.push(HostAction::SendPeer(encode_host_keepalive_reply()));
             return actions;
+        }
+
+        if tag == b"32" && (payload == b"32|||1" || payload == b"|||32|||1") {
+            return self.end_session("Unsupported viewer color mode");
         }
 
         if payload.starts_with(b"8|||") || payload.starts_with(&[30, b'|', b'|', b'|']) {
@@ -1098,6 +1300,18 @@ impl Drop for X11Capturer {
     }
 }
 
+pub fn rgb555_bottom_up_to_top_down(bottom_up: &[u8], width: usize) -> Vec<u8> {
+    let stride = width * 2;
+    if stride == 0 || bottom_up.is_empty() || bottom_up.len() % stride != 0 {
+        return bottom_up.to_vec();
+    }
+    let mut top_down = Vec::with_capacity(bottom_up.len());
+    for row in bottom_up.chunks_exact(stride).rev() {
+        top_down.extend_from_slice(row);
+    }
+    top_down
+}
+
 impl Capturer for X11Capturer {
     fn enumerate_displays(&mut self) -> Result<Vec<MonitorRect>, String> {
         let root = self.root_rect()?;
@@ -1135,13 +1349,15 @@ impl Capturer for X11Capturer {
     }
 
     fn capture_screen(&mut self, rect: MonitorRect) -> Result<Vec<u8>, String> {
+        let width = rect.width() as usize;
         if self.shm_supported {
             if let Some(pixels) = self.capture_shm(rect) {
-                return Ok(pixels);
+                return Ok(rgb555_bottom_up_to_top_down(&pixels, width));
             }
             self.shm_supported = false;
         }
-        self.capture_get_image(rect)
+        let pixels = self.capture_get_image(rect)?;
+        Ok(rgb555_bottom_up_to_top_down(&pixels, width))
     }
 }
 
@@ -1415,10 +1631,85 @@ pub struct HostStatus {
 
 struct HostSessionInner {
     running: bool,
+    generation: u64,
+    device_id: String,
+    display_name: String,
     host_id: String,
     hardware_mac: String,
     core: HostCore,
     backend: DesktopBackend,
+    outbound_peer_packets: Vec<Vec<u8>>,
+    capture_needed: bool,
+    last_frame: Vec<u8>,
+}
+
+pub fn query_live_host_id(
+    device_id: &str,
+    hardware_mac: &str,
+    temp_password: &str,
+    master_password_proof: Option<&str>,
+    display_name: &str,
+) -> Result<String, String> {
+    query_live_host_id_at(
+        DEFAULT_REGISTRATION_HOST,
+        443,
+        true,
+        device_id,
+        hardware_mac,
+        temp_password,
+        master_password_proof,
+        display_name,
+    )
+}
+
+pub fn query_live_host_id_at(
+    reg_host: &str,
+    reg_port: u16,
+    use_tls: bool,
+    device_id: &str,
+    hardware_mac: &str,
+    temp_password: &str,
+    master_password_proof: Option<&str>,
+    display_name: &str,
+) -> Result<String, String> {
+    let local_ip = detect_local_ip();
+    let computer_b64 = encode_base64(display_name.as_bytes());
+    let user_raw = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "linux".to_string());
+    let user_clean: String = user_raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(24)
+        .collect();
+    let user_name = if user_clean.is_empty() {
+        "linux"
+    } else {
+        &user_clean
+    };
+    let cmd = build_host_registration_command(
+        device_id,
+        temp_password,
+        &local_ip,
+        &computer_b64,
+        hardware_mac,
+        master_password_proof,
+        user_name,
+    )?;
+    let mut reg = RegistrationTransport::new(5.0, 1024 * 1024, true)?;
+    reg.connect_with_tls(reg_host, reg_port, use_tls)?;
+    reg.send_command(&cmd)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let payload = reg.receive_mode1_payload()?;
+        if payload.starts_with(b"3:") {
+            let reply = parse_host_registration_reply(&payload)?;
+            reg.close();
+            return Ok(reply.id);
+        }
+    }
+    reg.close();
+    Err("registration server did not return command 3 reply".to_string())
 }
 
 #[derive(Clone)]
@@ -1444,35 +1735,382 @@ impl HostSession {
         layout: DisplayLayout,
         backend: DesktopBackend,
     ) -> Self {
+        Self::with_profile(
+            "FEDCBA9876543210FEDCBA9876543210",
+            host_id,
+            hardware_mac,
+            temp_password,
+            master_password_proof,
+            "UltraDesk",
+            layout,
+            backend,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_profile(
+        device_id: &str,
+        host_id: &str,
+        hardware_mac: &str,
+        temp_password: &str,
+        master_password_proof: Option<String>,
+        display_name: &str,
+        layout: DisplayLayout,
+        backend: DesktopBackend,
+    ) -> Self {
         let core = HostCore::new(temp_password, master_password_proof, layout);
         Self {
             inner: Arc::new(Mutex::new(HostSessionInner {
                 running: false,
+                generation: 0,
+                device_id: if device_id.len() == 32 {
+                    device_id.to_string()
+                } else {
+                    "FEDCBA9876543210FEDCBA9876543210".to_string()
+                },
+                display_name: if display_name.is_empty() {
+                    "UltraDesk".to_string()
+                } else {
+                    display_name.to_string()
+                },
                 host_id: host_id.to_string(),
-                hardware_mac: hardware_mac.to_string(),
+                hardware_mac: if hardware_mac.len() == 12 {
+                    hardware_mac.to_string()
+                } else {
+                    "001122334455".to_string()
+                },
                 core,
                 backend,
+                outbound_peer_packets: Vec::new(),
+                capture_needed: false,
+                last_frame: Vec::new(),
             })),
         }
     }
 
+    fn refresh_display_layout(s: &mut HostSessionInner) {
+        if let Ok(monitors) = s.backend.capturer.enumerate_displays() {
+            if !monitors.is_empty() {
+                let min_left = monitors.iter().map(|m| m.left).min().unwrap_or(0);
+                let min_top = monitors.iter().map(|m| m.top).min().unwrap_or(0);
+                let max_right = monitors
+                    .iter()
+                    .map(|m| m.right)
+                    .max()
+                    .unwrap_or(s.core.layout.width as i32);
+                let max_bottom = monitors
+                    .iter()
+                    .map(|m| m.bottom)
+                    .max()
+                    .unwrap_or(s.core.layout.height as i32);
+                let w = (max_right - min_left).max(1) as u32;
+                let h = (max_bottom - min_top).max(1) as u32;
+                s.core.layout = DisplayLayout {
+                    width: w,
+                    height: h,
+                    virtual_left: min_left,
+                    virtual_top: min_top,
+                    monitors,
+                };
+            }
+        }
+    }
+
+    fn record_actions(s: &mut HostSessionInner, actions: &[HostAction]) {
+        for act in actions {
+            match act {
+                HostAction::SendPeer(bytes) => {
+                    s.outbound_peer_packets.push(bytes.clone());
+                }
+                HostAction::RequestCapture => {
+                    s.capture_needed = true;
+                }
+                HostAction::InjectInput(pkt) => {
+                    let _ = s.backend.injector.inject_event(pkt);
+                }
+                HostAction::ReleaseAllInput => {
+                    s.backend.injector.release_all();
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn start(&self) -> HostStatus {
+        self.start_with_endpoint(DEFAULT_REGISTRATION_HOST, 443, true)
+    }
+
+    pub fn start_with_endpoint(
+        &self,
+        reg_host: &str,
+        reg_port: u16,
+        use_tls: bool,
+    ) -> HostStatus {
+        let gen = {
+            let mut s = self.inner.lock().unwrap();
+            if s.running
+                && !s.host_id.is_empty()
+                && s.host_id.bytes().all(|b| b.is_ascii_digit())
+            {
+                return self.status();
+            }
+            s.running = true;
+            s.generation = s.generation.wrapping_add(1);
+            s.outbound_peer_packets.clear();
+            s.capture_needed = false;
+            s.last_frame.clear();
+            Self::refresh_display_layout(&mut s);
+            s.generation
+        };
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let host_clone = self.clone();
+        let host_str = reg_host.to_string();
+        thread::spawn(move || {
+            host_clone.run_host_worker(gen, &host_str, reg_port, use_tls, Some(ready_tx));
+        });
+        let _ = ready_rx.recv_timeout(Duration::from_millis(2500));
+        self.status()
+    }
+
+    fn is_worker_active(&self, gen: u64) -> bool {
+        let s = self.inner.lock().unwrap();
+        s.running && s.generation == gen
+    }
+
+    fn run_host_worker(
+        &self,
+        gen: u64,
+        reg_host: &str,
+        reg_port: u16,
+        use_tls: bool,
+        mut ready_tx: Option<std::sync::mpsc::Sender<()>>,
+    ) {
+        let (device_id, temp_pw, mac, master_proof, display_name) = {
+            let s = self.inner.lock().unwrap();
+            (
+                s.device_id.clone(),
+                s.core.temp_password.clone(),
+                s.hardware_mac.clone(),
+                s.core.master_password_proof.clone(),
+                s.display_name.clone(),
+            )
+        };
+        let local_ip = detect_local_ip();
+        let computer_b64 = encode_base64(display_name.as_bytes());
+        let user_raw = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "linux".to_string());
+        let user_clean: String = user_raw
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .take(24)
+            .collect();
+        let user_name = if user_clean.is_empty() {
+            "linux"
+        } else {
+            &user_clean
+        };
+        let Ok(reg_cmd) = build_host_registration_command(
+            &device_id,
+            &temp_pw,
+            &local_ip,
+            &computer_b64,
+            &mac,
+            master_proof.as_deref(),
+            user_name,
+        ) else {
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
+            return;
+        };
+
+        let Ok(mut reg) = RegistrationTransport::new(5.0, 16 * 1024 * 1024, true) else {
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
+            return;
+        };
+        if reg.connect_with_tls(reg_host, reg_port, use_tls).is_err()
+            || reg.send_command(&reg_cmd).is_err()
+        {
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
+            return;
+        };
+
+        let mut reg_reply: Option<HostRegistrationReply> = None;
+        let reg_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < reg_deadline && self.is_worker_active(gen) {
+            match reg.receive_mode1_payload() {
+                Ok(payload) if payload.starts_with(b"3:") => {
+                    if let Ok(parsed) = parse_host_registration_reply(&payload) {
+                        reg_reply = Some(parsed);
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let Some(reply) = reg_reply else {
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
+            reg.close();
+            return;
+        };
+
         {
             let mut s = self.inner.lock().unwrap();
-            s.running = true;
+            if s.running && s.generation == gen {
+                s.host_id = reply.id.clone();
+            }
         }
-        self.status()
+        if let Some(tx) = ready_tx.take() {
+            let _ = tx.send(());
+        }
+
+        reg.set_timeout(0.03);
+        let mut active_relay: Option<(SessionTransport, RelayNotification, Option<(u16, String)>)> =
+            None;
+        let mut viewer_route: Option<(String, u16)> = None;
+        let mut last_keepalive = Instant::now();
+        let mut next_capture_at = Instant::now();
+
+        while self.is_worker_active(gen) {
+            if last_keepalive.elapsed() >= Duration::from_secs(50) {
+                last_keepalive = Instant::now();
+                let _ = reg.send_command(b"2");
+                if let Some((ref mut relay, _, _)) = active_relay {
+                    let _ = relay.send_system(b"ping", false);
+                }
+            }
+
+            match reg.receive_mode1_payload() {
+                Ok(payload) => {
+                    let text = String::from_utf8_lossy(&payload);
+                    if let Some(notif) = parse_relay_notification_with_defaults(
+                        &text,
+                        &reply.ping_list,
+                        &reply.ping_host_name_list,
+                    ) {
+                        if let Some((_, ref cur_notif, Some((pub_port, ref pub_ip)))) = active_relay
+                        {
+                            if *cur_notif == notif {
+                                let avail = encode_availability_reply(&notif, pub_port, pub_ip);
+                                let _ = reg.send_command(&avail);
+                                continue;
+                            }
+                        }
+                        let has_active_viewer = {
+                            let s = self.inner.lock().unwrap();
+                            s.core.phase != HostPhase::None
+                        };
+                        if !has_active_viewer {
+                            let relay_port = if use_tls { 443 } else { reg_port };
+                            if let Ok(mut new_relay) =
+                                SessionTransport::new(5.0, 16 * 1024 * 1024, true)
+                            {
+                                if new_relay
+                                    .connect(
+                                        &notif.relay_ip,
+                                        relay_port,
+                                        &notif.relay_host,
+                                        use_tls,
+                                    )
+                                    .is_ok()
+                                    && new_relay.send_system(b"0", true).is_ok()
+                                {
+                                    new_relay.set_timeout(0.02);
+                                    active_relay = Some((new_relay, notif, None));
+                                    viewer_route = None;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.starts_with("TimeoutError") => {}
+                Err(_) => break,
+            }
+
+            if let Some((ref mut relay, ref notif, ref mut assigned_addr)) = active_relay {
+                match relay.receive_body() {
+                    Ok(body) => match decode_transport_body(&body) {
+                        Ok(Some(pkt)) if pkt.kind == "direct" && pkt.data.starts_with(b"0:") => {
+                            if let Some((pub_port, pub_ip)) = parse_relay_address(&pkt.data) {
+                                *assigned_addr = Some((pub_port, pub_ip.clone()));
+                                let avail = encode_availability_reply(notif, pub_port, &pub_ip);
+                                let _ = reg.send_command(&avail);
+                            }
+                        }
+                        Ok(Some(pkt)) if pkt.kind == "relay" => {
+                            let peer_ip = std::net::Ipv4Addr::from(pkt.address_value).to_string();
+                            viewer_route = Some((peer_ip, pkt.port));
+                            if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
+                                let _ = self.handle_peer_payload(&decoded);
+                            }
+                        }
+                        _ => {}
+                    },
+                    Err(e) if e.starts_with("TimeoutError") => {}
+                    Err(_) => {
+                        active_relay = None;
+                        viewer_route = None;
+                        let mut s = self.inner.lock().unwrap();
+                        let actions = s.core.end_session("Relay disconnected");
+                        Self::record_actions(&mut s, &actions);
+                        s.outbound_peer_packets.clear();
+                    }
+                }
+            }
+
+            let should_capture = {
+                let s = self.inner.lock().unwrap();
+                s.core.phase == HostPhase::Streaming
+                    && !s.core.waiting_ack
+                    && (s.capture_needed || Instant::now() >= next_capture_at)
+            };
+            if should_capture {
+                let _ = self.step_capture();
+                next_capture_at = Instant::now() + Duration::from_millis(40);
+            }
+
+            if let (Some((ref mut relay, _, _)), Some((ref peer_ip, peer_port))) =
+                (&mut active_relay, &viewer_route)
+            {
+                let outbound: Vec<Vec<u8>> = {
+                    let mut s = self.inner.lock().unwrap();
+                    s.outbound_peer_packets.drain(..).collect()
+                };
+                for pkt in outbound {
+                    let _ = relay.send_relay(&pkt, peer_ip, *peer_port, false);
+                }
+            }
+        }
+
+        if let Some((mut relay, _, _)) = active_relay {
+            if let Some((ref peer_ip, peer_port)) = viewer_route {
+                let outbound: Vec<Vec<u8>> = {
+                    let mut s = self.inner.lock().unwrap();
+                    s.outbound_peer_packets.drain(..).collect()
+                };
+                for pkt in outbound {
+                    let _ = relay.send_relay(&pkt, peer_ip, peer_port, false);
+                }
+            }
+            relay.close();
+        }
+        reg.close();
     }
 
     pub fn stop(&self) -> Vec<HostAction> {
         let mut s = self.inner.lock().unwrap();
         s.running = false;
+        s.generation = s.generation.wrapping_add(1);
         let actions = s.core.end_session("Host stopped");
-        for act in &actions {
-            if matches!(act, HostAction::ReleaseAllInput) {
-                s.backend.injector.release_all();
-            }
-        }
+        Self::record_actions(&mut s, &actions);
         actions
     }
 
@@ -1519,39 +2157,33 @@ impl HostSession {
 
     pub fn approve(&self, allow_control: bool) -> Result<Vec<HostAction>, String> {
         let mut s = self.inner.lock().unwrap();
-        Ok(s.core.approve(allow_control))
+        Self::refresh_display_layout(&mut s);
+        let actions = s.core.approve(allow_control);
+        Self::record_actions(&mut s, &actions);
+        Ok(actions)
     }
 
     pub fn decline(&self) -> Result<Vec<HostAction>, String> {
         let mut s = self.inner.lock().unwrap();
-        Ok(s.core.decline())
+        let actions = s.core.decline();
+        Self::record_actions(&mut s, &actions);
+        Ok(actions)
     }
 
     pub fn set_control_allowed(&self, allowed: bool) -> Result<Vec<HostAction>, String> {
         let mut s = self.inner.lock().unwrap();
         let actions = s.core.set_control_allowed(allowed);
-        for act in &actions {
-            if matches!(act, HostAction::ReleaseAllInput) {
-                s.backend.injector.release_all();
-            }
-        }
+        Self::record_actions(&mut s, &actions);
         Ok(actions)
     }
 
     pub fn handle_peer_payload(&self, bytes: &[u8]) -> Result<Vec<HostAction>, String> {
         let mut s = self.inner.lock().unwrap();
-        let actions = s.core.handle_packet(bytes, Instant::now());
-        for act in &actions {
-            match act {
-                HostAction::InjectInput(pkt) => {
-                    let _ = s.backend.injector.inject_event(pkt);
-                }
-                HostAction::ReleaseAllInput => {
-                    s.backend.injector.release_all();
-                }
-                _ => {}
-            }
+        if bytes.starts_with(b"login:") {
+            Self::refresh_display_layout(&mut s);
         }
+        let actions = s.core.handle_packet(bytes, Instant::now());
+        Self::record_actions(&mut s, &actions);
         Ok(actions)
     }
 
@@ -1560,14 +2192,18 @@ impl HostSession {
         if s.core.phase != HostPhase::Streaming || s.core.waiting_ack {
             return Ok(Vec::new());
         }
+        s.capture_needed = false;
         let rect = MonitorRect {
-            left: 0,
-            top: 0,
-            right: s.core.layout.width as i32,
-            bottom: s.core.layout.height as i32,
+            left: s.core.layout.virtual_left,
+            top: s.core.layout.virtual_top,
+            right: s.core.layout.virtual_left + s.core.layout.width as i32,
+            bottom: s.core.layout.virtual_top + s.core.layout.height as i32,
         };
         let raw = s.backend.capturer.capture_screen(rect)?;
-        s.core.send_frame(&raw)
+        let actions = s.core.send_frame(&raw)?;
+        s.last_frame = raw;
+        Self::record_actions(&mut s, &actions);
+        Ok(actions)
     }
 }
 
@@ -1782,5 +2418,226 @@ mod tests {
             (evdev_keycode(0x1e), evdev_keycode(0xe048), evdev_keycode(0xe0ff)),
             (Some(0x1e), Some(103), None)
         );
+    }
+
+    #[test]
+    fn test_official_windows_viewer_wire_requirements() {
+        let layout = DisplayLayout {
+            width: 1920,
+            height: 1080,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![
+                MonitorRect {
+                    left: 0,
+                    top: 0,
+                    right: 960,
+                    bottom: 1080,
+                },
+                MonitorRect {
+                    left: 960,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+            ],
+        };
+        let init_bytes = encode_host_screen_init(&layout);
+        let init_fields = decode_byte_array_fields_checked(&init_bytes, Some(11)).unwrap();
+        assert_eq!(init_fields[7], vec![1]);
+        assert_eq!(init_fields[8], b"0:0:960:1080|960:0:1920:1080|");
+
+        let raw = vec![0x1fu8; 4 * 4 * 2];
+        let frame_bytes = encode_host_frame((0, 0, 4, 4), &raw, FIRST_FRAME_NUMBER).unwrap();
+        let frame_fields = decode_byte_array_fields_checked(&frame_bytes, Some(11)).unwrap();
+        assert_eq!(frame_fields[1], vec![0, 0, 0, 0, 4, 0, 4, 0]);
+    }
+
+    #[test]
+    fn test_live_host_worker_registration_relay_and_windows_viewer_session() {
+        use crate::protocol::{
+            decrypt_registration_bytes, encode_relay_frame, encode_typed_transport_frame,
+            FrameStream, REGISTRATION_PASSWORD,
+        };
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let temp_pw = "12345678";
+
+        let server_handle = std::thread::spawn(move || {
+            let (mut reg_stream, _) = listener.accept().unwrap();
+            reg_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            reg_stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+            reg_stream.flush().unwrap();
+            let mut reg_rx = FrameStream::new(true);
+            let mut buf = [0u8; 4096];
+
+            let reg_cmd = loop {
+                let n = reg_stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                let frames = reg_rx.feed(&buf[..n]);
+                if let Some(frame) = frames.into_iter().next() {
+                    if let Ok(Some(body)) = decode_transport_body(&frame) {
+                        if body.kind == "direct" && body.data.first() == Some(&0) {
+                            let plain =
+                                decrypt_registration_bytes(&body.data[1..], REGISTRATION_PASSWORD)
+                                    .unwrap();
+                            break String::from_utf8(plain).unwrap();
+                        }
+                    }
+                }
+            };
+            assert!(reg_cmd.starts_with("3:"));
+
+            let reply = format!(
+                "3:{}:00987654321:203.0.113.7::0:127.0.0.1:-1:17/10/2026:localhost:server-tok",
+                port
+            );
+            let reply_wire = encode_typed_transport_frame(reply.as_bytes(), 1);
+            reg_stream.write_all(&reply_wire).unwrap();
+            reg_stream.flush().unwrap();
+
+            let notify = "17:req-tag-1:req-hash-1::localhost:0:-1:60:0:";
+            let notify_wire = encode_typed_transport_frame(notify.as_bytes(), 1);
+            reg_stream.write_all(&notify_wire).unwrap();
+            reg_stream.flush().unwrap();
+
+            let (mut relay_stream, _) = listener.accept().unwrap();
+            relay_stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            relay_stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+            relay_stream.flush().unwrap();
+            let mut relay_rx = FrameStream::new(true);
+            let relay_hello = loop {
+                let n = relay_stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                let frames = relay_rx.feed(&buf[..n]);
+                if let Some(frame) = frames.into_iter().next() {
+                    if let Ok(Some(body)) = decode_transport_body(&frame) {
+                        if body.kind == "direct" {
+                            break body.data;
+                        }
+                    }
+                }
+            };
+            assert_eq!(relay_hello, b"\x000");
+
+            let relay_assigned = encode_typed_transport_frame(b"0:54321:198.51.100.9:6.6.133", 1);
+            relay_stream.write_all(&relay_assigned).unwrap();
+            relay_stream.flush().unwrap();
+
+            let avail_reply = loop {
+                let n = reg_stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                let frames = reg_rx.feed(&buf[..n]);
+                if let Some(frame) = frames.into_iter().next() {
+                    if let Ok(Some(body)) = decode_transport_body(&frame) {
+                        if body.kind == "direct" && body.data.first() == Some(&0) {
+                            let plain =
+                                decrypt_registration_bytes(&body.data[1..], REGISTRATION_PASSWORD)
+                                    .unwrap();
+                            break String::from_utf8(plain).unwrap();
+                        }
+                    }
+                }
+            };
+            assert_eq!(
+                avail_reply,
+                "17:req-tag-1:req-hash-1:127.0.0.1:54321:198.51.100.9:0:|0"
+            );
+
+            let utf16le = |s: &str| -> Vec<u8> {
+                s.encode_utf16()
+                    .flat_map(|u| u.to_le_bytes())
+                    .collect::<Vec<u8>>()
+            };
+
+            let login_str = String::from_utf8(sample_login_payload(temp_pw, "2", 1)).unwrap();
+            let login_frame =
+                encode_relay_frame(&utf16le(&login_str), "198.51.100.9", 54321, 1).unwrap();
+            relay_stream.write_all(&login_frame).unwrap();
+            relay_stream.flush().unwrap();
+
+            let mut received_peer = Vec::new();
+            while received_peer.len() < 2 {
+                let n = relay_stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                for f in relay_rx.feed(&buf[..n]) {
+                    if let Ok(Some(body)) = decode_transport_body(&f) {
+                        if body.kind == "relay" {
+                            received_peer.push(body.data);
+                        }
+                    }
+                }
+            }
+            let init_fields =
+                decode_byte_array_fields_checked(&received_peer[0], Some(11)).unwrap();
+            assert_eq!(init_fields[0], vec![0]);
+            assert_eq!(init_fields[7], vec![1]);
+
+            let start_frame =
+                encode_relay_frame(&utf16le("17"), "198.51.100.9", 54321, 1).unwrap();
+            relay_stream.write_all(&start_frame).unwrap();
+            relay_stream.flush().unwrap();
+
+            let screen_pkt = loop {
+                let n = relay_stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                let mut found = None;
+                for f in relay_rx.feed(&buf[..n]) {
+                    if let Ok(Some(body)) = decode_transport_body(&f) {
+                        if body.kind == "relay" {
+                            if let Ok(fields) = decode_byte_array_fields_checked(&body.data, None) {
+                                if !fields.is_empty() && fields[0] == vec![1] {
+                                    found = Some(fields);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(fields) = found {
+                    break fields;
+                }
+            };
+            assert_eq!(screen_pkt[1].len(), 8);
+        });
+
+        let layout = DisplayLayout {
+            width: 8,
+            height: 8,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 8,
+                bottom: 8,
+            }],
+        };
+        let backend = DesktopBackend::headless(8, 8);
+        let session = HostSession::with_profile(
+            "FEDCBA9876543210FEDCBA9876543210",
+            "",
+            "001122334455",
+            temp_pw,
+            None,
+            "UltraDeskHost",
+            layout,
+            backend,
+        );
+        session.set_auto_approve(true);
+        let st = session.start_with_endpoint("127.0.0.1", port, false);
+        assert!(st.running);
+        assert_eq!(st.host_id, "987654321");
+
+        server_handle.join().unwrap();
+        let _ = session.stop();
+        assert!(!session.status().running);
     }
 }

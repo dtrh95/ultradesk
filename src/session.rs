@@ -215,7 +215,20 @@ impl RegistrationTransport {
         })
     }
 
+    pub fn set_timeout(&mut self, timeout_secs: f64) {
+        self.timeout = Duration::from_secs_f64(timeout_secs.max(0.01));
+    }
+
     pub fn connect(&mut self, host: &str, port: u16) -> Result<Vec<u8>, String> {
+        self.connect_with_tls(host, port, true)
+    }
+
+    pub fn connect_with_tls(
+        &mut self,
+        host: &str,
+        port: u16,
+        use_tls: bool,
+    ) -> Result<Vec<u8>, String> {
         if self.channel.is_some() {
             return Err("already connected".to_string());
         }
@@ -225,11 +238,15 @@ impl RegistrationTransport {
         let _ = raw.set_read_timeout(Some(self.timeout));
         let _ = raw.set_write_timeout(Some(self.timeout));
 
-        let connector = build_tls_connector(self.original_certificate_policy)?;
-        let tls = connector
-            .connect(TLS_TARGET_HOST, raw)
-            .map_err(|e| format!("TLS handshake failed: {}", e))?;
-        self.channel = Some(TransportChannel::Tls(tls));
+        self.channel = if use_tls {
+            let connector = build_tls_connector(self.original_certificate_policy)?;
+            let tls = connector
+                .connect(TLS_TARGET_HOST, raw)
+                .map_err(|e| format!("TLS handshake failed: {}", e))?;
+            Some(TransportChannel::Tls(tls))
+        } else {
+            Some(TransportChannel::Plain(raw))
+        };
 
         let preface = http_service_preface(host, true);
         if let Some(ref mut ch) = self.channel {
@@ -454,6 +471,26 @@ impl SessionTransport {
         }
         ch.write_all(&frame)
             .map_err(|e| format!("send_relay write failed: {}", e))
+    }
+
+    pub fn send_system(&mut self, payload: &[u8], with_flag: bool) -> Result<(), String> {
+        let ch = self
+            .inner
+            .channel
+            .as_mut()
+            .ok_or_else(|| "not connected".to_string())?;
+        let mut body = Vec::with_capacity(2 + payload.len());
+        body.push(1u8);
+        if with_flag {
+            body.push(0u8);
+        }
+        body.extend_from_slice(payload);
+        let frame = encode_transport_frame(&body);
+        if frame.len().saturating_sub(4) > self.inner.max_frame {
+            return Err("outbound frame exceeds limit".to_string());
+        }
+        ch.write_all(&frame)
+            .map_err(|e| format!("send_system write failed: {}", e))
     }
 
     pub fn receive_body(&mut self) -> Result<Vec<u8>, String> {
@@ -769,16 +806,13 @@ impl ControlSession {
                 path: std::env::temp_dir().join("host-profile"),
             }
         });
-        let host_id = host_profile
-            .device_id
-            .chars()
-            .take(8)
-            .collect::<String>();
-        let host_session = HostSession::with_id(
-            &host_id,
+        let host_session = HostSession::with_profile(
+            &host_profile.device_id,
+            "",
             &host_profile.hardware_mac,
             &host_profile.temp_password,
             host_profile.master_password_proof.clone(),
+            &host_profile.display_name,
             screen.layout.clone(),
             DesktopBackend::auto_detect(),
         );
@@ -912,6 +946,10 @@ impl ControlSession {
         let proof = guard.profile_manager.master_password_proof()?;
         guard.host_profile.master_password_proof = proof.clone();
         guard.host_session.set_master_password_proof(proof);
+        if guard.host_session.status().running {
+            let _ = guard.host_session.stop();
+            let _ = guard.host_session.start();
+        }
         Self::sync_state_fields(&mut guard);
         Ok(guard.host_session.status())
     }
