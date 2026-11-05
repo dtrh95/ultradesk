@@ -1,12 +1,17 @@
 use crate::audio::{encode_sound_toggle_command, AudioBuffer};
 use crate::clipboard::{
-    decode_clipboard_packet, encode_clipboard_for_remote, get_linux_system_clipboard,
-    set_linux_system_clipboard, ClipboardState,
+    clipboard_text_eq, decode_clipboard_packet, encode_clipboard_for_remote,
+    get_linux_system_clipboard, set_linux_system_clipboard, ClipboardState,
 };
+use crate::cursor::{decode_cursor_parts, CursorManager};
 use crate::file_transfer::{
     encode_chat_message, is_utf16_string_packet, FileTransferEntry, FileTransferManager,
 };
-use crate::input::{keyboard, mouse_button, mouse_move, InputEvent};
+use crate::host::{DesktopBackend, HostSession, HostStatus};
+use crate::input::{
+    encode_unicode_text_packets, keyboard, mouse_button, mouse_move, normalize_vk, InputEvent,
+};
+use crate::profile::{ClientProfile, HostProfile, ProfileManager};
 use crate::protocol::{
     build_connection_request_command, build_login_with_password, build_registration_command,
     connection_request_password_value, decode_byte_array_fields, decode_target_route,
@@ -14,7 +19,10 @@ use crate::protocol::{
     encrypt_registration_bytes, extract_command3_identity, http_service_preface, md5_hex_lower,
     Command3Identity, TargetRoute, REGISTRATION_PASSWORD,
 };
-use crate::screen::{desktop_size_from_login, RGB555Screen, ZstdDictionaryDecoder};
+use crate::screen::{
+    desktop_size_from_login, DisplayLayout, MonitorSelection, RGB555Screen, ZstdDictionaryDecoder,
+};
+use crate::server::encode_base64;
 use native_tls::{TlsConnector, TlsStream};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -481,6 +489,14 @@ fn find_crlf_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedRemoteEntry {
+    pub partner_id: String,
+    pub password: String,
+    #[serde(default)]
+    pub last_used: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedCredentials {
     #[serde(default)]
@@ -489,6 +505,8 @@ pub struct SavedCredentials {
     pub password: String,
     #[serde(default = "default_remember_true")]
     pub remember: bool,
+    #[serde(default)]
+    pub saved_remotes: Vec<SavedRemoteEntry>,
 }
 
 fn default_remember_true() -> bool {
@@ -501,6 +519,7 @@ impl Default for SavedCredentials {
             partner_id: String::new(),
             password: String::new(),
             remember: true,
+            saved_remotes: Vec::new(),
         }
     }
 }
@@ -508,18 +527,39 @@ impl Default for SavedCredentials {
 pub fn credentials_file_path() -> PathBuf {
     std::env::var("HOME")
         .map(|h| {
-            PathBuf::from(h)
-                .join(".config")
-                .join("ultraviewer-linux")
-                .join("credentials.json")
+            let base = PathBuf::from(h).join(".config");
+            let new_path = base.join("ultradesk-rust").join("credentials.json");
+            let legacy_path = base.join("ultraviewer-linux").join("credentials.json");
+            if !new_path.exists() && legacy_path.exists() {
+                if let Some(parent) = new_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::copy(&legacy_path, &new_path);
+            }
+            new_path
         })
-        .unwrap_or_else(|_| std::env::temp_dir().join("ultraviewer-credentials.json"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("ultradesk-credentials.json"))
 }
 
 pub fn load_saved_credentials() -> SavedCredentials {
     let path = credentials_file_path();
     if let Ok(bytes) = fs::read(&path) {
-        if let Ok(creds) = serde_json::from_slice::<SavedCredentials>(&bytes) {
+        if let Ok(mut creds) = serde_json::from_slice::<SavedCredentials>(&bytes) {
+            if !creds.partner_id.is_empty()
+                && !creds
+                    .saved_remotes
+                    .iter()
+                    .any(|r| r.partner_id == creds.partner_id)
+            {
+                creds.saved_remotes.insert(
+                    0,
+                    SavedRemoteEntry {
+                        partner_id: creds.partner_id.clone(),
+                        password: creds.password.clone(),
+                        last_used: now_epoch_secs() as u64,
+                    },
+                );
+            }
             return creds;
         }
     }
@@ -551,6 +591,8 @@ pub struct SessionState {
     pub saved_password: String,
     #[serde(default = "default_remember_true")]
     pub remember_credentials: bool,
+    #[serde(default)]
+    pub saved_remotes: Vec<SavedRemoteEntry>,
     pub route_mode: String,
     pub remote_endpoint: String,
     pub screen_width: u32,
@@ -570,6 +612,34 @@ pub struct SessionState {
     pub last_message: String,
     pub error: Option<String>,
     pub updated_at: f64,
+    #[serde(default)]
+    pub frame_version: u64,
+    #[serde(default)]
+    pub monitors: Vec<(i32, i32, i32, i32)>,
+    #[serde(default)]
+    pub selected_monitor: Option<usize>,
+    #[serde(default)]
+    pub cursor_x: i16,
+    #[serde(default)]
+    pub cursor_y: i16,
+    #[serde(default)]
+    pub cursor_hot_x: u16,
+    #[serde(default)]
+    pub cursor_hot_y: u16,
+    #[serde(default)]
+    pub cursor_width: u32,
+    #[serde(default)]
+    pub cursor_height: u32,
+    #[serde(default)]
+    pub cursor_hash: Option<i32>,
+    #[serde(default)]
+    pub cursor_png_base64: Option<String>,
+    #[serde(default)]
+    pub host_status: Option<HostStatus>,
+    #[serde(default)]
+    pub client_synthetic_mac: String,
+    #[serde(default)]
+    pub host_hardware_mac: String,
 }
 
 impl Default for SessionState {
@@ -586,6 +656,7 @@ impl Default for SessionState {
             saved_partner_id: saved.partner_id,
             saved_password: saved.password,
             remember_credentials: saved.remember,
+            saved_remotes: saved.saved_remotes,
             route_mode: String::new(),
             remote_endpoint: String::new(),
             screen_width: 1024,
@@ -605,6 +676,20 @@ impl Default for SessionState {
             last_message: "Ready to connect".to_string(),
             error: None,
             updated_at: now_epoch_secs(),
+            frame_version: 1,
+            monitors: vec![(0, 0, 1024, 768)],
+            selected_monitor: None,
+            cursor_x: 0,
+            cursor_y: 0,
+            cursor_hot_x: 0,
+            cursor_hot_y: 0,
+            cursor_width: 0,
+            cursor_height: 0,
+            cursor_hash: None,
+            cursor_png_base64: None,
+            host_status: None,
+            client_synthetic_mac: String::new(),
+            host_hardware_mac: String::new(),
         }
     }
 }
@@ -621,6 +706,12 @@ pub struct ControlSessionInner {
     pub audio: AudioBuffer,
     pub clipboard: ClipboardState,
     pub files: FileTransferManager,
+    pub cursor: CursorManager,
+    pub cursor_png_cache: Option<(i32, String)>,
+    pub host_session: HostSession,
+    pub profile_manager: ProfileManager,
+    pub client_profile: ClientProfile,
+    pub host_profile: HostProfile,
     pub login_acknowledged: bool,
     pub outbound_queue: Vec<(Vec<u8>, bool, Option<InputEvent>)>,
 }
@@ -654,22 +745,67 @@ impl ControlSession {
     ) -> Self {
         let decoder = ZstdDictionaryDecoder::new(dictionary.clone(), 64 * 1024 * 1024);
         let screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
+        let profile_manager = ProfileManager::from_xdg().unwrap_or_else(|_| {
+            ProfileManager::from_custom_dir(std::env::temp_dir().join("ultradesk-rust"))
+        });
+        let client_profile = profile_manager.load_or_create_client().unwrap_or_else(|_| {
+            ClientProfile {
+                device_id: "0123456789ABCDEF0123456789ABCDEF".to_string(),
+                temp_password: "12345678".to_string(),
+                display_name: "UltraDesk".to_string(),
+                synthetic_mac: "0223456789AB".to_string(),
+                local_ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
+                path: std::env::temp_dir().join("profile"),
+            }
+        });
+        let host_profile = profile_manager.load_or_create_host().unwrap_or_else(|_| {
+            HostProfile {
+                device_id: "FEDCBA9876543210FEDCBA9876543210".to_string(),
+                temp_password: "87654321".to_string(),
+                display_name: "UltraDesk".to_string(),
+                hardware_mac: "001122334455".to_string(),
+                local_ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
+                master_password_proof: None,
+                path: std::env::temp_dir().join("host-profile"),
+            }
+        });
+        let host_id = host_profile
+            .device_id
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let host_session = HostSession::with_id(
+            &host_id,
+            &host_profile.hardware_mac,
+            &host_profile.temp_password,
+            host_profile.master_password_proof.clone(),
+            screen.layout.clone(),
+            DesktopBackend::auto_detect(),
+        );
+        let mut inner = ControlSessionInner {
+            state: SessionState::default(),
+            registration_profile,
+            default_partner,
+            dictionary,
+            screen,
+            frames_applied: 0,
+            rectangles_applied: 0,
+            latest_png: Vec::new(),
+            audio: AudioBuffer::default(),
+            clipboard: ClipboardState::default(),
+            files: FileTransferManager::default(),
+            cursor: CursorManager::default(),
+            cursor_png_cache: None,
+            host_session,
+            profile_manager,
+            client_profile,
+            host_profile,
+            login_acknowledged: false,
+            outbound_queue: Vec::new(),
+        };
+        Self::sync_state_fields(&mut inner);
         Self {
-            inner: Arc::new(Mutex::new(ControlSessionInner {
-                state: SessionState::default(),
-                registration_profile,
-                default_partner,
-                dictionary,
-                screen,
-                frames_applied: 0,
-                rectangles_applied: 0,
-                latest_png: Vec::new(),
-                audio: AudioBuffer::default(),
-                clipboard: ClipboardState::default(),
-                files: FileTransferManager::default(),
-                login_acknowledged: false,
-                outbound_queue: Vec::new(),
-            })),
+            inner: Arc::new(Mutex::new(inner)),
             stop_flag: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
         }
@@ -681,12 +817,103 @@ impl ControlSession {
         guard.state.clone()
     }
 
-    pub fn png_frame(&self) -> Result<Vec<u8>, String> {
+    pub fn frame_version(&self) -> u64 {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if !guard.latest_png.is_empty() {
-            return Ok(guard.latest_png.clone());
+        guard.screen.version
+    }
+
+    pub fn png_frame(&self) -> Result<Vec<u8>, String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.screen.get_or_encode_png().map(|(_, bytes)| bytes)
+    }
+
+    pub fn png_frame_versioned(&self) -> Result<(u64, Vec<u8>), String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.screen.get_or_encode_png()
+    }
+
+    pub fn jpeg_frame_versioned(&self, quality: u8) -> Result<(u64, Vec<u8>), String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.screen.get_or_encode_jpeg(quality)
+    }
+
+    pub fn bmp_frame_versioned(&self) -> (u64, Vec<u8>) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.screen.get_or_encode_bmp()
+    }
+
+    pub fn select_monitor(&self, monitor: Option<usize>) -> SessionState {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let sel = match monitor {
+            None => MonitorSelection::All,
+            Some(idx) => MonitorSelection::Index(idx),
+        };
+        guard.screen.set_monitor_selection(sel);
+        Self::sync_state_fields(&mut guard);
+        guard.state.clone()
+    }
+
+    pub fn send_text(&self, text: &str, caps_lock: bool) -> Result<usize, String> {
+        let packets = encode_unicode_text_packets(text, caps_lock);
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let count = packets.len();
+        for pkt in packets {
+            Self::dispatch_payload(&mut guard, &pkt, false, None)?;
         }
-        guard.screen.to_png()
+        guard.state.last_message = format!("Sent Unicode text ({} chars)", text.chars().count());
+        Self::sync_state_fields(&mut guard);
+        Ok(count)
+    }
+
+    pub fn host_status(&self) -> HostStatus {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.host_session.status()
+    }
+
+    pub fn host_start(&self) -> HostStatus {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let st = guard.host_session.start();
+        Self::sync_state_fields(&mut guard);
+        st
+    }
+
+    pub fn host_stop(&self) -> HostStatus {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.host_session.stop();
+        Self::sync_state_fields(&mut guard);
+        guard.host_session.status()
+    }
+
+    pub fn host_approve(&self, allow_control: bool) -> Result<HostStatus, String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.host_session.approve(allow_control)?;
+        Self::sync_state_fields(&mut guard);
+        Ok(guard.host_session.status())
+    }
+
+    pub fn host_decline(&self) -> Result<HostStatus, String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.host_session.decline()?;
+        Self::sync_state_fields(&mut guard);
+        Ok(guard.host_session.status())
+    }
+
+    pub fn host_set_control(&self, allow_control: bool) -> Result<HostStatus, String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.host_session.set_control_allowed(allow_control)?;
+        Self::sync_state_fields(&mut guard);
+        Ok(guard.host_session.status())
+    }
+
+    pub fn host_set_master_password(&self, password: Option<&str>) -> Result<HostStatus, String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let cleaned = password.map(|s| s.trim()).filter(|s| !s.is_empty());
+        guard.profile_manager.set_master_password(cleaned)?;
+        let proof = guard.profile_manager.master_password_proof()?;
+        guard.host_profile.master_password_proof = proof.clone();
+        guard.host_session.set_master_password_proof(proof);
+        Self::sync_state_fields(&mut guard);
+        Ok(guard.host_session.status())
     }
 
     pub fn audio_wav_since(&self, after_seq: u64) -> (u64, Vec<u8>) {
@@ -701,14 +928,52 @@ impl ControlSession {
     }
 
     fn sync_state_fields(inner: &mut ControlSessionInner) {
+        let view = inner.screen.active_view_buffer();
+        let view_w = view.width;
+        let view_h = view.height;
+        drop(view);
         inner.state.status = inner.state.state.clone();
-        inner.state.width = inner.screen.canvas.width;
-        inner.state.height = inner.screen.canvas.height;
+        inner.state.width = view_w;
+        inner.state.height = view_h;
         inner.state.screen_width = inner.screen.canvas.width;
         inner.state.screen_height = inner.screen.canvas.height;
         inner.state.frames = inner.frames_applied;
         inner.state.frames_received = inner.frames_applied;
         inner.state.rectangles_applied = inner.rectangles_applied;
+        inner.state.frame_version = inner.screen.version;
+        inner.state.monitors = inner
+            .screen
+            .layout
+            .monitors
+            .iter()
+            .map(|m| (m.left, m.top, m.right, m.bottom))
+            .collect();
+        inner.state.selected_monitor = match inner.screen.monitor_selection {
+            MonitorSelection::All => None,
+            MonitorSelection::Index(i) => Some(i),
+        };
+        let (cx, cy) = inner.cursor.position();
+        inner.state.cursor_x = cx;
+        inner.state.cursor_y = cy;
+        inner.state.cursor_hash = inner.cursor.active_hash();
+        if let Some(cur) = inner.cursor.current_cursor() {
+            inner.state.cursor_hot_x = cur.hot_x;
+            inner.state.cursor_hot_y = cur.hot_y;
+            inner.state.cursor_width = cur.width;
+            inner.state.cursor_height = cur.height;
+            let active_h = inner.cursor.active_hash().unwrap_or(0);
+            let cached_b64 = match &inner.cursor_png_cache {
+                Some((h, b64)) if *h == active_h => Some(b64.clone()),
+                _ => cur.to_png().ok().map(|bytes| encode_base64(&bytes)),
+            };
+            if let Some(ref b64) = cached_b64 {
+                inner.cursor_png_cache = Some((active_h, b64.clone()));
+            }
+            inner.state.cursor_png_base64 = cached_b64;
+        }
+        inner.state.host_status = Some(inner.host_session.status());
+        inner.state.client_synthetic_mac = inner.client_profile.synthetic_mac.clone();
+        inner.state.host_hardware_mac = inner.host_profile.hardware_mac.clone();
         inner.state.audio_enabled = inner.audio.enabled;
         inner.state.audio_chunks_received = inner.audio.chunks_received;
         inner.state.audio_bytes_decoded = inner.audio.bytes_decoded;
@@ -746,7 +1011,9 @@ impl ControlSession {
 
                 if kind == 0 {
                     if let Ok((w, h)) = desktop_size_from_login(&fields) {
-                        let parsed_bs = if fields.len() >= 15 && fields[14].len() == 2 {
+                        let parsed_bs = if fields.len() >= 15 && fields[14].len() == 1 {
+                            fields[14][0] as i32
+                        } else if fields.len() >= 15 && fields[14].len() == 2 {
                             i16::from_le_bytes([fields[14][0], fields[14][1]]) as i32
                         } else if fields.len() >= 15 && fields[14].len() == 4 {
                             i32::from_le_bytes([
@@ -756,20 +1023,29 @@ impl ControlSession {
                                 fields[14][3],
                             ])
                         } else {
-                            16
+                            32
                         };
                         let effective_bs = if (16..=256).contains(&parsed_bs) {
                             parsed_bs
                         } else {
-                            16
+                            32
                         };
                         let decoder =
                             ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
-                        guard.screen = RGB555Screen::new((w, h), decoder, 1000, effective_bs);
+                        let mut new_screen = RGB555Screen::new((w, h), decoder, 1000, effective_bs);
+                        if let Some(layout) = DisplayLayout::parse_from_login(&fields) {
+                            new_screen.layout = layout;
+                        }
+                        guard.screen = new_screen;
                         guard.login_acknowledged = true;
+                        if guard.clipboard.auto_sync_system {
+                            if let Some(sys_clip) = get_linux_system_clipboard() {
+                                guard.clipboard.local_text = sys_clip;
+                            }
+                        }
                         if let Ok(pkt48) = encode_byte_array_fields(&[
                             &[48u8][..],
-                            &effective_bs.to_le_bytes()[..],
+                            &[effective_bs as u8][..],
                         ]) {
                             let _ = Self::dispatch_payload(&mut guard, &pkt48, false, None);
                         }
@@ -782,7 +1058,9 @@ impl ControlSession {
                 }
 
                 if kind == 48 && fields.len() > 1 {
-                    let block_size = if fields[1].len() == 2 {
+                    let block_size = if fields[1].len() == 1 {
+                        fields[1][0] as i32
+                    } else if fields[1].len() == 2 {
                         i16::from_le_bytes([fields[1][0], fields[1][1]]) as i32
                     } else if fields[1].len() == 4 {
                         i32::from_le_bytes([
@@ -805,9 +1083,6 @@ impl ControlSession {
                         Ok(applied) => {
                             guard.frames_applied += 1;
                             guard.rectangles_applied += applied;
-                            if let Ok(png) = guard.screen.to_png() {
-                                guard.latest_png = png;
-                            }
                             let _ = Self::dispatch_payload(&mut guard, b"18", false, None);
                             guard.state.last_message = format!(
                                 "Frame #{} ({} rects)",
@@ -825,16 +1100,14 @@ impl ControlSession {
                     }
                 }
 
-                if kind == 3 && fields.len() > 1 && fields[1].len() == 4 {
-                    let val = i32::from_le_bytes([
-                        fields[1][0],
-                        fields[1][1],
-                        fields[1][2],
-                        fields[1][3],
-                    ]);
-                    let reply = format!("|||4{}", val).into_bytes();
-                    let _ = Self::dispatch_payload(&mut guard, &reply, false, None);
-                    return;
+                if matches!(kind, 3 | 4 | 28) {
+                    if let Ok(cmd) = decode_cursor_parts(&fields) {
+                        if let Some(reply) = guard.cursor.handle_command(cmd) {
+                            let _ = Self::dispatch_payload(&mut guard, &reply, false, None);
+                        }
+                        Self::sync_state_fields(&mut guard);
+                        return;
+                    }
                 }
             }
         }
@@ -851,6 +1124,7 @@ impl ControlSession {
 
         if let Some(clip_msg) = decode_clipboard_packet(payload) {
             guard.clipboard.remote_text = clip_msg.text.clone();
+            guard.clipboard.local_text = clip_msg.text.clone();
             guard.clipboard.updates_received += 1;
             if guard.clipboard.auto_sync_system {
                 let _ = set_linux_system_clipboard(&clip_msg.text);
@@ -975,17 +1249,34 @@ impl ControlSession {
     ) -> Result<(), String> {
         let cleaned_id: String = partner_id.chars().filter(|c| !c.is_whitespace()).collect();
         let cleaned_pass = password.trim().to_string();
+        let mut existing = load_saved_credentials();
+        if remember && !cleaned_id.is_empty() {
+            existing
+                .saved_remotes
+                .retain(|r| r.partner_id != cleaned_id);
+            existing.saved_remotes.insert(
+                0,
+                SavedRemoteEntry {
+                    partner_id: cleaned_id.clone(),
+                    password: cleaned_pass.clone(),
+                    last_used: now_epoch_secs() as u64,
+                },
+            );
+            existing.saved_remotes.truncate(20);
+        }
         let creds = if remember {
             SavedCredentials {
                 partner_id: cleaned_id.clone(),
                 password: cleaned_pass.clone(),
                 remember: true,
+                saved_remotes: existing.saved_remotes,
             }
         } else {
             SavedCredentials {
                 partner_id: String::new(),
                 password: String::new(),
                 remember: false,
+                saved_remotes: existing.saved_remotes,
             }
         };
         let _ = save_credentials(&creds);
@@ -993,6 +1284,7 @@ impl ControlSession {
         guard.state.saved_partner_id = creds.partner_id;
         guard.state.saved_password = creds.password;
         guard.state.remember_credentials = creds.remember;
+        guard.state.saved_remotes = creds.saved_remotes;
         Self::sync_state_fields(&mut guard);
         Ok(())
     }
@@ -1085,10 +1377,11 @@ impl ControlSession {
             if let Some(evt) = evt_opt {
                 match evt.event_type.as_str() {
                     "key" => {
+                        let norm_vk = normalize_vk(evt.vk);
                         if evt.down {
-                            held_keys.insert(evt.vk);
+                            held_keys.insert(norm_vk);
                         } else {
-                            held_keys.remove(&evt.vk);
+                            held_keys.remove(&norm_vk);
                         }
                     }
                     "button" => {
@@ -1123,7 +1416,39 @@ impl ControlSession {
             }
         };
 
+        let mut last_clip_poll = Instant::now();
         while self.is_active(gen) {
+            if last_clip_poll.elapsed() >= Duration::from_millis(800) {
+                last_clip_poll = Instant::now();
+                let should_poll = {
+                    let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.login_acknowledged && guard.clipboard.auto_sync_system
+                };
+                if should_poll {
+                    if let Some(sys_clip) = get_linux_system_clipboard() {
+                        if !sys_clip.is_empty() {
+                            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                            if !clipboard_text_eq(&sys_clip, &guard.clipboard.local_text)
+                                && !clipboard_text_eq(&sys_clip, &guard.clipboard.remote_text)
+                            {
+                                guard.clipboard.local_text = sys_clip.clone();
+                                guard.clipboard.updates_sent += 1;
+                                if let Ok((payload, unicode_bytes)) =
+                                    encode_clipboard_for_remote(&sys_clip)
+                                {
+                                    let _ = Self::dispatch_payload(
+                                        &mut guard,
+                                        &payload,
+                                        unicode_bytes,
+                                        None,
+                                    );
+                                }
+                                Self::sync_state_fields(&mut guard);
+                            }
+                        }
+                    }
+                }
+            }
             self.drain_and_send(&mut relay, &route, &mut held_keys, &mut held_buttons);
 
             match relay.receive_body() {
@@ -1268,9 +1593,9 @@ impl ControlSession {
 
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.files.modern_protocol = true;
+            guard.files.modern_protocol = false;
             let decoder = ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
-            guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 16);
+            guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
             guard.state.local_id = identity.client_id.to_string();
             guard.state.route_mode = "relay".to_string();
             guard.state.remote_endpoint = format!("{}:{}", route.public_ip, route.tcp_port);

@@ -15,6 +15,42 @@ use std::thread;
 use std::time::Duration;
 
 pub const DEFAULT_VIEWER_HTML: &str = include_str!("../viewer.html");
+pub const DEFAULT_APP_ICON_PNG: &[u8] = include_bytes!("../ultradesk-rust.png");
+pub const DEFAULT_APP_WINDOW_PY: &str = include_str!("../app_window.py");
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuiLaunchOutcome {
+    ClosedCleanly,
+    FallbackToBrowser(String),
+}
+
+impl GuiLaunchOutcome {
+    pub fn from_exit(exit_code: Option<i32>, elapsed: Duration) -> Self {
+        match exit_code {
+            Some(0) => Self::ClosedCleanly,
+            Some(code) if elapsed < Duration::from_secs(3) => Self::FallbackToBrowser(format!(
+                "native GUI exited early with code {}",
+                code
+            )),
+            None if elapsed < Duration::from_secs(1) => {
+                Self::FallbackToBrowser("native GUI terminated by signal on startup".to_string())
+            }
+            _ => Self::ClosedCleanly,
+        }
+    }
+}
+
+pub fn materialize_embedded_gui_assets(target_dir: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(target_dir)
+        .map_err(|e| format!("failed to create runtime GUI dir: {}", e))?;
+    let script_path = target_dir.join("app_window.py");
+    let icon_path = target_dir.join("ultradesk-rust.png");
+    fs::write(&script_path, DEFAULT_APP_WINDOW_PY.as_bytes())
+        .map_err(|e| format!("failed to write embedded app_window.py: {}", e))?;
+    fs::write(&icon_path, DEFAULT_APP_ICON_PNG)
+        .map_err(|e| format!("failed to write embedded icon: {}", e))?;
+    Ok(script_path)
+}
 
 pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(input.len() * 3 / 4);
@@ -119,6 +155,32 @@ struct ChatSendRequest {
     text: String,
 }
 
+#[derive(Deserialize, Default)]
+struct MonitorSelectRequest {
+    #[serde(default, alias = "monitor")]
+    index: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+struct TextSendRequest {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    caps_lock: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct HostControlRequest {
+    #[serde(default = "default_true")]
+    allow_control: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct MasterPasswordRequest {
+    #[serde(default)]
+    password: Option<String>,
+}
+
 pub struct PortalServer {
     pub bind_addr: String,
     pub port: u16,
@@ -199,6 +261,7 @@ fn write_http_response(
     let reason = match status {
         200 => "OK",
         204 => "No Content",
+        304 => "Not Modified",
         400 => "Bad Request",
         404 => "Not Found",
         500 => "Internal Server Error",
@@ -288,15 +351,98 @@ fn handle_http_client(
                 .unwrap_or_else(|| DEFAULT_VIEWER_HTML.as_bytes().to_vec());
             write_http_response(&mut stream, 200, "text/html; charset=utf-8", &[], &html)
         }
+        ("GET", "/favicon.ico" | "/ultradesk-rust.png" | "/ultraviewer-linux.png") => {
+            write_http_response(&mut stream, 200, "image/png", &[], DEFAULT_APP_ICON_PNG)
+        }
         ("GET", "/status" | "/state") => {
             let state = session.snapshot();
             let val = serde_json::to_value(state).unwrap_or_else(|_| json!({}));
             write_json_response(&mut stream, 200, &val)
         }
-        ("GET", "/frame.png") => match session.png_frame() {
-            Ok(png) => write_http_response(&mut stream, 200, "image/png", &[], &png),
-            Err(e) => write_json_response(&mut stream, 500, &json!({ "ok": false, "error": e })),
-        },
+        ("GET", "/frame.png") => {
+            if let Some(v_req) = query.get("v").and_then(|s| s.parse::<u64>().ok()) {
+                let cur_v = session.frame_version();
+                if v_req == cur_v {
+                    let v_str = cur_v.to_string();
+                    return write_http_response(
+                        &mut stream,
+                        304,
+                        "image/png",
+                        &[("X-Frame-Version", &v_str)],
+                        &[],
+                    );
+                }
+            }
+            match session.png_frame_versioned() {
+                Ok((ver, png)) => {
+                    let v_str = ver.to_string();
+                    write_http_response(
+                        &mut stream,
+                        200,
+                        "image/png",
+                        &[("X-Frame-Version", &v_str)],
+                        &png,
+                    )
+                }
+                Err(e) => write_json_response(&mut stream, 500, &json!({ "ok": false, "error": e })),
+            }
+        }
+        ("GET", "/frame.jpg") => {
+            let quality = query
+                .get("q")
+                .and_then(|s| s.parse::<u8>().ok())
+                .unwrap_or(80);
+            if let Some(v_req) = query.get("v").and_then(|s| s.parse::<u64>().ok()) {
+                let cur_v = session.frame_version();
+                if v_req == cur_v {
+                    let v_str = cur_v.to_string();
+                    return write_http_response(
+                        &mut stream,
+                        304,
+                        "image/jpeg",
+                        &[("X-Frame-Version", &v_str)],
+                        &[],
+                    );
+                }
+            }
+            match session.jpeg_frame_versioned(quality) {
+                Ok((ver, jpg)) => {
+                    let v_str = ver.to_string();
+                    write_http_response(
+                        &mut stream,
+                        200,
+                        "image/jpeg",
+                        &[("X-Frame-Version", &v_str)],
+                        &jpg,
+                    )
+                }
+                Err(e) => write_json_response(&mut stream, 500, &json!({ "ok": false, "error": e })),
+            }
+        }
+        ("GET", "/frame.bmp") => {
+            if let Some(v_req) = query.get("v").and_then(|s| s.parse::<u64>().ok()) {
+                let cur_v = session.frame_version();
+                if v_req == cur_v {
+                    let v_str = cur_v.to_string();
+                    return write_http_response(
+                        &mut stream,
+                        304,
+                        "image/bmp",
+                        &[("X-Frame-Version", &v_str)],
+                        &[],
+                    );
+                }
+            }
+            let (ver, bmp) = session.bmp_frame_versioned();
+            let v_str = ver.to_string();
+            write_http_response(
+                &mut stream,
+                200,
+                "image/bmp",
+                &[("X-Frame-Version", &v_str)],
+                &bmp,
+            )
+        }
         ("GET", "/audio.wav" | "/audio/stream.wav") => {
             let after_seq = query
                 .get("after")
@@ -389,7 +535,8 @@ fn handle_http_client(
                     "ok": true,
                     "partner_id": snap.saved_partner_id,
                     "password": snap.saved_password,
-                    "remember": snap.remember_credentials
+                    "remember": snap.remember_credentials,
+                    "saved_remotes": snap.saved_remotes
                 }),
             )
         }
@@ -553,6 +700,77 @@ fn handle_http_client(
                     200,
                     &json!({ "ok": true, "state": session.snapshot() }),
                 ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/monitor") => {
+            let req: MonitorSelectRequest = serde_json::from_slice(&body).unwrap_or_default();
+            let state = session.select_monitor(req.index);
+            write_json_response(&mut stream, 200, &json!({ "ok": true, "state": state }))
+        }
+        ("POST", "/text") => {
+            let req: TextSendRequest = serde_json::from_slice(&body).unwrap_or_default();
+            match session.send_text(&req.text, req.caps_lock) {
+                Ok(packets_sent) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "packets_sent": packets_sent,
+                        "state": session.snapshot()
+                    }),
+                ),
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("GET", "/host/status") => {
+            let host = session.host_status();
+            write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
+        }
+        ("POST", "/host/start") => {
+            let host = session.host_start();
+            write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
+        }
+        ("POST", "/host/stop") => {
+            let host = session.host_stop();
+            write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
+        }
+        ("POST", "/host/approve") => {
+            let req: HostControlRequest = serde_json::from_slice(&body).unwrap_or_default();
+            match session.host_approve(req.allow_control) {
+                Ok(host) => {
+                    write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
+                }
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/host/decline") => match session.host_decline() {
+            Ok(host) => write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host })),
+            Err(e) => write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e })),
+        },
+        ("POST", "/host/control") => {
+            let req: HostControlRequest = serde_json::from_slice(&body).unwrap_or_default();
+            match session.host_set_control(req.allow_control) {
+                Ok(host) => {
+                    write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
+                }
+                Err(e) => {
+                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                }
+            }
+        }
+        ("POST", "/host/master-password") => {
+            let req: MasterPasswordRequest = serde_json::from_slice(&body).unwrap_or_default();
+            match session.host_set_master_password(req.password.as_deref()) {
+                Ok(host) => {
+                    write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
+                }
                 Err(e) => {
                     write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
                 }

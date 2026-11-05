@@ -1,15 +1,16 @@
 [package]
-name = "ultraviewer-linux"
+name = "ultradesk-rust"
 version = "0.2.0"
 edition = "2021"
-description = "Linux-native UltraViewer remote desktop controller written in Rust with Screen, Input, Audio, Clipboard Sync, and File Transfer"
+license = "MIT"
+description = "Linux-native UltraDesk remote desktop client and host written in Rust with Screen, Input, Audio, Clipboard Sync, and File Transfer"
 
 [lib]
-name = "ultraviewer_linux"
+name = "ultradesk_rust"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ultraviewer-linux"
+name = "ultradesk-rust"
 path = "src/main.rs"
 
 [dependencies]
@@ -18,8 +19,10 @@ cbc = { version = "0.1", features = ["alloc"] }
 cipher = { version = "0.4", features = ["alloc", "block-padding"] }
 des = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+libc = "0.2"
 md-5 = "0.10"
 native-tls = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+x11rb = { version = "0.13", features = ["xtest", "randr", "shm"] }
 zstd = "0.13"
