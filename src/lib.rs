@@ -1,7 +1,11 @@
 pub mod audio;
 pub mod clipboard;
+pub mod cursor;
+pub mod direct;
 pub mod file_transfer;
+pub mod host;
 pub mod input;
+pub mod profile;
 pub mod protocol;
 pub mod screen;
 pub mod server;
@@ -15,7 +19,8 @@ mod tests {
         PACKET_MIC_SILENCE, PACKET_PC_G722, PACKET_PC_SILENCE,
     };
     use crate::clipboard::{
-        decode_clipboard_packet, encode_clipboard_modern_packet, encode_clipboard_packet,
+        clipboard_text_eq, decode_clipboard_packet, encode_clipboard_for_remote,
+        encode_clipboard_modern_packet, encode_clipboard_packet,
     };
     use crate::file_transfer::{
         decode_file_transfer_packet, encode_chat_message, encode_file_accept, encode_file_ack,
@@ -31,8 +36,9 @@ mod tests {
         decode_byte_array_fields_checked, decode_p2p_frame_body, decode_target_route,
         decode_transport_body, decode_utf16le_lossy, decrypt_p2p_aes_body,
         decrypt_registration_bytes, derive_p2p_aes_key, derive_vfunction_key_bytes, dib_stride,
-        encode_byte_array_fields, encode_p2p_frame, encode_relay_frame, encode_transport_frame,
-        encrypt_p2p_aes_body, encrypt_registration_bytes, export_cache, extract_command3_identity,
+        encode_byte_array_fields, encode_p2p_frame, encode_relay_frame, encode_senddata_string,
+        encode_transport_frame, encrypt_p2p_aes_body, encrypt_registration_bytes, export_cache,
+        extract_command3_identity,
         extract_tile, http_service_preface, import_cache, login_password_fields, pack_atlas,
         restore_atlas, tile_sample_score, CachedItem, FrameStream, REGISTRATION_PASSWORD,
     };
@@ -40,7 +46,10 @@ mod tests {
         apply_rgb555_update, compress_rgb555_with_dict, desktop_size_from_login, RGB555Screen,
         RgbBuffer, ZstdDictionaryDecoder,
     };
-    use crate::server::{decode_base64, encode_base64, PortalServer};
+    use crate::server::{
+        decode_base64, encode_base64, materialize_embedded_gui_assets, GuiLaunchOutcome,
+        PortalServer,
+    };
     use crate::session::{looks_like_tls_record, ControlSession};
     use image::codecs::jpeg::JpegEncoder;
     use image::{ExtendedColorType, ImageEncoder, ImageFormat};
@@ -449,6 +458,33 @@ mod tests {
         ];
         assert_eq!(screen16.apply(&jpeg_16_fields).unwrap(), 4);
         assert_eq!(screen16.block_size, 16);
+
+        let mut mixed_refs = Vec::new();
+        mixed_refs.extend_from_slice(&0i16.to_le_bytes());
+        mixed_refs.extend_from_slice(&0i16.to_le_bytes());
+        mixed_refs.extend_from_slice(&77i32.to_le_bytes());
+        mixed_refs.extend_from_slice(&2i16.to_le_bytes());
+        mixed_refs.extend_from_slice(&0i16.to_le_bytes());
+        mixed_refs.extend_from_slice(&77i32.to_le_bytes());
+        screen.canvas.pixels.fill(0);
+        let mixed_fields: Vec<Vec<u8>> = vec![
+            vec![1u8],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            rect_xywh(0, 0, 1, 1),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            mixed_refs,
+            Vec::new(),
+        ];
+        assert_eq!(screen.apply(&mixed_fields).unwrap(), 2);
+        assert_eq!(screen.canvas.get_pixel(0, 0), (255, 0, 0));
+        assert_eq!(screen.canvas.get_pixel(1, 1), (0, 0, 0));
+        assert_eq!(screen.canvas.get_pixel(2, 0), (255, 0, 0));
+        assert_eq!(screen.canvas.get_pixel(3, 1), (255, 255, 255));
     }
 
     #[test]
@@ -465,6 +501,12 @@ mod tests {
         assert_eq!(keyboard(65, false, true).unwrap(), b"8|||261|||65");
         assert_eq!(keyboard(91, true, false).unwrap(), b"8|||256|||91");
         assert_eq!(keyboard(91, false, false).unwrap(), b"8|||257|||91");
+        assert_eq!(keyboard(160, true, false).unwrap(), b"8|||256|||16");
+        assert_eq!(keyboard(161, false, false).unwrap(), b"8|||257|||16");
+        assert_eq!(keyboard(162, true, false).unwrap(), b"8|||256|||17");
+        assert_eq!(keyboard(163, false, false).unwrap(), b"8|||257|||17");
+        assert_eq!(keyboard(164, true, true).unwrap(), b"8|||260|||18");
+        assert_eq!(keyboard(165, false, true).unwrap(), b"8|||261|||18");
 
         let mut sent = Vec::new();
         with_held_key(
@@ -537,8 +579,8 @@ mod tests {
         assert_eq!(&wav[8..12], b"WAVE");
         assert_eq!(wav.len(), 44 + 128 + 640 + 64 + 640);
 
-        assert_eq!(encode_sound_toggle_command(true), b"|||31|||");
-        assert_eq!(encode_sound_toggle_command(false), b"|||32|||");
+        assert_eq!(encode_sound_toggle_command(true), b"31|||");
+        assert_eq!(encode_sound_toggle_command(false), b"32|||");
         let direct_wav = build_wav_bytes(&[0u8; 16], 48000, 2, 16);
         assert_eq!(direct_wav.len(), 60);
         let mut pc = G722CodecState::new();
@@ -563,6 +605,29 @@ mod tests {
         let msg_legacy = decode_clipboard_packet(b"|||33|||1|||Legacy text").unwrap();
         assert_eq!(msg_legacy.client_id, 1);
         assert_eq!(msg_legacy.text, "Legacy text");
+
+        let short_vserver =
+            encode_byte_array_fields(&[&[5u8], &encode_senddata_string("Copy ngắn", true)])
+                .unwrap();
+        let msg_short = decode_clipboard_packet(&short_vserver).unwrap();
+        assert_eq!(msg_short.text, "Copy ngắn");
+
+        let long_text = "Đoạn văn bản dài hơn 150 ký tự từ máy remote ".repeat(5);
+        let (long_ctrl, is_utf16) = encode_clipboard_for_remote(&long_text).unwrap();
+        assert!(is_utf16);
+        let msg_long_ctrl = decode_clipboard_packet(&long_ctrl).unwrap();
+        assert_eq!(msg_long_ctrl.text, long_text);
+
+        let utf16_bytes = encode_senddata_string(&long_text, true);
+        let zstd_bytes = zstd::bulk::compress(&utf16_bytes, 1).unwrap();
+        let uncomp_len = (utf16_bytes.len() as i32).to_le_bytes();
+        let vserver_zstd =
+            encode_byte_array_fields(&[&[33u8], &uncomp_len, &zstd_bytes]).unwrap();
+        let msg_vserver_zstd = decode_clipboard_packet(&vserver_zstd).unwrap();
+        assert_eq!(msg_vserver_zstd.text, long_text);
+
+        assert!(clipboard_text_eq("Line1\r\nLine2\r\n", "Line1\nLine2"));
+        assert!(!clipboard_text_eq("Line1\r\nLine2", "Line1\nLine3"));
     }
 
     #[test]
@@ -742,6 +807,138 @@ mod tests {
 
         let resp_evt = http_post(&addr, "/event", "{\"type\":\"move\",\"x\":150,\"y\":250}");
         assert!(resp_evt.contains("\"ok\":true"));
+
+        let resp_html = http_get(&addr, "/");
+        assert!(resp_html.contains("UltraDesk (Rust)"));
+        assert!(resp_html.contains("ControlLeft:17"));
+
+        let resp_icon = http_get(&addr, "/ultradesk-rust.png");
+        assert!(resp_icon.contains("Content-Type: image/png"));
+
+        let gui_tmp = std::env::temp_dir().join(format!("uv_gui_test_{}", std::process::id()));
+        let script_path = materialize_embedded_gui_assets(&gui_tmp).unwrap();
+        let script_text = std::fs::read_to_string(&script_path).unwrap();
+        assert!(script_text.contains("Gtk.Clipboard.get"));
+        assert!(script_text.contains("(\"4.1\", \"4.0\")"));
+        assert!(gui_tmp.join("ultradesk-rust.png").exists());
+        let _ = std::fs::remove_dir_all(&gui_tmp);
+
+        assert_eq!(
+            GuiLaunchOutcome::from_exit(Some(0), std::time::Duration::from_millis(50)),
+            GuiLaunchOutcome::ClosedCleanly
+        );
+        assert!(matches!(
+            GuiLaunchOutcome::from_exit(Some(2), std::time::Duration::from_millis(120)),
+            GuiLaunchOutcome::FallbackToBrowser(_)
+        ));
+        assert_eq!(
+            GuiLaunchOutcome::from_exit(Some(1), std::time::Duration::from_secs(10)),
+            GuiLaunchOutcome::ClosedCleanly
+        );
+
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_host_mode_and_portal_upgrade_end_to_end() {
+        let session = ControlSession::new();
+        let (portal, listener) = PortalServer::bind("127.0.0.1", 0, session.clone(), None).unwrap();
+        let addr = format!("127.0.0.1:{}", portal.port);
+        let shutdown = portal.shutdown.clone();
+        let handle = portal.spawn(listener);
+
+        let w_bytes = 3840i32.to_le_bytes();
+        let h_bytes = 1080i32.to_le_bytes();
+        let zero_bytes = 0i32.to_le_bytes();
+        let init_pkt = encode_byte_array_fields(&[
+            &[0u8][..],
+            &w_bytes[..],
+            &h_bytes[..],
+            &[][..],
+            &[][..],
+            &[0u8][..],
+            &b"6.6.133"[..],
+            &[2u8][..],
+            &b"0:0:1920:1080|1920:0:3840:1080|\0"[..],
+            &zero_bytes[..],
+            &zero_bytes[..],
+        ])
+        .unwrap();
+        session.handle_session_payload(&init_pkt);
+
+        let snap = session.snapshot();
+        assert_eq!(snap.screen_width, 3840);
+        assert_eq!(snap.monitors.len(), 2);
+
+        let ignored_sel = encode_byte_array_fields(&[
+            &[3u8][..],
+            &crate::cursor::IGNORED_SELECTION_HASH.to_le_bytes()[..],
+        ])
+        .unwrap();
+        {
+            let mut guard = session.inner.lock().unwrap();
+            guard.outbound_queue.clear();
+        }
+        session.handle_session_payload(&ignored_sel);
+        {
+            let guard = session.inner.lock().unwrap();
+            assert!(guard.outbound_queue.is_empty());
+        }
+
+        let valid_hash: i32 = 424242;
+        let sel_pkt = encode_byte_array_fields(&[&[3u8][..], &valid_hash.to_le_bytes()[..]]).unwrap();
+        session.handle_session_payload(&sel_pkt);
+        {
+            let guard = session.inner.lock().unwrap();
+            assert_eq!(guard.outbound_queue.len(), 1);
+            assert_eq!(guard.outbound_queue[0].0, b"4|||424242");
+        }
+
+        let pos_pkt = encode_byte_array_fields(&[
+            &[28u8][..],
+            &120i16.to_le_bytes()[..],
+            &240i16.to_le_bytes()[..],
+        ])
+        .unwrap();
+        session.handle_session_payload(&pos_pkt);
+        let snap_pos = session.snapshot();
+        assert_eq!((snap_pos.cursor_x, snap_pos.cursor_y), (120, 240));
+
+        let resp_mon = http_post(&addr, "/monitor", "{\"index\":1}");
+        assert!(resp_mon.contains("\"ok\":true"));
+        let snap_mon = session.snapshot();
+        assert_eq!(snap_mon.selected_monitor, Some(1));
+        assert_eq!(snap_mon.width, 1920);
+        assert_eq!(snap_mon.height, 1080);
+
+        let ver = snap_mon.frame_version;
+        let resp_jpg = http_get(&addr, &format!("/frame.jpg?v=0&q=75"));
+        assert!(resp_jpg.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_jpg.contains(&format!("X-Frame-Version: {}", ver)));
+
+        let resp_304 = http_get(&addr, &format!("/frame.jpg?v={}&q=75", ver));
+        assert!(resp_304.starts_with("HTTP/1.1 304 Not Modified"));
+
+        let resp_bmp = http_get(&addr, "/frame.bmp?v=0");
+        assert!(resp_bmp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_bmp.contains("Content-Type: image/bmp"));
+
+        let resp_bmp_304 = http_get(&addr, &format!("/frame.bmp?v={}", ver));
+        assert!(resp_bmp_304.starts_with("HTTP/1.1 304 Not Modified"));
+
+        let resp_text = http_post(&addr, "/text", "{\"text\":\"Việt\",\"caps_lock\":false}");
+        assert!(resp_text.contains("\"ok\":true"));
+        assert!(resp_text.contains("\"packets_sent\":8"));
+
+        let resp_host_start = http_post(&addr, "/host/start", "{}");
+        assert!(resp_host_start.contains("\"running\":true"));
+
+        let resp_host_status = http_get(&addr, "/host/status");
+        assert!(resp_host_status.contains("\"running\":true"));
+
+        let resp_host_stop = http_post(&addr, "/host/stop", "{}");
+        assert!(resp_host_stop.contains("\"running\":false"));
 
         shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = handle.join();

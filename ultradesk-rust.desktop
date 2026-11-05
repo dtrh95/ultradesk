@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=UltraDesk (Rust)
+GenericName=Remote Desktop Client & Host
+Comment=UltraDesk Remote Desktop Client & Host for Linux (Rust Edition)
+Exec=/home/hieudoan/apps/ultradesk-rust/run.sh
+Path=/home/hieudoan/apps/ultradesk-rust
+Icon=ultradesk-rust
+Terminal=false
+Categories=Network;RemoteAccess;Utility;
+Keywords=ultradesk;remote;desktop;support;control;rust;
+StartupNotify=true
+StartupWMClass=ultradesk-rust
