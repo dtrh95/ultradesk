@@ -7,7 +7,7 @@ use crate::cursor::{decode_cursor_parts, CursorManager};
 use crate::file_transfer::{
     encode_chat_message, is_utf16_string_packet, FileTransferEntry, FileTransferManager,
 };
-use crate::host::{DesktopBackend, HostSession, HostStatus};
+use crate::host::{DesktopBackend, HostSession, HostStatus, DEFAULT_LAN_PORT};
 use crate::input::{
     encode_unicode_text_packets, keyboard, mouse_button, mouse_move, normalize_vk, InputEvent,
 };
@@ -16,8 +16,8 @@ use crate::protocol::{
     build_connection_request_command, build_login_with_password, build_registration_command,
     connection_request_password_value, decode_byte_array_fields, decode_target_route,
     decode_transport_body, encode_byte_array_fields, encode_relay_frame, encode_transport_frame,
-    encrypt_registration_bytes, extract_command3_identity, http_service_preface, md5_hex_lower,
-    Command3Identity, TargetRoute, REGISTRATION_PASSWORD,
+    encrypt_registration_bytes, extract_command3_identity, format_command8_status_error,
+    http_service_preface, md5_hex_lower, Command3Identity, TargetRoute, REGISTRATION_PASSWORD,
 };
 use crate::screen::{
     desktop_size_from_login, DisplayLayout, MonitorSelection, RGB555Screen, ZstdDictionaryDecoder,
@@ -94,6 +94,76 @@ pub fn detect_local_ip() -> String {
         }
     }
     "127.0.0.1".to_string()
+}
+
+pub fn parse_direct_lan_target(partner_id: &str) -> Option<(String, u16)> {
+    let mut trimmed = partner_id.trim();
+    if let Some(rest) = trimmed.strip_prefix("lan://") {
+        trimmed = rest.trim();
+    } else if let Some(rest) = trimmed.strip_prefix("tcp://") {
+        trimmed = rest.trim();
+    }
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((host_part, port_part)) = trimmed.split_once(':') {
+        let port = port_part.trim().parse::<u16>().ok().filter(|&p| p > 0)?;
+        let host = host_part.trim();
+        if host.eq_ignore_ascii_case("localhost") {
+            return Some(("127.0.0.1".to_string(), port));
+        }
+        if host.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Some((host.to_string(), port));
+        }
+        return None;
+    }
+    if trimmed.eq_ignore_ascii_case("localhost") {
+        return Some(("127.0.0.1".to_string(), DEFAULT_LAN_PORT));
+    }
+    if trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some((trimmed.to_string(), DEFAULT_LAN_PORT));
+    }
+    None
+}
+
+pub fn discover_lan_peer_by_id(partner_id: &str, timeout: Duration) -> Option<(String, u16)> {
+    let pid = partner_id.trim();
+    if pid.is_empty() {
+        return None;
+    }
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    let _ = sock.set_broadcast(true);
+    let _ = sock.set_read_timeout(Some(timeout));
+    let probe = format!("ULTRADESK_DISCOVER:{}", pid);
+    let _ = sock.send_to(probe.as_bytes(), ("127.0.0.1", DEFAULT_LAN_PORT));
+    let _ = sock.send_to(probe.as_bytes(), ("255.255.255.255", DEFAULT_LAN_PORT));
+    let deadline = Instant::now() + timeout;
+    let mut buf = [0u8; 256];
+    while Instant::now() < deadline {
+        match sock.recv_from(&mut buf) {
+            Ok((n, src)) => {
+                if let Ok(txt) = std::str::from_utf8(&buf[..n]) {
+                    if let Some(rest) = txt.trim().strip_prefix("ULTRADESK_HERE:") {
+                        if let Some((id_part, port_part)) = rest.split_once(':') {
+                            if id_part.trim() == pid {
+                                if let Ok(port) = port_part.trim().parse::<u16>() {
+                                    if port > 0 {
+                                        let ip = match src.ip() {
+                                            std::net::IpAddr::V4(v4) => v4.to_string(),
+                                            std::net::IpAddr::V6(_) => "127.0.0.1".to_string(),
+                                        };
+                                        return Some((ip, port));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    None
 }
 
 pub fn looks_like_tls_record(prefix: &[u8]) -> bool {
@@ -1198,6 +1268,27 @@ impl ControlSession {
             if !fields.is_empty() && !fields[0].is_empty() {
                 let kind = fields[0][0];
 
+                if kind == 22 {
+                    let msg = "Sai mật khẩu (Wrong Password)".to_string();
+                    guard.login_acknowledged = false;
+                    guard.state.state = "disconnected".to_string();
+                    guard.state.error = Some(msg.clone());
+                    guard.state.last_message = msg;
+                    self.stop_flag.store(true, Ordering::SeqCst);
+                    Self::sync_state_fields(&mut guard);
+                    return;
+                }
+                if kind == 27 {
+                    let msg = "Đối tác đã từ chối hoặc ngắt kết nối".to_string();
+                    guard.login_acknowledged = false;
+                    guard.state.state = "disconnected".to_string();
+                    guard.state.error = Some(msg.clone());
+                    guard.state.last_message = msg;
+                    self.stop_flag.store(true, Ordering::SeqCst);
+                    Self::sync_state_fields(&mut guard);
+                    return;
+                }
+
                 if kind == 0 {
                     if let Ok((w, h)) = desktop_size_from_login(&fields) {
                         let parsed_bs = if fields.len() >= 15 && fields[14].len() == 1 {
@@ -1674,24 +1765,137 @@ impl ControlSession {
         }
     }
 
+    pub fn resolve_lan_endpoint(&self, partner_id: &str) -> Option<(String, u16)> {
+        if let Some(target) = parse_direct_lan_target(partner_id) {
+            return Some(target);
+        }
+        let pid = partner_id.trim();
+        if pid.is_empty() {
+            return None;
+        }
+        let hs = self.host_status();
+        let dev_id = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.host_profile.device_id.clone()
+        };
+        if hs.running && hs.lan_port > 0 && (hs.host_id == pid || dev_id == pid) {
+            return Some(("127.0.0.1".to_string(), hs.lan_port));
+        }
+        discover_lan_peer_by_id(pid, Duration::from_millis(60))
+    }
+
+    fn establish_lan_session(
+        &self,
+        lan_ip: &str,
+        lan_port: u16,
+        partner: &PartnerProfile,
+    ) -> Result<(SessionTransport, TargetRoute), String> {
+        let mut transport = SessionTransport::new(5.0, 16 * 1024 * 1024, true)?;
+        transport.connect(lan_ip, lan_port, "", false)?;
+        let local_id = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if !guard.state.local_id.is_empty() {
+                guard.state.local_id.clone()
+            } else {
+                guard.client_profile.device_id.chars().take(9).collect()
+            }
+        };
+        let fields = vec![
+            "".to_string(),
+            "".to_string(),
+            "1280".to_string(),
+            "720".to_string(),
+            "30".to_string(),
+            "15".to_string(),
+            "15".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            local_id.clone(),
+            local_hostname(),
+            "0".to_string(),
+            "".to_string(),
+            "".to_string(),
+            random_digits(16),
+            "2".to_string(),
+            "80".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            String::new(),
+            "6.6.133".to_string(),
+            "0".to_string(),
+        ];
+        let salt = random_digits(8);
+        let login_payload = build_login_with_password(
+            &fields,
+            &partner.password,
+            partner.password_type,
+            Some(&salt),
+        )?;
+        transport.send_relay(&login_payload, lan_ip, lan_port, true)?;
+        transport.set_timeout(0.005);
+
+        let route = TargetRoute {
+            lan_ip: lan_ip.to_string(),
+            public_ip: lan_ip.to_string(),
+            public_port: lan_port,
+            lan_port,
+            command_port: lan_port,
+            computer_name_encoded: String::new(),
+            tcp_port: lan_port,
+            tcp_server_ip: lan_ip.to_string(),
+            matched_custom_password: 0,
+            target_session_id: 0,
+            tcp_server_hostname: String::new(),
+            partner_secret_token: None,
+        };
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.files.modern_protocol = false;
+            let decoder = ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
+            guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
+            guard.state.local_id = local_id;
+            guard.state.route_mode = "lan".to_string();
+            guard.state.remote_endpoint = format!("{}:{}", lan_ip, lan_port);
+            Self::sync_state_fields(&mut guard);
+        }
+        Ok((transport, route))
+    }
+
     fn run_worker(&self, gen: u64, reg_profile: RegistrationProfile, partner: PartnerProfile) {
         let mut held_keys = BTreeSet::<i32>::new();
         let mut held_buttons = BTreeSet::<String>::new();
+        let target_id = partner.request_terms.get(1).cloned().unwrap_or_default();
 
-        let (mut reg, mut relay, route) = match self.establish_relay_session(&reg_profile, &partner)
-        {
-            Ok(tuple) => tuple,
-            Err(err) => {
-                if self.generation.load(Ordering::SeqCst) == gen {
-                    let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.state.state = "disconnected".to_string();
-                    guard.state.error = Some(err.clone());
-                    guard.state.last_message = err;
-                    Self::sync_state_fields(&mut guard);
+        let (mut reg_opt, mut relay, route) =
+            if let Some((lan_ip, lan_port)) = self.resolve_lan_endpoint(&target_id) {
+                match self.establish_lan_session(&lan_ip, lan_port, &partner) {
+                    Ok((transport, route)) => (None, transport, route),
+                    Err(err) => {
+                        if self.generation.load(Ordering::SeqCst) == gen {
+                            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.state.state = "disconnected".to_string();
+                            guard.state.error = Some(err.clone());
+                            guard.state.last_message = err;
+                            Self::sync_state_fields(&mut guard);
+                        }
+                        return;
+                    }
                 }
-                return;
-            }
-        };
+            } else {
+                match self.establish_relay_session(&reg_profile, &partner) {
+                    Ok((reg, relay, route)) => (Some(reg), relay, route),
+                    Err(err) => {
+                        if self.generation.load(Ordering::SeqCst) == gen {
+                            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.state.state = "disconnected".to_string();
+                            guard.state.error = Some(err.clone());
+                            guard.state.last_message = err;
+                            Self::sync_state_fields(&mut guard);
+                        }
+                        return;
+                    }
+                }
+            };
 
         let mut last_clip_poll = Instant::now();
         while self.is_active(gen) {
@@ -1770,7 +1974,9 @@ impl ControlSession {
             }
         }
         relay.close();
-        reg.close();
+        if let Some(ref mut reg) = reg_opt {
+            reg.close();
+        }
 
         if self.generation.load(Ordering::SeqCst) == gen {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1811,16 +2017,7 @@ impl ControlSession {
         for _ in 0..4 {
             let response = reg.receive_mode1_payload()?;
             if response.starts_with(b"8:") {
-                let text = String::from_utf8_lossy(&response);
-                let parts: Vec<&str> = text.split(':').collect();
-                if parts.len() >= 2 && parts[1] != "1" {
-                    let status = parts[1];
-                    let msg = match status {
-                        "2" => "Sai mật khẩu (Wrong Password)".to_string(),
-                        "11" => "Đối tác không online hoặc ID không tồn tại".to_string(),
-                        "99" => "Không thể kết nối tới đối tác (Status 99)".to_string(),
-                        _ => format!("Lỗi kết nối từ máy chủ (Mã: {})", status),
-                    };
+                if let Some(msg) = format_command8_status_error(&response) {
                     return Err(msg);
                 }
                 route_opt = Some(decode_target_route(&response)?);
