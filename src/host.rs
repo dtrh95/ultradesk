@@ -1,13 +1,15 @@
 use crate::input::{decode_host_input, HostInputEvent, KEY_DOWN, SYS_KEY_DOWN, VK_PACKET};
 use crate::protocol::{
-    decode_command_fields, decode_transport_body, encode_byte_array_fields, md5_hex_lower,
-    DEFAULT_REGISTRATION_HOST,
+    decode_command_fields, decode_transport_body, encode_byte_array_fields, encode_relay_frame,
+    md5_hex_lower, FrameStream, DEFAULT_REGISTRATION_HOST,
 };
 use crate::screen::{compress_rgb555_standard, DisplayLayout, MonitorRect, MonitorSelection};
 use crate::server::encode_base64;
 use crate::session::{detect_local_ip, RegistrationTransport, SessionTransport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, UdpSocket};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,6 +24,7 @@ use x11rb::wrapper::ConnectionExt as _;
 
 pub const FIRST_FRAME_NUMBER: i32 = i32::MIN + 2;
 pub const HOST_VERSION: &[u8] = b"6.6.133";
+pub const DEFAULT_LAN_PORT: u16 = 5938;
 pub const MAX_FAILURES_BEFORE_LOCKOUT: u32 = 5;
 pub const LOCKOUT_DURATION: Duration = Duration::from_secs(5 * 60);
 
@@ -2561,11 +2564,15 @@ pub struct HostStatus {
     pub selected_monitor: Option<usize>,
     #[serde(default)]
     pub selected_monitors: Vec<usize>,
+    #[serde(default)]
+    pub lan_port: u16,
 }
 
 struct HostSessionInner {
     running: bool,
     generation: u64,
+    lan_port: u16,
+    lan_viewer_active: bool,
     device_id: String,
     display_name: String,
     host_id: String,
@@ -2703,6 +2710,8 @@ impl HostSession {
         let mut inner = HostSessionInner {
             running: false,
             generation: 0,
+            lan_port: 0,
+            lan_viewer_active: false,
             device_id: if device_id.len() == 32 {
                 device_id.to_string()
             } else {
@@ -2874,7 +2883,7 @@ impl HostSession {
         reg_port: u16,
         use_tls: bool,
     ) -> HostStatus {
-        let gen = {
+        let (gen, lan_listener) = {
             let mut s = self.inner.lock().unwrap();
             if s.running
                 && !s.host_id.is_empty()
@@ -2883,14 +2892,33 @@ impl HostSession {
                 drop(s);
                 return self.status();
             }
+            let listener = TcpListener::bind(("0.0.0.0", DEFAULT_LAN_PORT))
+                .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))
+                .ok();
+            if let Some(ref l) = listener {
+                let _ = l.set_nonblocking(true);
+            }
+            let lan_port = listener
+                .as_ref()
+                .and_then(|l| l.local_addr().ok())
+                .map(|a| a.port())
+                .unwrap_or(0);
             s.running = true;
             s.generation = s.generation.wrapping_add(1);
+            s.lan_port = lan_port;
+            s.lan_viewer_active = false;
             s.outbound_peer_packets.clear();
             s.capture_needed = false;
             s.last_frame.clear();
             Self::refresh_display_layout(&mut s);
-            s.generation
+            (s.generation, listener)
         };
+        if let Some(listener) = lan_listener {
+            let lan_clone = self.clone();
+            thread::spawn(move || {
+                lan_clone.run_lan_worker(gen, listener);
+            });
+        }
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let host_clone = self.clone();
         let host_str = reg_host.to_string();
@@ -2904,6 +2932,151 @@ impl HostSession {
     fn is_worker_active(&self, gen: u64) -> bool {
         let s = self.inner.lock().unwrap();
         s.running && s.generation == gen
+    }
+
+    fn run_lan_worker(&self, gen: u64, listener: TcpListener) {
+        let udp_disc = UdpSocket::bind(("0.0.0.0", DEFAULT_LAN_PORT)).ok();
+        if let Some(ref u) = udp_disc {
+            let _ = u.set_nonblocking(true);
+        }
+        while self.is_worker_active(gen) {
+            if let Some(ref u) = udp_disc {
+                let mut disc_buf = [0u8; 256];
+                while let Ok((n, src)) = u.recv_from(&mut disc_buf) {
+                    if let Ok(txt) = std::str::from_utf8(&disc_buf[..n]) {
+                        if let Some(queried) = txt.trim().strip_prefix("ULTRADESK_DISCOVER:") {
+                            let (hid, did, lport) = {
+                                let s = self.inner.lock().unwrap();
+                                (s.host_id.clone(), s.device_id.clone(), s.lan_port)
+                            };
+                            let q = queried.trim();
+                            if lport > 0 && (q.is_empty() || q == hid || q == did) {
+                                let reply_id = if !hid.is_empty() { hid } else { did };
+                                let reply = format!("ULTRADESK_HERE:{}:{}", reply_id, lport);
+                                let _ = u.send_to(reply.as_bytes(), src);
+                            }
+                        }
+                    }
+                }
+            }
+
+            match listener.accept() {
+                Ok((mut stream, peer_addr)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_nodelay(true);
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(5)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    let peer_ip = match peer_addr.ip() {
+                        std::net::IpAddr::V4(v4) => v4.to_string(),
+                        std::net::IpAddr::V6(_) => "127.0.0.1".to_string(),
+                    };
+                    let peer_port = peer_addr.port().max(1);
+                    let accepted_at = Instant::now();
+                    let mut authenticated = false;
+                    let mut rx_frames = FrameStream::new(false);
+                    let mut buf = [0u8; 65536];
+                    let mut next_capture_at = Instant::now();
+                    while self.is_worker_active(gen) {
+                        let mut disconnected = false;
+                        match stream.read(&mut buf) {
+                            Ok(0) => {
+                                disconnected = true;
+                            }
+                            Ok(n) => {
+                                for frame in rx_frames.feed(&buf[..n]) {
+                                    if let Ok(Some(pkt)) = decode_transport_body(&frame) {
+                                        if pkt.kind == "relay" || pkt.kind == "direct" {
+                                            if let Some(decoded) =
+                                                decode_peer_payload(&pkt.data, pkt.flag)
+                                            {
+                                                let _ = self.handle_peer_payload(&decoded);
+                                                let is_auth = {
+                                                    let mut s = self.inner.lock().unwrap();
+                                                    let active = s.core.phase != HostPhase::None;
+                                                    if active {
+                                                        s.lan_viewer_active = true;
+                                                    }
+                                                    active
+                                                };
+                                                if is_auth {
+                                                    authenticated = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(ref e)
+                                if matches!(
+                                    e.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) => {}
+                            Err(_) => {
+                                disconnected = true;
+                            }
+                        }
+
+                        if !authenticated && accepted_at.elapsed() >= Duration::from_secs(3) {
+                            break;
+                        }
+
+                        let should_capture = authenticated && {
+                            let s = self.inner.lock().unwrap();
+                            s.core.phase == HostPhase::Streaming
+                                && !s.core.waiting_ack
+                                && (s.capture_needed || Instant::now() >= next_capture_at)
+                        };
+                        if should_capture {
+                            let capture_start = Instant::now();
+                            let _ = self.step_capture();
+                            let interval = {
+                                let s = self.inner.lock().unwrap();
+                                s.core.qos.target_interval()
+                            };
+                            next_capture_at =
+                                Instant::now() + interval.saturating_sub(capture_start.elapsed());
+                        }
+
+                        let outbound: Vec<Vec<u8>> = {
+                            let mut s = self.inner.lock().unwrap();
+                            if authenticated || !s.outbound_peer_packets.is_empty() {
+                                s.outbound_peer_packets.drain(..).collect()
+                            } else {
+                                Vec::new()
+                            }
+                        };
+                        for pkt in outbound {
+                            if let Ok(frame) = encode_relay_frame(&pkt, &peer_ip, peer_port, 0) {
+                                if stream.write_all(&frame).is_err() {
+                                    disconnected = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if disconnected {
+                            break;
+                        }
+                    }
+                    if authenticated {
+                        let mut s = self.inner.lock().unwrap();
+                        s.lan_viewer_active = false;
+                        let actions = s.core.end_session("LAN viewer disconnected");
+                        Self::record_actions(&mut s, &actions);
+                        s.outbound_peer_packets.clear();
+                    }
+                }
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    thread::sleep(Duration::from_millis(15));
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     fn run_host_worker(
@@ -3130,7 +3303,8 @@ impl HostSession {
 
                 let should_capture = {
                     let s = self.inner.lock().unwrap();
-                    s.core.phase == HostPhase::Streaming
+                    !s.lan_viewer_active
+                        && s.core.phase == HostPhase::Streaming
                         && !s.core.waiting_ack
                         && (s.capture_needed || Instant::now() >= next_capture_at)
                 };
@@ -3150,7 +3324,11 @@ impl HostSession {
                 {
                     let outbound: Vec<Vec<u8>> = {
                         let mut s = self.inner.lock().unwrap();
-                        s.outbound_peer_packets.drain(..).collect()
+                        if s.lan_viewer_active {
+                            Vec::new()
+                        } else {
+                            s.outbound_peer_packets.drain(..).collect()
+                        }
                     };
                     for pkt in outbound {
                         let _ = relay.send_relay(&pkt, peer_ip, *peer_port, false);
@@ -3162,7 +3340,11 @@ impl HostSession {
                 if let Some((ref peer_ip, peer_port)) = viewer_route {
                     let outbound: Vec<Vec<u8>> = {
                         let mut s = self.inner.lock().unwrap();
-                        s.outbound_peer_packets.drain(..).collect()
+                        if s.lan_viewer_active {
+                            Vec::new()
+                        } else {
+                            s.outbound_peer_packets.drain(..).collect()
+                        }
                     };
                     for pkt in outbound {
                         let _ = relay.send_relay(&pkt, peer_ip, peer_port, false);
@@ -3181,6 +3363,8 @@ impl HostSession {
     pub fn stop(&self) -> Vec<HostAction> {
         let mut s = self.inner.lock().unwrap();
         s.running = false;
+        s.lan_port = 0;
+        s.lan_viewer_active = false;
         s.generation = s.generation.wrapping_add(1);
         let actions = s.core.end_session("Host stopped");
         Self::record_actions(&mut s, &actions);
@@ -3257,6 +3441,7 @@ impl HostSession {
                 .collect(),
             selected_monitor,
             selected_monitors,
+            lan_port: s.lan_port,
         }
     }
 

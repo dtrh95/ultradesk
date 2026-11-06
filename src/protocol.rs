@@ -648,6 +648,22 @@ pub fn decode_target_route(payload: &[u8]) -> Result<TargetRoute, String> {
         }
         Ok(val)
     };
+    let tcp_server_hostname = if fields[14].trim().is_empty() {
+        "functions3.ultraviewer.net".to_string()
+    } else {
+        fields[14].clone()
+    };
+    let partner_secret_token = fields
+        .get(20)
+        .filter(|s| !s.is_empty() && *s != "0")
+        .cloned()
+        .or_else(|| {
+            fields
+                .get(15)
+                .filter(|s| !s.is_empty() && *s != "0")
+                .cloned()
+        })
+        .or_else(|| fields.get(20).cloned());
     Ok(TargetRoute {
         lan_ip: fields[2].clone(),
         public_ip: fields[4].clone(),
@@ -659,9 +675,35 @@ pub fn decode_target_route(payload: &[u8]) -> Result<TargetRoute, String> {
         tcp_server_ip: fields[11].clone(),
         matched_custom_password: parse_range(12, -32768, 32767)? as i16,
         target_session_id: parse_range(13, -2_147_483_648, 2_147_483_647)? as i32,
-        tcp_server_hostname: fields[14].clone(),
-        partner_secret_token: fields.get(20).cloned(),
+        tcp_server_hostname,
+        partner_secret_token,
     })
+}
+
+pub fn format_command8_status_error(response: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(response);
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.first().copied() != Some("8") || parts.len() < 2 || parts[1] == "1" {
+        return None;
+    }
+    let status = parts[1];
+    let detail = parts
+        .get(2)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && *s != "0");
+    let msg = match status {
+        "2" => "Sai mật khẩu (Wrong Password)".to_string(),
+        "11" => "Đối tác không online hoặc ID không tồn tại".to_string(),
+        "99" => match detail {
+            Some(reason) => format!("Không thể kết nối tới đối tác (Status 99, {})", reason),
+            None => "Không thể kết nối tới đối tác (Status 99)".to_string(),
+        },
+        _ => match detail {
+            Some(reason) => format!("Lỗi kết nối từ máy chủ (Mã {}, {})", status, reason),
+            None => format!("Lỗi kết nối từ máy chủ (Mã {})", status),
+        },
+    };
+    Some(msg)
 }
 
 pub fn build_registration_command(terms: &[String]) -> Result<Vec<u8>, String> {
