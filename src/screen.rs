@@ -478,6 +478,36 @@ impl RgbBuffer {
         }
     }
 
+    pub fn blit_rgb555_rect(&mut self, x: u32, y: u32, width: u32, height: u32, raw_rgb555: &[u8]) {
+        if width == 0 || height == 0 || x >= self.width || y >= self.height {
+            return;
+        }
+        let lut = rgb555_lut();
+        let copy_w = width.min(self.width.saturating_sub(x)) as usize;
+        let copy_h = height.min(self.height.saturating_sub(y)) as usize;
+        let src_row_stride = (width as usize) * 2;
+        let dst_width = self.width as usize;
+
+        for row in 0..copy_h {
+            let src_start = row * src_row_stride;
+            if src_start + copy_w * 2 > raw_rgb555.len() {
+                break;
+            }
+            let src_slice = &raw_rgb555[src_start..src_start + copy_w * 2];
+            let dst_start = ((y as usize + row) * dst_width + x as usize) * 3;
+            let dst_slice = &mut self.pixels[dst_start..dst_start + copy_w * 3];
+
+            for (col, chunk) in src_slice.chunks_exact(2).enumerate() {
+                let val = u16::from_le_bytes([chunk[0], chunk[1]]);
+                let rgb = lut[(val & 0x7FFF) as usize];
+                let dst_idx = col * 3;
+                dst_slice[dst_idx] = (rgb >> 16) as u8;
+                dst_slice[dst_idx + 1] = (rgb >> 8) as u8;
+                dst_slice[dst_idx + 2] = rgb as u8;
+            }
+        }
+    }
+
     pub fn get_pixel(&self, x: u32, y: u32) -> (u8, u8, u8) {
         let idx = ((y as usize) * (self.width as usize) + (x as usize)) * 3;
         (self.pixels[idx], self.pixels[idx + 1], self.pixels[idx + 2])
@@ -642,18 +672,12 @@ where
 
     let raw = decompress_fn(&fields[2], total_bytes)?;
     let mut offset = 0usize;
-    let lut = rgb555_lut();
     for &(x, y, width, height) in &rectangles {
-        let mut tile = RgbBuffer::new(width, height);
-        for row in 0..height {
-            for col in 0..width {
-                let val = u16::from_le_bytes([raw[offset], raw[offset + 1]]);
-                offset += 2;
-                let rgb = lut[(val & 0x7FFF) as usize];
-                tile.put_pixel(col, row, ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8));
-            }
+        let tile_bytes = (width as usize) * (height as usize) * 2;
+        if offset + tile_bytes <= raw.len() {
+            canvas.blit_rgb555_rect(x, y, width, height, &raw[offset..offset + tile_bytes]);
         }
-        canvas.paste(&tile, x, y);
+        offset += tile_bytes;
     }
     Ok(rectangles.len())
 }
@@ -690,9 +714,9 @@ pub struct RGB555Screen {
     pub version: u64,
     pub layout: DisplayLayout,
     pub monitor_selection: MonitorSelection,
-    cached_jpeg: Option<(u64, u8, Vec<u8>)>,
-    cached_bmp: Option<(u64, Vec<u8>)>,
-    cached_png: Option<(u64, Vec<u8>)>,
+    pub(crate) cached_jpeg: Option<(u64, u8, Vec<u8>)>,
+    pub(crate) cached_bmp: Option<(u64, Vec<u8>)>,
+    pub(crate) cached_png: Option<(u64, Vec<u8>)>,
 }
 
 impl Default for RGB555Screen {
@@ -840,9 +864,7 @@ impl RGB555Screen {
         if fields[5].len() % 8 != 0 || fields[9].len() % 8 != 0 || fields[10].len() % 12 != 0 {
             return Err("invalid screen cache record length".to_string());
         }
-        let mut canvas = self.canvas.clone();
-        let mut cache = self.cache.clone();
-        let strict_small = canvas.width <= 4 && canvas.height <= 4;
+        let strict_small = self.canvas.width <= 4 && self.canvas.height <= 4;
         let check_bounds = |x: i32, y: i32, w: i32, h: i32, cw: u32, ch: u32| -> Result<(), String> {
             if w <= 0
                 || h <= 0
@@ -862,10 +884,8 @@ impl RGB555Screen {
             let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
             let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
             let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
-            check_bounds(x, y, w, h, canvas.width, canvas.height)?;
+            check_bounds(x, y, w, h, self.canvas.width, self.canvas.height)?;
         }
-
-        let mut count = 0usize;
 
         if !fields[6].is_empty() {
             if fields[6].len() < 10 || (fields[6].len() - 10) % 8 != 0 {
@@ -876,11 +896,73 @@ impl RGB555Screen {
             let y = i16::from_le_bytes([fields[6][4], fields[6][5]]) as i32;
             let w = i16::from_le_bytes([fields[6][6], fields[6][7]]) as i32;
             let h = i16::from_le_bytes([fields[6][8], fields[6][9]]) as i32;
-            check_bounds(x, y, w, h, canvas.width, canvas.height)?;
+            check_bounds(x, y, w, h, self.canvas.width, self.canvas.height)?;
 
-            let cw = (w as u32).min(canvas.width.saturating_sub(x as u32));
-            let ch = (h as u32).min(canvas.height.saturating_sub(y as u32));
-            let cropped = canvas.crop(x as u32, y as u32, cw, ch);
+            let shifted_y = y - delta;
+            for chunk in fields[6][10..].chunks_exact(8) {
+                let rx = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                let ry = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+                let rw = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
+                let rh = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
+                check_bounds(rx, ry, rw, rh, self.canvas.width, self.canvas.height)?;
+                if rx < x || rx + rw > x + w || ry < shifted_y || ry + rh > shifted_y + h {
+                    return Err("scroll-copy references uncopied intermediate pixels".to_string());
+                }
+            }
+        }
+
+        if !fields[7].is_empty() || !fields[8].is_empty() {
+            if !fields[7].starts_with(b"\xff\xd8")
+                || fields[8].is_empty()
+                || fields[8].len() % 8 != 0
+            {
+                return Err("invalid JPEG atlas fields".to_string());
+            }
+            for chunk in fields[8].chunks_exact(8) {
+                let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+                let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+                let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
+                let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
+                check_bounds(x, y, w, h, self.canvas.width, self.canvas.height)?;
+            }
+        }
+
+        for chunk in fields[9].chunks_exact(8) {
+            let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+            let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+            let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            if let Some((_, tile)) = self.cache.iter().find(|(k, _)| *k == key) {
+                check_bounds(
+                    x,
+                    y,
+                    tile.width as i32,
+                    tile.height as i32,
+                    self.canvas.width,
+                    self.canvas.height,
+                )?;
+            }
+        }
+
+        for chunk in fields[10].chunks_exact(12) {
+            let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+            let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
+            let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
+            let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
+            check_bounds(x, y, w, h, self.canvas.width, self.canvas.height)?;
+        }
+
+        let mut count = 0usize;
+
+        if !fields[6].is_empty() {
+            let delta = i16::from_le_bytes([fields[6][0], fields[6][1]]) as i32;
+            let x = i16::from_le_bytes([fields[6][2], fields[6][3]]) as i32;
+            let y = i16::from_le_bytes([fields[6][4], fields[6][5]]) as i32;
+            let w = i16::from_le_bytes([fields[6][6], fields[6][7]]) as i32;
+            let h = i16::from_le_bytes([fields[6][8], fields[6][9]]) as i32;
+
+            let cw = (w as u32).min(self.canvas.width.saturating_sub(x as u32));
+            let ch = (h as u32).min(self.canvas.height.saturating_sub(y as u32));
+            let cropped = self.canvas.crop(x as u32, y as u32, cw, ch);
             let shifted_y = y - delta;
 
             for chunk in fields[6][10..].chunks_exact(8) {
@@ -888,17 +970,13 @@ impl RGB555Screen {
                 let ry = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                 let rw = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
                 let rh = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
-                check_bounds(rx, ry, rw, rh, canvas.width, canvas.height)?;
-                if rx < x || rx + rw > x + w || ry < shifted_y || ry + rh > shifted_y + h {
-                    return Err("scroll-copy references uncopied intermediate pixels".to_string());
-                }
                 let sub = cropped.crop(
                     (rx - x) as u32,
                     (ry - shifted_y) as u32,
                     (rw as u32).min(cropped.width.saturating_sub((rx - x) as u32)),
                     (rh as u32).min(cropped.height.saturating_sub((ry - shifted_y) as u32)),
                 );
-                canvas.paste(&sub, rx as u32, ry as u32);
+                self.canvas.paste(&sub, rx as u32, ry as u32);
                 count += 1;
             }
         }
@@ -913,28 +991,27 @@ impl RGB555Screen {
                     let rh = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
                     clip_rects.push((rx, ry, rw, rh));
                 }
-                let mut temp_canvas = canvas.clone();
+                let mut temp_canvas = self.canvas.clone();
                 for chunk in fields[9].chunks_exact(8) {
                     let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                     let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                     let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
-                    let Some(pos) = cache.iter().position(|(k, _)| *k == key) else {
+                    let Some(pos) = self.cache.iter().position(|(k, _)| *k == key) else {
                         continue;
                     };
-                    let (_, tile) = cache.remove(pos);
+                    let (_, tile) = self.cache.remove(pos);
                     let tw = tile.width as i32;
                     let th = tile.height as i32;
-                    check_bounds(x, y, tw, th, canvas.width, canvas.height)?;
                     let intersects_clip = clip_rects
                         .iter()
                         .any(|&(rx, ry, rw, rh)| x < rx + rw && x + tw > rx && y < ry + rh && y + th > ry);
                     if intersects_clip {
                         temp_canvas.paste(&tile, x as u32, y as u32);
                     } else {
-                        canvas.paste(&tile, x as u32, y as u32);
+                        self.canvas.paste(&tile, x as u32, y as u32);
                         temp_canvas.paste(&tile, x as u32, y as u32);
                     }
-                    cache.push((key, tile));
+                    self.cache.push((key, tile));
                     count += 1;
                 }
                 for (rx, ry, rw, rh) in clip_rects {
@@ -942,7 +1019,7 @@ impl RGB555Screen {
                     let ch = (rh as u32).min(temp_canvas.height.saturating_sub(ry as u32));
                     if cw > 0 && ch > 0 {
                         let sub = temp_canvas.crop(rx as u32, ry as u32, cw, ch);
-                        canvas.paste(&sub, rx as u32, ry as u32);
+                        self.canvas.paste(&sub, rx as u32, ry as u32);
                     }
                 }
             } else {
@@ -950,32 +1027,18 @@ impl RGB555Screen {
                     let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                     let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                     let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
-                    let Some(pos) = cache.iter().position(|(k, _)| *k == key) else {
+                    let Some(pos) = self.cache.iter().position(|(k, _)| *k == key) else {
                         continue;
                     };
-                    let (_, tile) = cache.remove(pos);
-                    check_bounds(
-                        x,
-                        y,
-                        tile.width as i32,
-                        tile.height as i32,
-                        canvas.width,
-                        canvas.height,
-                    )?;
-                    canvas.paste(&tile, x as u32, y as u32);
-                    cache.push((key, tile));
+                    let (_, tile) = self.cache.remove(pos);
+                    self.canvas.paste(&tile, x as u32, y as u32);
+                    self.cache.push((key, tile));
                     count += 1;
                 }
             }
         }
 
         if !fields[7].is_empty() || !fields[8].is_empty() {
-            if !fields[7].starts_with(b"\xff\xd8")
-                || fields[8].is_empty()
-                || fields[8].len() % 8 != 0
-            {
-                return Err("invalid JPEG atlas fields".to_string());
-            }
             let decoded = image::load_from_memory_with_format(&fields[7], ImageFormat::Jpeg)
                 .map_err(|e| format!("invalid JPEG atlas: {}", e))?;
             let rgb_img = decoded.to_rgb8();
@@ -1000,7 +1063,6 @@ impl RGB555Screen {
                 let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                 let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
                 let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
-                check_bounds(x, y, w, h, canvas.width, canvas.height)?;
                 rectangles.push((x, y, w, h));
             }
             let mut chosen_layout = None;
@@ -1036,7 +1098,7 @@ impl RGB555Screen {
                     continue;
                 }
                 let tile = flipped.crop(sx as u32, sy as u32, cw, ch);
-                canvas.paste(&tile, x as u32, y as u32);
+                self.canvas.paste(&tile, x as u32, y as u32);
                 count += 1;
             }
         }
@@ -1044,7 +1106,7 @@ impl RGB555Screen {
         if !fields[1].is_empty() && !fields[2].is_empty() {
             let mut pixel_fields = fields[..5].to_vec();
             pixel_fields.extend(vec![Vec::new(); 6]);
-            count += apply_rgb555_update(&mut canvas, &pixel_fields, |payload, size| {
+            count += apply_rgb555_update(&mut self.canvas, &pixel_fields, |payload, size| {
                 self.decoder.decompress(payload, size)
             })?;
         }
@@ -1055,23 +1117,24 @@ impl RGB555Screen {
             let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
             let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
             let key = i32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
-            check_bounds(x, y, w, h, canvas.width, canvas.height)?;
-            if !cache.iter().any(|(k, _)| *k == key) {
-                let cw = (w as u32).min(canvas.width.saturating_sub(x as u32));
-                let ch = (h as u32).min(canvas.height.saturating_sub(y as u32));
+            if !self.cache.iter().any(|(k, _)| *k == key) {
+                let cw = (w as u32).min(self.canvas.width.saturating_sub(x as u32));
+                let ch = (h as u32).min(self.canvas.height.saturating_sub(y as u32));
                 if cw > 0 && ch > 0 {
-                    cache.push((key, canvas.crop(x as u32, y as u32, cw, ch)));
+                    let tile = self.canvas.crop(x as u32, y as u32, cw, ch);
+                    self.cache.push((key, tile));
                 }
             }
         }
-        while cache.len() > self.cache_limit {
-            cache.remove(0);
+        while self.cache.len() > self.cache_limit {
+            self.cache.remove(0);
         }
 
-        self.canvas = canvas;
-        self.cache = cache;
         if count > 0 || !fields[10].is_empty() {
             self.version = self.version.wrapping_add(1);
+            self.cached_jpeg = None;
+            self.cached_bmp = None;
+            self.cached_png = None;
         }
         Ok(count)
     }

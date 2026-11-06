@@ -23,6 +23,7 @@ use crate::screen::{
     desktop_size_from_login, DisplayLayout, MonitorSelection, RGB555Screen, ZstdDictionaryDecoder,
 };
 use crate::server::encode_base64;
+use image::ImageEncoder;
 use native_tls::{TlsConnector, TlsStream};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -233,6 +234,7 @@ impl RegistrationTransport {
         let addr = resolve_addr(host, port)?;
         let raw = TcpStream::connect_timeout(&addr, self.timeout)
             .map_err(|e| format!("connect failed to {}:{}: {}", host, port, e))?;
+        let _ = raw.set_nodelay(true);
         let _ = raw.set_read_timeout(Some(self.timeout));
         let _ = raw.set_write_timeout(Some(self.timeout));
 
@@ -405,6 +407,7 @@ impl SessionTransport {
         let addr = resolve_addr(host, port)?;
         let raw = TcpStream::connect_timeout(&addr, self.inner.timeout)
             .map_err(|e| format!("session connect failed to {}:{}: {}", host, port, e))?;
+        let _ = raw.set_nodelay(true);
         let _ = raw.set_read_timeout(Some(self.inner.timeout));
         let _ = raw.set_write_timeout(Some(self.inner.timeout));
 
@@ -786,6 +789,7 @@ pub struct ControlSessionInner {
     pub host_profile: HostProfile,
     pub login_acknowledged: bool,
     pub outbound_queue: Vec<(Vec<u8>, bool, Option<InputEvent>)>,
+    pub last_local_move_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -871,6 +875,7 @@ impl ControlSession {
             host_profile,
             login_acknowledged: false,
             outbound_queue: Vec::new(),
+            last_local_move_at: None,
         };
         Self::sync_state_fields(&mut inner);
         Self {
@@ -892,18 +897,53 @@ impl ControlSession {
     }
 
     pub fn png_frame(&self) -> Result<Vec<u8>, String> {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.screen.get_or_encode_png().map(|(_, bytes)| bytes)
+        self.png_frame_versioned().map(|(_, bytes)| bytes)
     }
 
     pub fn png_frame_versioned(&self) -> Result<(u64, Vec<u8>), String> {
+        let (ver, view) = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((v, ref bytes)) = guard.screen.cached_png {
+                if v == guard.screen.version {
+                    return Ok((v, bytes.clone()));
+                }
+            }
+            (guard.screen.version, guard.screen.active_view_buffer().into_owned())
+        };
+        let mut out = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut out);
+        encoder
+            .write_image(
+                &view.pixels,
+                view.width,
+                view.height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|e| format!("PNG encoding failed: {}", e))?;
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.screen.get_or_encode_png()
+        if guard.screen.version == ver {
+            guard.screen.cached_png = Some((ver, out.clone()));
+        }
+        Ok((ver, out))
     }
 
     pub fn jpeg_frame_versioned(&self, quality: u8) -> Result<(u64, Vec<u8>), String> {
+        let q = quality.clamp(1, 100);
+        let (ver, view) = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((v, cached_q, ref bytes)) = guard.screen.cached_jpeg {
+                if v == guard.screen.version && cached_q == q {
+                    return Ok((v, bytes.clone()));
+                }
+            }
+            (guard.screen.version, guard.screen.active_view_buffer().into_owned())
+        };
+        let bytes = view.to_jpeg(q)?;
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.screen.get_or_encode_jpeg(quality)
+        if guard.screen.version == ver {
+            guard.screen.cached_jpeg = Some((ver, q, bytes.clone()));
+        }
+        Ok((ver, bytes))
     }
 
     pub fn bmp_frame_versioned(&self) -> (u64, Vec<u8>) {
@@ -1253,6 +1293,13 @@ impl ControlSession {
 
                 if matches!(kind, 3 | 4 | 28) {
                     if let Ok(cmd) = decode_cursor_parts(&fields) {
+                        if matches!(cmd, crate::cursor::CursorCommand::Position { .. })
+                            && guard
+                                .last_local_move_at
+                                .map_or(false, |t| t.elapsed() < Duration::from_millis(300))
+                        {
+                            return;
+                        }
                         if let Some(reply) = guard.cursor.handle_command(cmd) {
                             let _ = Self::dispatch_payload(&mut guard, &reply, false, None);
                         }
@@ -1309,6 +1356,7 @@ impl ControlSession {
     pub fn send_input(&self, mut event: InputEvent) -> Result<Vec<u8>, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if event.event_type == "move" {
+            guard.last_local_move_at = Some(Instant::now());
             let bounds = guard
                 .screen
                 .layout

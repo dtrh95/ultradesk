@@ -322,10 +322,10 @@ impl DirectListener {
                         spawn_reader(id, read_s, codec.clone(), events.clone(), cls_map.clone());
                     }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(25));
+                        thread::sleep(Duration::from_millis(2));
                     }
                     Err(_) => {
-                        thread::sleep(Duration::from_millis(25));
+                        thread::sleep(Duration::from_millis(2));
                     }
                 }
             }
