@@ -1403,7 +1403,10 @@ mod tests {
             let (_, offer_state) = crate::e2e::create_viewer_offer("12345678", "proof1", "proof2");
             guard.e2e = offer_state;
         }
-        let legacy_init = crate::host::encode_host_screen_init(&layout);
+        let legacy_init = crate::host::encode_host_screen_init_with_e2e(
+            &layout,
+            &[0xffu8, 0xfe, 0x00, 0x80],
+        );
         legacy_viewer.handle_session_payload(&legacy_init);
         let legacy_snap = legacy_viewer.snapshot();
         assert_eq!(legacy_snap.state, "connected");

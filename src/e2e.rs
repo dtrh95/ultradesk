@@ -339,13 +339,13 @@ pub fn finalize_viewer_handshake(
         return Ok(E2eNegotiationState::Disabled);
     };
 
-    if field3.is_empty() {
+    let trimmed = field3.trim_ascii();
+    if trimmed.is_empty() || !trimmed.starts_with(E2E_HANDSHAKE_PREFIX.as_bytes()) {
         return Ok(E2eNegotiationState::Disabled);
     }
 
-    let text = std::str::from_utf8(field3)
-        .map_err(|_| "invalid UTF-8 in host E2E answer".to_string())?
-        .trim();
+    let text = std::str::from_utf8(trimmed)
+        .map_err(|_| "invalid UTF-8 in host E2E answer".to_string())?;
     let rest = text
         .strip_prefix(E2E_HANDSHAKE_PREFIX)
         .ok_or_else(|| "unsupported host E2E version".to_string())?;
@@ -836,6 +836,11 @@ mod tests {
 
         let legacy_state = finalize_viewer_handshake(&viewer_state, &[]).unwrap();
         assert_eq!(legacy_state, E2eNegotiationState::Disabled);
+
+        let legacy_non_utf8_field3 = [0xffu8, 0xfe, 0x00, 0x80];
+        let legacy_binary_state =
+            finalize_viewer_handshake(&viewer_state, &legacy_non_utf8_field3).unwrap();
+        assert_eq!(legacy_binary_state, E2eNegotiationState::Disabled);
 
         let prefixed_offer = format!("partner_secret_token_xyz|{}", offer_wire);
         let (answer_temp, host_cipher_temp) =
