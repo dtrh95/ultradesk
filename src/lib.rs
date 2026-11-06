@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod cursor;
 pub mod direct;
 pub mod file_transfer;
+pub mod gui;
 pub mod host;
 pub mod input;
 pub mod profile;
@@ -26,6 +27,10 @@ mod tests {
         decode_file_transfer_packet, encode_chat_message, encode_file_accept, encode_file_ack,
         encode_file_cancel, encode_file_chunk, encode_file_offer, FileTransferManager,
         FileTransferPacket, TransferDirection, TransferStatus,
+    };
+    use crate::gui::{
+        ClipboardAction, ClipboardEvent, ClipboardSeedingState, ClipboardSyncMachine,
+        LanguageCode, SpecialKey, ThemeName, ToolTab, ToolbarAction,
     };
     use crate::input::{
         keyboard, mouse_button, mouse_move, mouse_wheel, with_held_key, InputEvent,
@@ -850,10 +855,9 @@ mod tests {
         assert!(resp_icon.contains("Content-Type: image/png"));
 
         let gui_tmp = std::env::temp_dir().join(format!("uv_gui_test_{}", std::process::id()));
-        let script_path = materialize_embedded_gui_assets(&gui_tmp).unwrap();
-        let script_text = std::fs::read_to_string(&script_path).unwrap();
-        assert!(script_text.contains("Gtk.Clipboard.get"));
-        assert!(script_text.contains("(\"4.1\", \"4.0\")"));
+        let viewer_asset_path = materialize_embedded_gui_assets(&gui_tmp).unwrap();
+        let viewer_text = std::fs::read_to_string(&viewer_asset_path).unwrap();
+        assert!(viewer_text.contains("canvasContentRect"));
         assert!(gui_tmp.join("ultradesk-rust.png").exists());
         let _ = std::fs::remove_dir_all(&gui_tmp);
 
@@ -1010,5 +1014,127 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn test_clipboard_sync_machine_seeding_and_echo_prevention() {
+        let mut machine = ClipboardSyncMachine::new();
+        assert_eq!(machine.seeding_state(), ClipboardSeedingState::Unseeded);
+
+        assert_eq!(machine.on_host_clipboard("initial local text", true), None);
+        assert_eq!(machine.seeding_state(), ClipboardSeedingState::Seeded);
+
+        assert_eq!(
+            machine.on_host_clipboard("second local text", false),
+            None
+        );
+
+        assert_eq!(
+            machine.on_host_clipboard("third local text", true),
+            Some("third local text".to_string())
+        );
+
+        assert_eq!(machine.on_host_clipboard("third local text", true), None);
+
+        assert_eq!(
+            machine.on_remote_clipboard("remote incoming text\r\n"),
+            Some("remote incoming text\r\n".to_string())
+        );
+
+        assert_eq!(
+            machine.on_host_clipboard("remote incoming text", true),
+            None
+        );
+
+        let mut step_machine = ClipboardSyncMachine::new();
+        assert_eq!(
+            step_machine.step(ClipboardEvent::ConnectionChanged(true)),
+            None
+        );
+        assert_eq!(
+            step_machine.step(ClipboardEvent::SystemTextRead("first read".to_string())),
+            None
+        );
+        assert_eq!(
+            step_machine.step(ClipboardEvent::RemoteTextReceived("peer text".to_string())),
+            Some(ClipboardAction::WriteToSystem("peer text".to_string()))
+        );
+        assert_eq!(
+            step_machine.step(ClipboardEvent::SystemTextRead("peer text".to_string())),
+            None
+        );
+        assert_eq!(
+            step_machine.step(ClipboardEvent::SystemTextRead("peer text 2".to_string())),
+            Some(ClipboardAction::PostToRemote("peer text 2".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_clipboard_sync_machine_normalization() {
+        assert_eq!(
+            ClipboardSyncMachine::normalize("hello\r\nworld\r\n"),
+            "hello\nworld"
+        );
+        assert_eq!(
+            ClipboardSyncMachine::normalize("hello\nworld\n"),
+            "hello\nworld"
+        );
+        assert_eq!(ClipboardSyncMachine::normalize(""), "");
+    }
+
+    #[test]
+    fn test_toolbar_action_serde_roundtrips() {
+        let actions = vec![
+            ToolbarAction::ToggleConnectModal,
+            ToolbarAction::DisconnectRemote,
+            ToolbarAction::StartHostSharing,
+            ToolbarAction::StopHostSharing,
+            ToolbarAction::ToggleToolsPopover,
+            ToolbarAction::SelectToolTab(ToolTab::Chat),
+            ToolbarAction::SelectToolTab(ToolTab::Files),
+            ToolbarAction::SelectToolTab(ToolTab::Clipboard),
+            ToolbarAction::SelectToolTab(ToolTab::Audio),
+            ToolbarAction::SetTheme(ThemeName::AutoTime),
+            ToolbarAction::SetTheme(ThemeName::AutoOs),
+            ToolbarAction::SetTheme(ThemeName::Onedark),
+            ToolbarAction::SetTheme(ThemeName::Onelight),
+            ToolbarAction::SetTheme(ThemeName::VscodeDark),
+            ToolbarAction::SetTheme(ThemeName::VscodeLight),
+            ToolbarAction::SetTheme(ThemeName::GruvboxDark),
+            ToolbarAction::SetTheme(ThemeName::GruvboxLight),
+            ToolbarAction::CycleTheme,
+            ToolbarAction::SetLanguage(LanguageCode::Vi),
+            ToolbarAction::SetLanguage(LanguageCode::En),
+            ToolbarAction::SelectMonitor(Some(0)),
+            ToolbarAction::SelectMonitor(Some(2)),
+            ToolbarAction::SelectMonitor(None),
+            ToolbarAction::SendSpecialKey(SpecialKey::Super),
+            ToolbarAction::SendSpecialKey(SpecialKey::CtrlAltDel),
+            ToolbarAction::SendSpecialKey(SpecialKey::F9NextMonitor),
+            ToolbarAction::ToggleToolbarCollapse,
+            ToolbarAction::SetToolbarCollapsed(true),
+            ToolbarAction::SetToolbarCollapsed(false),
+            ToolbarAction::ToggleFullscreen,
+            ToolbarAction::CopyHostId,
+            ToolbarAction::QuitApplication,
+        ];
+
+        for action in &actions {
+            let json = serde_json::to_string(action).unwrap();
+            let parsed: ToolbarAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(action, &parsed);
+        }
+
+        let json = serde_json::to_string(&ToolbarAction::SelectToolTab(ToolTab::Chat)).unwrap();
+        assert_eq!(json, r#"{"action":"SelectToolTab","payload":"chat"}"#);
+
+        let json = serde_json::to_string(&ToolbarAction::SetTheme(ThemeName::Onedark)).unwrap();
+        assert_eq!(json, r#"{"action":"SetTheme","payload":"onedark"}"#);
+
+        let json = serde_json::to_string(&ToolbarAction::SetLanguage(LanguageCode::Vi)).unwrap();
+        assert_eq!(json, r#"{"action":"SetLanguage","payload":"vi"}"#);
+
+        let json = serde_json::to_string(&ToolbarAction::SendSpecialKey(SpecialKey::Super)).unwrap();
+        assert_eq!(json, r#"{"action":"SendSpecialKey","payload":"super"}"#);
     }
 }
