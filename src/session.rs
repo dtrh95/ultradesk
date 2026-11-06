@@ -17,7 +17,8 @@ use crate::protocol::{
     connection_request_password_value, decode_byte_array_fields, decode_target_route,
     decode_transport_body, encode_byte_array_fields, encode_relay_frame, encode_transport_frame,
     encrypt_registration_bytes, extract_command3_identity, format_command8_status_error,
-    http_service_preface, md5_hex_lower, Command3Identity, TargetRoute, REGISTRATION_PASSWORD,
+    http_service_preface, login_password_fields, md5_hex_lower, Command3Identity, TargetRoute,
+    REGISTRATION_PASSWORD,
 };
 use crate::screen::{
     desktop_size_from_login, DisplayLayout, MonitorSelection, RGB555Screen, ZstdDictionaryDecoder,
@@ -817,6 +818,12 @@ pub struct SessionState {
     pub client_synthetic_mac: String,
     #[serde(default)]
     pub host_hardware_mac: String,
+    #[serde(default)]
+    pub e2e_enabled: bool,
+    #[serde(default)]
+    pub e2e_cipher: String,
+    #[serde(default)]
+    pub e2e_fingerprint: String,
 }
 
 impl Default for SessionState {
@@ -871,6 +878,9 @@ impl Default for SessionState {
             host_status: None,
             client_synthetic_mac: String::new(),
             host_hardware_mac: String::new(),
+            e2e_enabled: false,
+            e2e_cipher: String::new(),
+            e2e_fingerprint: String::new(),
         }
     }
 }
@@ -896,6 +906,7 @@ pub struct ControlSessionInner {
     pub login_acknowledged: bool,
     pub outbound_queue: Vec<(Vec<u8>, bool, Option<InputEvent>)>,
     pub last_local_move_at: Option<Instant>,
+    pub e2e: crate::e2e::E2eNegotiationState,
 }
 
 #[derive(Clone)]
@@ -982,6 +993,7 @@ impl ControlSession {
             login_acknowledged: false,
             outbound_queue: Vec::new(),
             last_local_move_at: None,
+            e2e: crate::e2e::E2eNegotiationState::Disabled,
         };
         Self::sync_state_fields(&mut inner);
         Self {
@@ -1262,6 +1274,9 @@ impl ControlSession {
         inner.state.clipboard_updates_received = inner.clipboard.updates_received;
         inner.state.file_transfers = inner.files.transfers.values().cloned().collect();
         inner.state.chat_messages = inner.files.chat_messages.clone();
+        inner.state.e2e_enabled = inner.e2e.is_enabled();
+        inner.state.e2e_cipher = inner.e2e.cipher_name().to_string();
+        inner.state.e2e_fingerprint = inner.e2e.fingerprint().to_string();
         inner.state.updated_at = now_epoch_secs();
     }
 
@@ -1300,6 +1315,39 @@ impl ControlSession {
         }
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
+        let decrypted_buf: Vec<u8>;
+        let payload: &[u8] = if payload == [1, 0, 0, 0, 22] {
+            guard.e2e = crate::e2e::E2eNegotiationState::Disabled;
+            payload
+        } else if let Some(cipher) = guard.e2e.cipher_mut() {
+            match cipher.open(payload) {
+                Ok((plain, _unicode_flag)) => {
+                    decrypted_buf = plain;
+                    &decrypted_buf
+                }
+                Err(err) => {
+                    guard.login_acknowledged = false;
+                    guard.state.state = "disconnected".to_string();
+                    guard.state.error = Some(err.clone());
+                    guard.state.last_message = err;
+                    self.stop_flag.store(true, Ordering::SeqCst);
+                    Self::sync_state_fields(&mut guard);
+                    return;
+                }
+            }
+        } else if crate::e2e::is_e2e_frame(payload) {
+            let msg = "Unexpected E2E encrypted packet before handshake".to_string();
+            guard.login_acknowledged = false;
+            guard.state.state = "disconnected".to_string();
+            guard.state.error = Some(msg.clone());
+            guard.state.last_message = msg;
+            self.stop_flag.store(true, Ordering::SeqCst);
+            Self::sync_state_fields(&mut guard);
+            return;
+        } else {
+            payload
+        };
+
         if let Ok(fields) = decode_byte_array_fields(payload) {
             if !fields.is_empty() && !fields[0].is_empty() {
                 let kind = fields[0][0];
@@ -1327,6 +1375,24 @@ impl ControlSession {
 
                 if kind == 0 {
                     if let Ok((w, h)) = desktop_size_from_login(&fields) {
+                        if matches!(guard.e2e, crate::e2e::E2eNegotiationState::Offered { .. }) {
+                            let field3 = fields.get(3).map(Vec::as_slice).unwrap_or(&[]);
+                            match crate::e2e::finalize_viewer_handshake(&guard.e2e, field3) {
+                                Ok(next_state) => {
+                                    guard.e2e = next_state;
+                                }
+                                Err(err) => {
+                                    guard.e2e = crate::e2e::E2eNegotiationState::Disabled;
+                                    guard.login_acknowledged = false;
+                                    guard.state.state = "disconnected".to_string();
+                                    guard.state.error = Some(err.clone());
+                                    guard.state.last_message = err;
+                                    self.stop_flag.store(true, Ordering::SeqCst);
+                                    Self::sync_state_fields(&mut guard);
+                                    return;
+                                }
+                            }
+                        }
                         let parsed_bs = if fields.len() >= 15 && fields[14].len() == 1 {
                             fields[14][0] as i32
                         } else if fields.len() >= 15 && fields[14].len() == 2 {
@@ -1733,6 +1799,7 @@ impl ControlSession {
             guard.rectangles_applied = 0;
             guard.outbound_queue.clear();
             guard.login_acknowledged = false;
+            guard.e2e = crate::e2e::E2eNegotiationState::Disabled;
             guard.state.state = "connecting".to_string();
             guard.state.frames = 0;
             guard.state.error = None;
@@ -1756,6 +1823,7 @@ impl ControlSession {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.login_acknowledged = false;
         guard.outbound_queue.clear();
+        guard.e2e = crate::e2e::E2eNegotiationState::Disabled;
         guard.state.state = "disconnected".to_string();
         guard.state.last_message = "Disconnected".to_string();
         Self::sync_state_fields(&mut guard);
@@ -1774,7 +1842,17 @@ impl ControlSession {
     ) {
         let queued: Vec<(Vec<u8>, bool, Option<InputEvent>)> = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.outbound_queue.drain(..).collect()
+            let raw_items: Vec<_> = guard.outbound_queue.drain(..).collect();
+            raw_items
+                .into_iter()
+                .map(|(payload, unicode_bytes, evt_opt)| {
+                    if let Some(cipher) = guard.e2e.cipher_mut() {
+                        (cipher.seal(&payload, unicode_bytes), false, evt_opt)
+                    } else {
+                        (payload, unicode_bytes, evt_opt)
+                    }
+                })
+                .collect()
         };
         for (payload, unicode_bytes, evt_opt) in queued {
             let _ = relay.send_relay(&payload, &route.public_ip, route.tcp_port, unicode_bytes);
@@ -1836,6 +1914,10 @@ impl ControlSession {
                 guard.client_profile.device_id.chars().take(9).collect()
             }
         };
+        let salt = random_digits(8);
+        let auth = login_password_fields(&partner.password, partner.password_type, Some(&salt))?;
+        let (e2e_wire, e2e_state) =
+            crate::e2e::create_viewer_offer(&auth.salt, &auth.primary, &auth.secondary);
         let fields = vec![
             "".to_string(),
             "".to_string(),
@@ -1856,11 +1938,10 @@ impl ControlSession {
             "80".to_string(),
             "0".to_string(),
             "0".to_string(),
-            String::new(),
+            e2e_wire,
             "6.6.133".to_string(),
             "0".to_string(),
         ];
-        let salt = random_digits(8);
         let login_payload = build_login_with_password(
             &fields,
             &partner.password,
@@ -1886,6 +1967,7 @@ impl ControlSession {
         };
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.e2e = e2e_state;
             guard.files.modern_protocol = false;
             let decoder = ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
             guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
@@ -2001,12 +2083,28 @@ impl ControlSession {
 
         for vk in held_keys {
             if let Ok(pkt) = keyboard(vk, false, false) {
-                let _ = relay.send_relay(&pkt, &route.public_ip, route.tcp_port, false);
+                let wire_pkt = {
+                    let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(cipher) = guard.e2e.cipher_mut() {
+                        cipher.seal(&pkt, false)
+                    } else {
+                        pkt
+                    }
+                };
+                let _ = relay.send_relay(&wire_pkt, &route.public_ip, route.tcp_port, false);
             }
         }
         for button in held_buttons {
             if let Ok(pkt) = mouse_button(&button, false) {
-                let _ = relay.send_relay(&pkt, &route.public_ip, route.tcp_port, false);
+                let wire_pkt = {
+                    let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(cipher) = guard.e2e.cipher_mut() {
+                        cipher.seal(&pkt, false)
+                    } else {
+                        pkt
+                    }
+                };
+                let _ = relay.send_relay(&wire_pkt, &route.public_ip, route.tcp_port, false);
             }
         }
         relay.close();
@@ -2063,6 +2161,14 @@ impl ControlSession {
         let mut relay = SessionTransport::new(8.0, 1024 * 1024, true)?;
         relay.connect(&route.tcp_server_ip, 443, &route.tcp_server_hostname, true)?;
 
+        let salt = random_digits(8);
+        let auth = login_password_fields(&partner.password, partner.password_type, Some(&salt))?;
+        let (e2e_wire, e2e_state) =
+            crate::e2e::create_viewer_offer(&auth.salt, &auth.primary, &auth.secondary);
+        let token_or_offer = match route.partner_secret_token.as_deref() {
+            Some(tok) if !tok.is_empty() => format!("{}|{}", tok, e2e_wire),
+            _ => e2e_wire,
+        };
         let fields = vec![
             "".to_string(),
             "".to_string(),
@@ -2083,11 +2189,10 @@ impl ControlSession {
             "80".to_string(),
             "0".to_string(),
             "0".to_string(),
-            route.partner_secret_token.clone().unwrap_or_default(),
+            token_or_offer,
             "6.6.133".to_string(),
             "0".to_string(),
         ];
-        let salt = random_digits(8);
         let login_payload = build_login_with_password(
             &fields,
             &partner.password,
@@ -2099,6 +2204,7 @@ impl ControlSession {
 
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.e2e = e2e_state;
             guard.files.modern_protocol = false;
             let decoder = ZstdDictionaryDecoder::new(guard.dictionary.clone(), 64 * 1024 * 1024);
             guard.screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);

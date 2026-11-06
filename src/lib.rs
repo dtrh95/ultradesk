@@ -1326,4 +1326,88 @@ mod tests {
         assert_eq!(lookup_terms[12], "0");
         assert_eq!(lookup_terms[14], "1");
     }
+
+    #[test]
+    fn test_e2e_live_lan_session_and_legacy_unencrypted_fallback() {
+        let layout = crate::screen::DisplayLayout {
+            width: 32,
+            height: 32,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![crate::screen::MonitorRect {
+                left: 0,
+                top: 0,
+                right: 32,
+                bottom: 32,
+            }],
+        };
+        let host = crate::host::HostSession::with_id(
+            "199887766",
+            "001122334455",
+            "87654321",
+            None,
+            layout.clone(),
+            crate::host::DesktopBackend::headless(32, 32),
+        );
+        host.set_auto_approve(true);
+        let status = host.start_with_endpoint("127.0.0.1", 1, false);
+        assert!(status.lan_port > 0);
+
+        let viewer = ControlSession::new();
+        viewer
+            .start_connect_with_remember(
+                &format!("127.0.0.1:{}", status.lan_port),
+                "87654321",
+                false,
+            )
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            let snap = viewer.snapshot();
+            if snap.state == "connected" && snap.e2e_enabled && snap.frames >= 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let v_snap = viewer.snapshot();
+        let h_stat = host.status();
+        assert_eq!(v_snap.state, "connected");
+        assert!(v_snap.e2e_enabled);
+        assert!(h_stat.e2e_enabled);
+        assert_eq!(v_snap.e2e_cipher, crate::e2e::E2E_CIPHER_NAME);
+        assert_eq!(h_stat.e2e_cipher, crate::e2e::E2E_CIPHER_NAME);
+        assert!(!v_snap.e2e_fingerprint.is_empty());
+        assert_eq!(v_snap.e2e_fingerprint, h_stat.e2e_fingerprint);
+
+        viewer.send_chat("hello over e2e").unwrap();
+        let chat_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut received_chats = Vec::new();
+        while std::time::Instant::now() < chat_deadline {
+            let (chats, _) = host.drain_auxiliary_events();
+            if !chats.is_empty() {
+                received_chats.extend(chats);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(received_chats, vec!["Partner: hello over e2e".to_string()]);
+
+        viewer.disconnect();
+        let _ = host.stop();
+
+        let legacy_viewer = ControlSession::new();
+        {
+            let mut guard = legacy_viewer.inner.lock().unwrap();
+            let (_, offer_state) = crate::e2e::create_viewer_offer("12345678", "proof1", "proof2");
+            guard.e2e = offer_state;
+        }
+        let legacy_init = crate::host::encode_host_screen_init(&layout);
+        legacy_viewer.handle_session_payload(&legacy_init);
+        let legacy_snap = legacy_viewer.snapshot();
+        assert_eq!(legacy_snap.state, "connected");
+        assert!(!legacy_snap.e2e_enabled);
+        assert_eq!(legacy_snap.e2e_fingerprint, "");
+    }
 }
