@@ -22,9 +22,9 @@ Requires:       webkit2gtk4.1
 Requires:       libsoup3
 
 %description
-UltraDesk is a Linux-native remote desktop controller and host written in Rust,
-supporting screen streaming, remote input, audio, clipboard synchronization,
-and file transfer.
+UltraDesk is a remote desktop client and host for Linux. You can run it in a
+Tauri desktop window or headless from the command line. It handles screen
+streaming, remote input, audio, clipboard synchronization, and file transfer.
 
 %prep
 %setup -q

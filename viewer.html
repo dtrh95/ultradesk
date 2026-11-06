@@ -908,9 +908,9 @@ a.dl-link:hover {
         <button id="disconnect" class="danger" type="button" data-i18n="btn_disconnect">Ngắt</button>
       </div>
       <div class="col">
-        <label class="field-label" for="savedRemotes" data-i18n="saved_remotes_label">Lịch sử đối tác</label>
+        <label class="field-label" for="savedRemotes" data-i18n="saved_remotes_label">Đối tác đã lưu</label>
         <select id="savedRemotes" data-i18n-title="saved_remotes_title" title="Chọn nhanh máy đối tác đã lưu">
-          <option value="">-- Lịch sử đối tác --</option>
+          <option value="">Đối tác đã lưu</option>
         </select>
       </div>
       <div class="col">
@@ -931,7 +931,7 @@ a.dl-link:hover {
 
   <div class="tool-pane active" data-tool-pane="chat">
     <div class="section-head">
-      <span data-i18n="chat_header">Trò chuyện nhanh</span>
+      <span data-i18n="chat_header">Trò chuyện</span>
     </div>
     <div id="chatBox" class="transfer-list"></div>
     <div class="row">
@@ -972,7 +972,7 @@ a.dl-link:hover {
       <button id="btnSyncSysClip" class="secondary" type="button" data-i18n="pull_linux_clip">Lấy từ Linux</button>
     </div>
     <span class="field-label" data-i18n="remote_clip_label">Clipboard từ đối tác</span>
-    <textarea id="clipRemote" rows="2" readonly data-i18n-placeholder="clip_remote_placeholder" placeholder="(Chưa nhận clipboard từ đối tác)"></textarea>
+    <textarea id="clipRemote" rows="2" readonly data-i18n-placeholder="clip_remote_placeholder" placeholder="Chưa nhận clipboard từ đối tác"></textarea>
   </div>
 
   <div class="tool-pane" data-tool-pane="audio">
@@ -1033,14 +1033,14 @@ const I18N={
     partner_pass_placeholder:'Mật khẩu',
     btn_connect:'Kết nối ngay',
     btn_disconnect:'Ngắt',
-    saved_remotes_label:'Lịch sử đối tác',
+    saved_remotes_label:'Đối tác đã lưu',
     saved_remotes_title:'Chọn nhanh máy đối tác đã lưu',
-    saved_remotes_opt:'-- Lịch sử đối tác ({count}) --',
+    saved_remotes_opt:'Đối tác đã lưu ({count})',
     tab_chat:'Chat',
     tab_files:'Tệp tin',
     tab_clipboard:'Clipboard',
     tab_audio:'Âm thanh',
-    chat_header:'Trò chuyện nhanh',
+    chat_header:'Trò chuyện',
     chat_placeholder:'Nhập tin nhắn...',
     chat_empty:'Chưa có tin nhắn.',
     send:'Gửi',
@@ -1059,7 +1059,7 @@ const I18N={
     send_to_partner:'Gửi sang đối tác',
     pull_linux_clip:'Lấy từ Linux',
     remote_clip_label:'Clipboard từ đối tác',
-    clip_remote_placeholder:'(Chưa nhận clipboard từ đối tác)',
+    clip_remote_placeholder:'Chưa nhận clipboard từ đối tác',
     audio_header:'Âm thanh từ xa',
     audio_enable:'Bật âm thanh',
     audio_mute:'Tắt âm',
@@ -1098,19 +1098,19 @@ const I18N={
     monitor_item:'Monitor {idx} ({w}x{h})',
     monitor_short:'M{idx}',
     monitor_subset:'Monitors ({list})',
-    host_monitors_label:'Shared Monitors',
-    remote_monitors_label:'Remote Monitors (F9 quick cycle)',
+    host_monitors_label:'Shared monitors',
+    remote_monitors_label:'Remote monitors (F9 to cycle)',
     remote_monitors_empty:'Connect to a partner to select monitors',
     win_key_title:'Open Start Menu on remote peer',
-    host_title:'Allow Remote Control',
+    host_title:'Allow remote control',
     your_id:'Your ID',
     copy:'Copy',
     copied:'Copied',
-    temp_pass:'Temp Password',
-    host_start:'Start Host',
+    temp_pass:'Temporary password',
+    host_start:'Start host',
     host_stop:'Stop',
-    approve_ctrl:'Allow Control',
-    approve_view:'View Only',
+    approve_ctrl:'Allow control',
+    approve_view:'View only',
     decline:'Decline',
     master_pass_placeholder:'Master password (8-64 chars)...',
     save:'Save',
@@ -1118,43 +1118,43 @@ const I18N={
     mp_set:'Set',
     mp_unset:'Not set',
     host_viewer_prompt:'Partner {name} ({id}) requests connection',
-    remote_title:'Control Remote Computer',
+    remote_title:'Control a remote computer',
     remember_pass:'Save password',
     partner_id_label:'Partner ID',
     partner_id_placeholder:'e.g. 90135737',
     partner_pass_label:'Password',
     partner_pass_placeholder:'Password',
-    btn_connect:'Connect Now',
+    btn_connect:'Connect',
     btn_disconnect:'Disconnect',
-    saved_remotes_label:'Partner History',
+    saved_remotes_label:'Saved partners',
     saved_remotes_title:'Quick select saved partner',
-    saved_remotes_opt:'-- Partner history ({count}) --',
+    saved_remotes_opt:'Saved partners ({count})',
     tab_chat:'Chat',
     tab_files:'Files',
     tab_clipboard:'Clipboard',
     tab_audio:'Audio',
-    chat_header:'Quick Chat',
+    chat_header:'Chat',
     chat_placeholder:'Type a message...',
     chat_empty:'No messages yet.',
     send:'Send',
-    files_header:'File Transfer',
-    send_selected_file:'Send Selected File',
+    files_header:'File transfer',
+    send_selected_file:'Send selected file',
     file_path_placeholder:'Or local file path on disk...',
     no_transfers:'No active file transfers.',
     accept_file:'Accept',
     download_file:'Download',
     cancel_file:'Cancel',
-    unicode_header:'Vietnamese / Unicode Input',
+    unicode_header:'Vietnamese and Unicode input',
     unicode_placeholder:'Type Unicode string to send directly...',
     type_btn:'Type',
-    clip_header:'Clipboard Sync',
+    clip_header:'Clipboard sync',
     clip_input_placeholder:'Enter text to push to remote clipboard...',
-    send_to_partner:'Push to Partner',
-    pull_linux_clip:'Pull from Linux',
-    remote_clip_label:'Remote Clipboard',
-    clip_remote_placeholder:'(No clipboard received yet)',
-    audio_header:'Remote Audio',
-    audio_enable:'Enable Audio',
+    send_to_partner:'Send to partner',
+    pull_linux_clip:'Read local clipboard',
+    remote_clip_label:'Remote clipboard',
+    clip_remote_placeholder:'No remote clipboard text yet',
+    audio_header:'Remote audio',
+    audio_enable:'Enable audio',
     audio_mute:'Mute',
     audio_on:'Receiving remote audio stream',
     audio_off:'Remote audio muted',
@@ -1168,8 +1168,8 @@ const I18N={
     fullscreen_title:'Fullscreen',
     theme_title:'Select theme (Auto switches Light/Dark by system time 06:00-18:00)',
     btn_theme_title:'Click to cycle theme (Shift+Click: toggle Light/Dark)',
-    theme_auto_time:'Auto (System Time)',
-    theme_auto_os:'Auto (OS Theme)',
+    theme_auto_time:'Auto (system time)',
+    theme_auto_os:'Auto (OS theme)',
     theme_onedark:'One Dark Pro',
     theme_onelight:'One Light',
     theme_vscode_dark:'VS Code Dark+',

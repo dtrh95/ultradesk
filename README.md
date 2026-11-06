@@ -1,17 +1,16 @@
 # ultradesk-rust
 
-`ultradesk-rust` is a Linux-native remote desktop client and host written in Rust. It provides a dual-pane Spotlight UI (`viewer.html`) inside a native Tauri (tao + wry + muda) desktop window with automatic browser fallback, multi-monitor capture and selection on both Wayland and X11, kernel `uinput` and X11 `XTEST` input injection, ITU-T G.722 64 kbps audio streaming, bidirectional chat and clipboard synchronization, and chunked file transfer.
+`ultradesk-rust` is a Linux-native remote desktop client and host written in Rust. You can connect to a remote computer or share your local desktop from a single window. The application renders its dual-pane UI (`viewer.html`) inside a native Tauri desktop window powered by tao, wry, and muda, falling back to an external browser if webview initialization fails. Under the hood, it captures screens on Wayland and X11, injects kernel uinput and X11 XTEST events, streams 64 kbps ITU-T G.722 audio, synchronizes clipboards, and transfers files in chunks.
 
 ## Features
 
-- **Dual-role client and host in one binary.** Connect to a remote partner or share your Linux desktop from the same window.
-- **Wayland and X11 display backends.** Captures screens on Wayland compositors (`niri`, `sway`, `Hyprland`, and `wlroots`) through `grim` and `wlr-randr`, and on X11 through `MIT-SHM`, `XGetImage`, and `RandR`.
-- **Kernel and X11 input injection.** Injects relative and absolute pointer motion, mouse buttons, scroll wheels, and keyboard events through `/dev/uinput` on Wayland and `XTEST` on X11, plus `VK_PACKET` UTF-16LE keystrokes for full Vietnamese and international Unicode input.
-- **Multi-monitor selection in both directions.** View or share all monitors at once, a single monitor, or any custom subset of monitors (`MonitorSelection::All`, `MonitorSelection::Index`, and `MonitorSelection::Subset`).
-- **Adaptive multi-theme Spotlight UI.** Includes `Auto (System Time)` (switches between `VS Code Light+` from `06:00` to `17:59` and `One Dark Pro` from `18:00` to `05:59`), `Auto (OS Theme)` (`prefers-color-scheme`), `One Dark Pro`, `One Light`, `VS Code Dark+`, `VS Code Light+`, `Gruvbox Dark`, and `Gruvbox Light`.
-- **Low-latency RGB555 and JPEG tile engine.** Pre-allocates the 65,536-entry RGB555 lookup table and reuses a prepared Zstandard dictionary (`ZstdDictionaryDecoder`) across 11-field screen updates, scroll-copy rectangles, and bottom-up JPEG atlases.
-- **Bidirectional session tools.** Supports real-time UTF-16LE chat (`PACKET_CHAT_MESSAGE`), system clipboard synchronization (`wl-copy`, `wl-paste`, `xclip`, `xsel`, and GTK3 clipboard fallback), G.722 64 kbps PC and microphone audio (`48 kHz` stereo WAV stream), and resumable chunked file transfers.
-- **Unattended access and brute-force protection.** Supports a persistent 9-digit Host ID, temporary session passwords, an optional persistent master password (`8` to `64` characters), and automatic 5-failure login lockout (`LoginThrottle`).
+A single binary handles both client and host sessions. You can connect to a remote partner using their 9-digit partner ID and password, or let a remote operator control your machine. Unattended access uses a persistent master password of 8 to 64 characters alongside a temporary session password. To prevent brute-force attacks, the host locks out incoming requests after 5 failed login attempts.
+
+Screen capture adapts to your display server. On Wayland compositors such as niri, sway, Hyprland, and generic wlroots environments, the host captures frames through `grim` and queries monitor geometry with `wlr-randr`. On X11 sessions, it uses `MIT-SHM` shared memory with `XGetImage` fallback and `RandR` monitor enumeration. For input injection, the engine writes pointer movements, button clicks, wheel scrolls, and raw key events to `/dev/uinput` on Wayland or uses `XTEST` on X11. It also delivers international text and Vietnamese Telex sequences through `VK_PACKET` UTF-16LE keystrokes.
+
+The rendering pipeline decodes 11-field screen packets with a pre-allocated 65,536-entry RGB555 lookup table. A prepared Zstandard dictionary decodes legacy 16-bit tiles without re-parsing dictionary headers on every packet, while scroll-copy rects and bottom-up JPEG atlases reduce bandwidth on fast-moving content. Multi-monitor setups let you stream or view all displays together, focus on a single display, or select any subset of screens.
+
+Session tools run alongside the video stream. You can exchange real-time chat messages, transfer files in chunks, and stream 48 kHz stereo audio decoded through an ITU-T G.722 64 kbps ADPCM codec. Clipboard synchronization monitors both local and remote changes through `wl-clipboard`, `xclip`, `xsel`, or GTK, preventing echo loops through deduplication. The interface offers eight color palettes, switching automatically between light and dark modes based on system time or OS color scheme preferences.
 
 ## Install on Linux distributions
 
@@ -31,7 +30,7 @@ make build
 sudo make install PREFIX=/usr
 ```
 
-### Arch Linux and Manjaro (`AUR` and `makepkg`)
+### Arch Linux and Manjaro (AUR and makepkg)
 
 Install from the Arch User Repository with an AUR helper such as `yay` or `paru`:
 
@@ -52,7 +51,7 @@ cd packaging/arch
 makepkg -si
 ```
 
-### Debian (`bookworm`, `trixie`, `forky`, and `sid`)
+### Debian (bookworm, trixie, forky, and sid)
 
 Build a binary `.deb` package locally with `dpkg-buildpackage`:
 
@@ -62,11 +61,11 @@ dpkg-buildpackage -us -uc -b
 sudo apt install ../ultradesk-rust_0.2.0-1_amd64.deb
 ```
 
-### Ubuntu and Linux Mint (`jammy`, `noble`, `questing`, and `resolute`)
+### Ubuntu and Linux Mint (jammy, noble, questing, and resolute)
 
 Install from the signed APT repository or build the `.deb` package locally with the commands in the Debian section above. Runtime dependencies on Debian and Ubuntu include `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libsoup-3.0-0`, `xclip`, and `wl-clipboard`.
 
-### Fedora, RHEL, AlmaLinux, and Rocky Linux (`.rpm`)
+### Fedora, RHEL, AlmaLinux, and Rocky Linux (.rpm)
 
 Build and install the RPM package using `rpmbuild` and `packaging/rpm/fedora/ultradesk-rust.spec`:
 
@@ -75,7 +74,7 @@ rpmbuild -bb packaging/rpm/fedora/ultradesk-rust.spec
 sudo dnf install ~/rpmbuild/RPMS/x86_64/ultradesk-rust-0.2.0-1*.rpm
 ```
 
-### openSUSE Tumbleweed and Leap (`.rpm`)
+### openSUSE Tumbleweed and Leap (.rpm)
 
 Build and install the RPM package using `packaging/rpm/opensuse/ultradesk-rust.spec`:
 
@@ -108,13 +107,11 @@ To enable `ultradesk-rust` in a NixOS system configuration, import `nixosModules
 
 ## Configure display and input backends
 
-`ultradesk-rust` selects the best host capture and input backend automatically at startup (`select_desktop_backend` in `src/host.rs`):
+When the host worker starts, `select_desktop_backend` in `src/host.rs` probes your session to pick a capture and input engine. On Wayland desktops, `WaylandGrimUinputBackend` captures display buffers using `grim -t ppm -s 1 -` and enumerates connected outputs through `niri msg -j outputs`, `wlr-randr`, or `xrandr`. It injects mouse movements and keyboard events directly into the kernel via `/dev/uinput`.
 
-1. **`WaylandGrimUinputBackend` (Wayland sessions).** Uses `grim -t ppm -s 1 -` for screen capture and `/dev/uinput` for kernel-level mouse and keyboard injection. It enumerates monitors through `niri msg -j outputs`, `wlr-randr`, or `xrandr`.
-2. **`X11ShmXtestBackend` (X11 and Xwayland sessions).** Uses `XShmGetImage` with `XGetImage` fallback for screen capture, `XRRGetMonitors` (`RandR` 1.5) for monitor enumeration, and `XTestFakeMotionEvent`, `XTestFakeButtonEvent`, and `XTestFakeKeyEvent` for input injection.
-3. **`HeadlessBackend` (headless servers and CI).** Generates synthetic frames and accepts input no-ops when neither Wayland nor X11 is available.
+On X11 and Xwayland sessions, `X11ShmXtestBackend` captures frames through `XShmGetImage` with an `XGetImage` fallback, queries monitor layouts via `XRRGetMonitors` (RandR 1.5), and injects input through `XTestFakeMotionEvent`, `XTestFakeButtonEvent`, and `XTestFakeKeyEvent`. If neither display server is reachable, such as in automated CI environments or headless servers, `HeadlessBackend` generates test patterns and accepts input as no-ops.
 
-To allow non-root input injection on Wayland through `/dev/uinput`, ensure the `uinput` kernel module is loaded and your user has write access to `/dev/uinput`:
+Injecting input through `/dev/uinput` requires write permissions for your user account. Load the kernel module and grant your user access with access control lists:
 
 ```bash
 sudo modprobe uinput
@@ -173,7 +170,7 @@ ultradesk-rust --no-gui --host 127.0.0.1 --port 33411
 | `--partner-id <ID>` | Partner ID to connect to on startup. |
 | `--password <PW>` | Partner password for startup connection. |
 | `--auto-approve` | Automatically approve incoming host connections. |
-| `--no-gui` | Run the HTTP portal daemon without launching WebKit2 or a browser. |
+| `--no-gui` | Run the HTTP portal daemon without launching a desktop window or browser. |
 | `--open-browser` | Open the portal URL in the default system web browser on startup. |
 | `--registration <PATH>` | Override path to `linux-controller-private.json`. |
 | `--partner <PATH>` | Override path to `default-partner.json`. |
@@ -181,13 +178,9 @@ ultradesk-rust --no-gui --host 127.0.0.1 --port 33411
 
 ## Select monitors in multi-display sessions
 
-Both the remote viewer and the local host support three display selection modes:
+You can stream or view multiple monitors in three arrangements. Choosing all monitors (`ALL`) spans the entire virtual desktop across every connected display. Switching to a single monitor (`M1`, `M2`) crops the video stream to that screen and translates cursor coordinates relative to the monitor's origin at `virtual_left` and `virtual_top`.
 
-- **All monitors (`ALL`).** Streams or displays the combined virtual desktop across every connected display.
-- **Single monitor (`M1`, `M2`, ...).** Crops the view or host stream to one monitor and translates mouse coordinates to that monitor's origin (`virtual_left` and `virtual_top`).
-- **Monitor subset (shift-click or Ctrl-click on `M1`, `M2`, ...).** Combines a custom subset of monitors into a bounding virtual desktop.
-
-In the Spotlight UI (`viewer.html`), click `ALL` to view or share all displays, click `M1` or `M2` to switch to a single display, or hold `Shift` or `Ctrl` while clicking monitor buttons to toggle a multi-monitor subset.
+You can also combine arbitrary outputs into a monitor subset. In `viewer.html`, click `ALL` to select the entire desktop or click an individual monitor label to focus on that display. Holding `Shift` or `Ctrl` while clicking monitor buttons toggles screens into a bounding virtual rectangle, so you only stream or view the displays relevant to your session.
 
 ## HTTP portal API reference
 
@@ -227,21 +220,21 @@ In the Spotlight UI (`viewer.html`), click `ALL` to view or share all displays, 
 ## Repository layout
 
 - `src/main.rs` parses CLI subcommands (`host`, `id`, `master-password`, and `help`), loads XDG profiles, starts `HostSession` and `PortalServer`, and launches the native Tauri desktop window or browser fallback.
-- `src/gui.rs` implements the native desktop window runtime with Tauri `tao` and `wry`, native menubar integration via `muda`, bidirectional clipboard synchronization, and browser fallback.
-- `src/lib.rs` exports all crate modules and houses the end-to-end integration test suite.
-- `src/protocol.rs` implements 3DES registration cryptography, P2P AES-256-CBC framing, target route parsing, and multipart byte-array field serialization.
-- `src/screen.rs` implements `RGB555Screen`, `DisplayLayout`, `MonitorSelection`, 11-field screen update decoding, scroll-copy, LRU tile caching, bottom-up JPEG atlases, and Zstandard RGB555 decompression.
-- `src/host.rs` implements `HostCore`, `HostSession`, `WaylandGrimCapturer`, `UinputInjector`, `X11Capturer`, `X11Injector`, multi-monitor layout cropping, input coordinate translation, and `LoginThrottle`.
+- `src/gui.rs` manages the native Tauri desktop window runtime using `tao` and `wry`, integrates native menubars via `muda`, drives clipboard synchronization, and coordinates browser fallback.
+- `src/lib.rs` re-exports library modules and runs the integration test suite.
+- `src/protocol.rs` executes 3DES registration cryptography, P2P AES-256-CBC framing, target route parsing, and multipart byte-array field serialization.
+- `src/screen.rs` houses `RGB555Screen`, `DisplayLayout`, `MonitorSelection`, 11-field screen update decoding, scroll-copy, LRU tile caching, bottom-up JPEG atlases, and Zstandard RGB555 decompression.
+- `src/host.rs` runs `HostCore` and `HostSession`, manages Wayland and X11 capturers and injectors, handles multi-monitor cropping and coordinate translation, and enforces `LoginThrottle`.
 - `src/session.rs` coordinates client registration, relay transport, keepalives, clipboard polling, and unified `SessionState` synchronization across client and host modes.
-- `src/server.rs` implements `PortalServer`, serves `viewer.html` and embedded assets, and handles all JSON and binary HTTP routes.
-- `src/input.rs` encodes mouse movement, mouse button, mouse wheel, keyboard (`WM_KEYDOWN` and `WM_KEYUP`), and `VK_PACKET` Unicode packets, and decodes incoming host input commands.
-- `src/cursor.rs` decodes remote cursor shape updates (`PACKET_CURSOR_CHANGE`, `PACKET_CURSOR_IMAGE`, and `PACKET_CURSOR_POS`), caches PNG cursors by hash, and requests missing shapes.
-- `src/audio.rs` implements the ITU-T G.722 64 kbps two-band QMF ADPCM codec for packet kinds `42`, `43`, `50`, and `51`, and builds 48 kHz stereo WAV buffers.
-- `src/clipboard.rs` encodes and decodes packet kinds `5` and `33` across 1-byte and 2-byte `Int16LE` tags, Zstandard-compressed UTF-16LE streams, and pipe-delimited strings, bridging to `wl-copy`, `wl-paste`, `xclip`, `xsel`, and GTK3.
-- `src/file_transfer.rs` manages chunked file transfers and bidirectional UTF-16LE chat across packet kinds `12`, `13`, `14`, `15`, `16`, and `21`.
-- `src/direct.rs` implements LAN direct TCP candidate exchange and probing (`DirectHandshakeMachine`).
-- `src/profile.rs` manages XDG configuration files under `~/.config/ultradesk-rust` (`host-profile.json`, `client-profile.json`, and `saved_credentials.json`).
-- `viewer.html` provides the bilingual (Vietnamese and English) Spotlight UI with a docked top menu toolbar, multi-theme switching, and session tools.
+- `src/server.rs` runs `PortalServer`, serving `viewer.html`, embedded assets, and JSON or binary HTTP endpoints.
+- `src/input.rs` encodes mouse movement, buttons, wheel scrolling, key events (`WM_KEYDOWN` and `WM_KEYUP`), and `VK_PACKET` Unicode packets, while decoding incoming host input commands.
+- `src/cursor.rs` tracks remote cursor shape updates (`PACKET_CURSOR_CHANGE`, `PACKET_CURSOR_IMAGE`, and `PACKET_CURSOR_POS`), caches PNG cursor bitmaps by hash, and requests missing shapes.
+- `src/audio.rs` decodes and encodes ITU-T G.722 64 kbps two-band QMF ADPCM packets (`42`, `43`, `50`, and `51`), producing 48 kHz stereo WAV buffers.
+- `src/clipboard.rs` translates clipboard packets (`5` and `33`) across 1-byte and 2-byte `Int16LE` tags, Zstandard UTF-16LE streams, and pipe-delimited strings, bridging to `wl-copy`, `wl-paste`, `xclip`, `xsel`, and GTK.
+- `src/file_transfer.rs` handles chunked file transfers and bidirectional UTF-16LE chat across packet kinds `12`, `13`, `14`, `15`, `16`, and `21`.
+- `src/direct.rs` exchanges LAN direct TCP candidates and probes peer connectivity (`DirectHandshakeMachine`).
+- `src/profile.rs` persists XDG configuration files under `~/.config/ultradesk-rust` (`host-profile.json`, `client-profile.json`, and `saved_credentials.json`).
+- `viewer.html` delivers the bilingual (Vietnamese and English) single-page application with a docked menu toolbar, theme switching, and session tools.
 
 ## Run tests and benchmarks
 
@@ -252,18 +245,13 @@ cargo test --release
 bash scripts/verify_upgrade.sh
 ```
 
-The test suite verifies 3DES and AES-256-CBC cryptography, 11-field screen decoding, multi-monitor subset cropping, Wayland `grim` PPM parsing, X11 `ZPixmap` conversion, G.722 audio encoding and decoding, bidirectional `Int16LE` chat and clipboard synchronization, chunked file transfer, and live loopback Host-to-Viewer relay handshakes.
+The test suite exercises 3DES and AES-256-CBC cryptography, 11-field screen decoding, multi-monitor subset cropping, Wayland `grim` PPM parsing, X11 `ZPixmap` conversion, G.722 audio encoding and decoding, bidirectional `Int16LE` chat and clipboard synchronization, chunked file transfer, and live loopback host-to-viewer relay handshakes.
 
 ## Automated release pipelines
 
-GitHub Actions workflows under `.github/workflows/` automate building, testing, and publishing across distributions:
+GitHub Actions workflows in `.github/workflows/` handle continuous integration and package distribution. On every push and pull request, `build.yml` and `nix.yml` run the release test suite and evaluate Nix flake checks. When tagging a release, `build-and-release.yml` produces binary packages for Debian, Fedora, openSUSE, Arch Linux, and NixOS, publishing signed repositories for APT, DNF, and Zypper on GitHub Pages alongside release assets.
 
-- **`.github/workflows/build.yml` and `.github/workflows/nix.yml`** run `cargo test --release` and `nix flake check` on every push and pull request.
-- **`.github/workflows/build-and-release.yml`** builds release packages for Debian, Fedora, openSUSE, Arch Linux, and NixOS, publishes the signed GitHub Pages APT, DNF, and Zypper repositories, and attaches artifacts to GitHub Releases.
-- **`.github/workflows/publish-debian.yml`** builds `.deb` packages and signed APT repositories for Debian `bookworm`, `trixie`, `forky`, and `sid`.
-- **`.github/workflows/publish-ubuntu.yml`** builds `.deb` packages and signed APT repositories for Ubuntu `jammy` (`22.04`), `noble` (`24.04`), `questing` (`25.10`), and `resolute` (`26.04`), and uploads signed source packages to Ubuntu Launchpad PPA.
-- **`.github/workflows/publish-aur.yml`** updates both `ultradesk-rust` (source) and `ultradesk-rust-bin` (prebuilt binary) on the Arch User Repository (`aur.archlinux.org`).
-- **`.github/workflows/publish-nixos.yml` and `.github/workflows/update-nix-hash.yaml`** build the Nix flake closure, push binary substitutes to Cachix, export portable `.nar.xz` bundles, and open a pull request updating `nix/packages/ultradesk-rust/default.nix`.
+Dedicated publishing workflows target individual distribution ecosystems. For Debian, `publish-debian.yml` targets bookworm, trixie, forky, and sid. For Ubuntu, `publish-ubuntu.yml` packages for jammy, noble, questing, and resolute, uploading signed source packages to Launchpad PPA. For Arch Linux, `publish-aur.yml` updates the `ultradesk-rust` and `ultradesk-rust-bin` packages on the AUR. For NixOS, `publish-nixos.yml` and `update-nix-hash.yaml` build the flake closure, push binary substitutes to Cachix, export portable `.nar.xz` archives, and submit a pull request updating the package hash in `nix/packages/ultradesk-rust/default.nix`.
 
 ## License and trademark notice
 
