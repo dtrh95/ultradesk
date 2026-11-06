@@ -55,7 +55,7 @@ mod tests {
         decode_base64, encode_base64, materialize_embedded_gui_assets, GuiLaunchOutcome,
         PortalServer,
     };
-    use crate::session::{looks_like_tls_record, ControlSession};
+    use crate::session::{load_saved_credentials, looks_like_tls_record, ControlSession};
     use image::codecs::jpeg::JpegEncoder;
     use image::{ExtendedColorType, ImageEncoder, ImageFormat};
     use std::io::{Read, Write};
@@ -777,7 +777,16 @@ mod tests {
         let b64 = encode_base64(b"hello-rust-uv");
         assert_eq!(decode_base64(&b64).unwrap(), b"hello-rust-uv");
 
+        let test_creds_dir = std::env::temp_dir().join(format!("uv_creds_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_creds_dir);
+        let _ = std::fs::create_dir_all(&test_creds_dir);
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &test_creds_dir);
+
         let session = ControlSession::new();
+        let snap_init = session.snapshot();
+        assert_eq!(snap_init.saved_language, "en");
+        assert_eq!(snap_init.saved_theme, "auto-time");
         let login_pkt = encode_byte_array_fields(&[
             b"\x00\x00",
             &1920i32.to_le_bytes(),
@@ -837,7 +846,25 @@ mod tests {
         let snap_after_move = session.snapshot();
         assert_eq!((snap_after_move.cursor_x, snap_after_move.cursor_y), (150, 250));
 
+        let resp_pref = http_post(
+            &addr,
+            "/preferences",
+            "{\"theme\":\"gruvbox-light\",\"language\":\"vi\",\"toolbar_collapsed\":true}",
+        );
+        assert!(resp_pref.contains("\"ok\":true"));
+        let snap_pref = session.snapshot();
+        assert_eq!(snap_pref.saved_theme, "gruvbox-light");
+        assert_eq!(snap_pref.saved_language, "vi");
+        assert_eq!(snap_pref.saved_toolbar_collapsed, true);
+
+        let creds_from_disk = load_saved_credentials();
+        assert_eq!(creds_from_disk.theme, "gruvbox-light");
+        assert_eq!(creds_from_disk.language, "vi");
+        assert_eq!(creds_from_disk.toolbar_collapsed, true);
+
         let resp_html = http_get(&addr, "/");
+        assert!(resp_html.contains("<html lang=\"en\">"));
+        assert!(resp_html.contains("lang: 'en'"));
         assert!(resp_html.contains("UltraDesk (Rust)"));
         assert!(resp_html.contains("ControlLeft:17"));
         assert!(resp_html.contains("id=\"btnCycleTheme\""));
@@ -880,6 +907,11 @@ mod tests {
 
         shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = handle.join();
+        match prev_xdg {
+            Some(val) => std::env::set_var("XDG_CONFIG_HOME", val),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&test_creds_dir);
     }
 
     #[test]

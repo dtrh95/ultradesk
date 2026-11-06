@@ -28,6 +28,7 @@ done
 
 echo "=== [3/3] Verifying live HTTP Portal & Host/Client endpoints ==="
 VIEWER_HTML="$(curl -fsS "http://127.0.0.1:${PORT}/")"
+rg -q '<html lang="en">' <<< "$VIEWER_HTML"
 rg -q 'id="connectModal"' <<< "$VIEWER_HTML"
 rg -q 'id="toolsPopover"' <<< "$VIEWER_HTML"
 rg -q 'id="btnLangVi"' <<< "$VIEWER_HTML"
@@ -63,6 +64,18 @@ MON_RESP="$(curl -fsS -X POST "http://127.0.0.1:${PORT}/monitor" \
   -H "Content-Type: application/json" \
   -d '{"monitor":0}')"
 rg -q '"ok":true' <<< "$MON_RESP"
+
+PREF_RESP="$(curl -fsS -X POST "http://127.0.0.1:${PORT}/preferences" \
+  -H "Content-Type: application/json" \
+  -d '{"theme":"onedark","language":"en"}')"
+rg -q '"ok":true' <<< "$PREF_RESP"
+
+STATUS_AFTER_PREF="$(curl -fsS "http://127.0.0.1:${PORT}/status")"
+rg -q '"saved_theme":"onedark"' <<< "$STATUS_AFTER_PREF"
+rg -q '"saved_language":"en"' <<< "$STATUS_AFTER_PREF"
+
+test -f "$TMP_HOME/ultradesk-rust/credentials.json"
+rg -q '"theme": "onedark"' "$TMP_HOME/ultradesk-rust/credentials.json"
 
 HTTP_CODE_JPG="$(curl -s -o /tmp/uv_frame.jpg -w "%{http_code}" "http://127.0.0.1:${PORT}/frame.jpg?q=80")"
 test "$HTTP_CODE_JPG" = "200"
