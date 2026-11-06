@@ -850,6 +850,10 @@ mod tests {
         assert!(resp_html.contains("canvasContentRect"));
         assert!(resp_html.contains("scheduleMove"));
         assert!(!resp_html.contains("drawImage(cursorImg"));
+        assert!(resp_html.contains("--text-sm: 12px;"));
+        assert!(resp_html.contains("'Noto Sans'"));
+        assert!(!resp_html.contains("--pill-bg"));
+        assert!(!resp_html.contains("(|||31|||)"));
 
         let resp_icon = http_get(&addr, "/ultradesk-rust.png");
         assert!(resp_icon.contains("Content-Type: image/png"));

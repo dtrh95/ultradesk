@@ -316,6 +316,19 @@ fn run_native_gui_inner(
         return GuiLaunchOutcome::FallbackToBrowser(format!("failed to initialize GTK: {}", e));
     }
 
+    use gtk::prelude::CssProviderExt;
+    let css_provider = gtk::CssProvider::new();
+    let _ = css_provider.load_from_data(
+        b"menubar, menubar menuitem, menu, menuitem { font-family: 'Inter', 'Noto Sans', 'Cantarell', sans-serif; font-size: 12px; font-weight: 500; }",
+    );
+    if let Some(screen) = gtk::gdk::Screen::default() {
+        gtk::StyleContext::add_provider_for_screen(
+            &screen,
+            &css_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     let icon = config.icon_bytes.and_then(|bytes| {
