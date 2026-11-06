@@ -2528,6 +2528,7 @@ dependencies = [
  "native-tls",
  "serde",
  "serde_json",
+ "sha2",
  "tao",
  "wry",
  "x11rb",

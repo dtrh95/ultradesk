@@ -2,6 +2,7 @@ pub mod audio;
 pub mod clipboard;
 pub mod cursor;
 pub mod direct;
+pub mod e2e;
 pub mod file_transfer;
 pub mod gui;
 pub mod host;
