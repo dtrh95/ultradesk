@@ -187,7 +187,7 @@ Both the remote viewer and the local host support three display selection modes:
 - **Single monitor (`M1`, `M2`, ...).** Crops the view or host stream to one monitor and translates mouse coordinates to that monitor's origin (`virtual_left` and `virtual_top`).
 - **Monitor subset (shift-click or Ctrl-click on `M1`, `M2`, ...).** Combines a custom subset of monitors into a bounding virtual desktop.
 
-In the Spotlight UI (`viewer.html`), click `ALL` to view or share all displays, click `M1` or `M2` to switch to a single display, or hold `Shift` or `Ctrl` while clicking monitor pills to toggle a multi-monitor subset.
+In the Spotlight UI (`viewer.html`), click `ALL` to view or share all displays, click `M1` or `M2` to switch to a single display, or hold `Shift` or `Ctrl` while clicking monitor buttons to toggle a multi-monitor subset.
 
 ## HTTP portal API reference
 
