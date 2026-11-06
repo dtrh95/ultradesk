@@ -1174,4 +1174,80 @@ mod tests {
         let json = serde_json::to_string(&ToolbarAction::SendSpecialKey(SpecialKey::Super)).unwrap();
         assert_eq!(json, r#"{"action":"SendSpecialKey","payload":"super"}"#);
     }
+
+    #[test]
+    fn test_lan_direct_and_master_password_status_99_reproduction() {
+        let route = decode_target_route(
+            b"8:1:0:118.69.226.188:118.69.226.188:0:0:54662:VWx0cmFWaWV3ZXI=:57808:103.56.158.44:103.56.158.44:1:-2::-1062728963:0::0:False:0:|0:0",
+        )
+        .unwrap();
+        assert_eq!(route.matched_custom_password, 1);
+        assert_eq!(route.target_session_id, -2);
+        assert_eq!(route.tcp_server_hostname, "functions3.ultraviewer.net");
+        assert_eq!(route.partner_secret_token.as_deref(), Some("-1062728963"));
+
+        let tmp = std::env::temp_dir().join(format!("uv_lan_repro_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mgr = crate::profile::ProfileManager::from_custom_dir(tmp.clone());
+        assert!(mgr.set_master_password(Some("12345678")).is_err());
+        assert!(mgr.set_master_password(Some("UltraDesk95!")).is_ok());
+
+        let layout = crate::screen::DisplayLayout {
+            width: 64,
+            height: 64,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![crate::screen::MonitorRect {
+                left: 0,
+                top: 0,
+                right: 64,
+                bottom: 64,
+            }],
+        };
+        let host = crate::host::HostSession::with_id(
+            "136659993",
+            "001122334455",
+            "87654321",
+            Some(crate::host::compute_master_password_proof("UltraDesk95!")),
+            layout,
+            crate::host::DesktopBackend::headless(64, 64),
+        );
+        host.set_auto_approve(true);
+        let status = host.start_with_endpoint("127.0.0.1", 1, false);
+        let status_json = serde_json::to_value(&status).unwrap();
+        let lan_port = status_json
+            .get("lan_port")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u16;
+        assert!(lan_port > 0);
+
+        let viewer = ControlSession::new();
+        viewer
+            .start_connect_with_remember(&format!("127.0.0.1:{}", lan_port), "UltraDesk95!", false)
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let snap = viewer.snapshot();
+            if snap.state == "connected" && snap.route_mode == "lan" && snap.frames >= 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let snap = viewer.snapshot();
+        assert_eq!(snap.state, "connected");
+        assert_eq!(snap.route_mode, "lan");
+        assert!(snap.frames >= 1);
+
+        viewer.handle_session_payload(&crate::host::encode_host_auth_failed());
+        let rejected = viewer.snapshot();
+        assert_eq!(rejected.state, "disconnected");
+        assert_eq!(
+            rejected.error.as_deref(),
+            Some("Sai mật khẩu (Wrong Password)")
+        );
+
+        viewer.disconnect();
+        let _ = host.stop();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
