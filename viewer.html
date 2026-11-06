@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="vi">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -815,8 +815,8 @@ a.dl-link:hover {
         <option value="gruvbox-light" data-i18n="theme_gruvbox_light">Gruvbox Light</option>
       </select>
       <div class="lang-switch">
-        <button id="btnLangVi" class="lang-btn active" type="button">VI</button>
-        <button id="btnLangEn" class="lang-btn" type="button">EN</button>
+        <button id="btnLangVi" class="lang-btn" type="button">VI</button>
+        <button id="btnLangEn" class="lang-btn active" type="button">EN</button>
       </div>
       <button id="btnFullscreen" class="pill-btn" type="button" data-i18n-title="fullscreen_title" title="Toàn màn hình">
         <svg class="svg-icon" viewBox="0 0 24 24"><path d="M4 8v-4h4"/><path d="M16 4h4v4"/><path d="M4 16v4h4"/><path d="M16 20h4v-4"/></svg>
@@ -1192,7 +1192,7 @@ const THEME_SHORT_LABELS = {
   'gruvbox-dark': 'Gruvbox',
   'gruvbox-light': 'GruvLight'
 };
-const uiState = { overlay: 'connect', toolTab: 'chat', lang: 'vi', themeMode: 'auto-time', activeTheme: 'onedark', pillCollapsed: false };
+const uiState = { overlay: 'connect', toolTab: 'chat', lang: 'en', themeMode: 'auto-time', activeTheme: 'onedark', pillCollapsed: false };
 
 function resolveActiveTheme(mode, hourOverride = null) {
   if (mode === 'auto-time') {
@@ -1212,8 +1212,8 @@ function cssVar(name, fallback) {
 }
 
 function t(key,vars={}){
-  const dict=I18N[uiState.lang]||I18N.vi;
-  let str=dict[key]!==undefined?dict[key]:(I18N.vi[key]||key);
+  const dict=I18N[uiState.lang]||I18N.en;
+  let str=dict[key]!==undefined?dict[key]:(I18N.en[key]||key);
   for(const k of Object.keys(vars)){
     str=str.replaceAll(`{${k}}`,String(vars[k]));
   }
@@ -1301,10 +1301,15 @@ function updateSavedRemotesDropdown(list,force=false){
 }
 
 let dispatchingFromHost=false;
+let prefsHydrated=false;
+let serverPrefsApplied=false;
 
-function setPillCollapsed(collapsed){
+function setPillCollapsed(collapsed,persist=false){
   uiState.pillCollapsed=!!collapsed;
   try{localStorage.setItem('uv_pill_collapsed',uiState.pillCollapsed?'1':'0');}catch(_){}
+  if(persist&&prefsHydrated){
+    post('/preferences',{toolbar_collapsed:uiState.pillCollapsed}).catch(()=>{});
+  }
   const topPill=document.querySelector('#topPill');
   if(topPill){
     topPill.classList.toggle('collapsed',uiState.pillCollapsed);
@@ -1360,7 +1365,7 @@ window.__ultradesk_dispatch_action=function(action,payload){
         cycleTheme();
         break;
       case 'SetLanguage':
-        if(typeof payload==='string')setLanguage(payload);
+        if(typeof payload==='string')setLanguage(payload,true);
         break;
       case 'SelectMonitor':{
         const mSel=document.querySelector('#monitorSelect');
@@ -1390,10 +1395,10 @@ window.__ultradesk_dispatch_action=function(action,payload){
         }
         break;
       case 'ToggleToolbarCollapse':
-        setPillCollapsed(!uiState.pillCollapsed);
+        setPillCollapsed(!uiState.pillCollapsed,true);
         break;
       case 'SetToolbarCollapsed':
-        setPillCollapsed(Boolean(payload));
+        setPillCollapsed(Boolean(payload),true);
         break;
       case 'ToggleFullscreen':
         if(!dispatchingFromHost && window.ipc && typeof window.ipc.postMessage==='function'){
@@ -1458,7 +1463,10 @@ function setTheme(mode,persist=true,hourOverride=null){
       icon.innerHTML='<path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/>';
     }
   }
-  if(persist){try{localStorage.setItem('uv_theme',cleanMode);}catch(_){}}
+  if(persist){
+    try{localStorage.setItem('uv_theme',cleanMode);}catch(_){}
+    if(prefsHydrated)post('/preferences',{theme:cleanMode}).catch(()=>{});
+  }
   if(!dispatchingFromHost && window.ipc && typeof window.ipc.postMessage==='function'){
     window.ipc.postMessage(JSON.stringify({
       action:'SetTheme',
@@ -1480,9 +1488,12 @@ function cycleTheme(shiftKey=false){
   setTheme(VALID_THEME_MODES[nextIdx],true);
 }
 
-function setLanguage(lang){
+function setLanguage(lang,persist=false){
   uiState.lang=lang==='en'?'en':'vi';
   try{localStorage.setItem('uv_lang',uiState.lang);}catch(_){}
+  if(persist&&prefsHydrated){
+    post('/preferences',{language:uiState.lang}).catch(()=>{});
+  }
   document.documentElement.lang=uiState.lang;
   document.querySelector('#btnLangVi').classList.toggle('active',uiState.lang==='vi');
   document.querySelector('#btnLangEn').classList.toggle('active',uiState.lang==='en');
@@ -1521,8 +1532,8 @@ document.querySelector('#connectModal').onclick=e=>{
 document.querySelectorAll('[data-tool-tab]').forEach(btn=>{
   btn.onclick=()=>setToolTab(btn.getAttribute('data-tool-tab'));
 });
-document.querySelector('#btnLangVi').onclick=()=>setLanguage('vi');
-document.querySelector('#btnLangEn').onclick=()=>setLanguage('en');
+document.querySelector('#btnLangVi').onclick=()=>setLanguage('vi',true);
+document.querySelector('#btnLangEn').onclick=()=>setLanguage('en',true);
 document.querySelector('#btnCycleTheme').onclick=e=>cycleTheme(!!(e&&e.shiftKey));
 document.querySelector('#themeSelect').onchange=e=>setTheme(e.target.value,true);
 if(window.matchMedia){
@@ -1538,7 +1549,7 @@ setInterval(()=>{
     if(nextActive!==uiState.activeTheme)setTheme('auto-time',false);
   }
 },30000);
-document.querySelector('#btnCollapsePill').onclick=()=>setPillCollapsed(true);
+document.querySelector('#btnCollapsePill').onclick=()=>setPillCollapsed(true,true);
 const btnFullscreen=document.querySelector('#btnFullscreen');
 if(btnFullscreen){
   btnFullscreen.onclick=()=>{
@@ -1553,14 +1564,14 @@ if(btnFullscreen){
     }
   };
 }
-document.querySelector('#btnRestorePill').onclick=()=>setPillCollapsed(false);
+document.querySelector('#btnRestorePill').onclick=()=>setPillCollapsed(false,true);
 
 const dragHandle=document.querySelector('#pillDragHandle');
 if(dragHandle){
   dragHandle.ondblclick=e=>{
     e.preventDefault();
     e.stopPropagation();
-    setPillCollapsed(!uiState.pillCollapsed);
+    setPillCollapsed(!uiState.pillCollapsed,true);
   };
 }
 window.addEventListener('resize',()=>{
@@ -1606,8 +1617,9 @@ try{
   }
 }catch(_){}
 
-setLanguage(uiState.lang);
-setPillCollapsed(uiState.pillCollapsed);
+setLanguage(uiState.lang, false);
+setPillCollapsed(uiState.pillCollapsed, false);
+prefsHydrated = true;
 
 document.querySelector('#savedRemotes').onchange=e=>{
   const pid=e.target.value;
@@ -2082,6 +2094,16 @@ async function refresh(){
   try{
     const s=await(await fetch('/status',{signal:AbortSignal.timeout(3000)})).json();
     lastState=s;
+    if(!serverPrefsApplied){
+      serverPrefsApplied=true;
+      const urlParams=new URLSearchParams(window.location.search);
+      if(!urlParams.get('theme')&&s.saved_theme&&VALID_THEME_MODES.includes(s.saved_theme)&&s.saved_theme!==uiState.themeMode){
+        setTheme(s.saved_theme,false);
+      }
+      if(!urlParams.get('lang')&&(s.saved_language==='en'||s.saved_language==='vi')&&s.saved_language!==uiState.lang){
+        setLanguage(s.saved_language,false);
+      }
+    }
     if(Array.isArray(s.saved_remotes))updateSavedRemotesDropdown(s.saved_remotes);
     if(!credsInitialized){
       credsInitialized=true;

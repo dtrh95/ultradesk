@@ -542,10 +542,24 @@ pub struct SavedCredentials {
     pub remember: bool,
     #[serde(default)]
     pub saved_remotes: Vec<SavedRemoteEntry>,
+    #[serde(default = "default_theme_mode")]
+    pub theme: String,
+    #[serde(default = "default_ui_language")]
+    pub language: String,
+    #[serde(default)]
+    pub toolbar_collapsed: bool,
 }
 
 fn default_remember_true() -> bool {
     true
+}
+
+fn default_theme_mode() -> String {
+    "auto-time".to_string()
+}
+
+fn default_ui_language() -> String {
+    "en".to_string()
 }
 
 impl Default for SavedCredentials {
@@ -555,31 +569,42 @@ impl Default for SavedCredentials {
             password: String::new(),
             remember: true,
             saved_remotes: Vec::new(),
+            theme: default_theme_mode(),
+            language: default_ui_language(),
+            toolbar_collapsed: false,
         }
     }
 }
 
 pub fn credentials_file_path() -> PathBuf {
-    std::env::var("HOME")
-        .map(|h| {
-            let base = PathBuf::from(h).join(".config");
-            let new_path = base.join("ultradesk-rust").join("credentials.json");
-            let legacy_path = base.join("ultraviewer-linux").join("credentials.json");
-            if !new_path.exists() && legacy_path.exists() {
-                if let Some(parent) = new_path.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = fs::copy(&legacy_path, &new_path);
-            }
-            new_path
-        })
-        .unwrap_or_else(|_| std::env::temp_dir().join("ultradesk-credentials.json"))
+    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Some(x) => PathBuf::from(x),
+        None => match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h).join(".config"),
+            None => return std::env::temp_dir().join("ultradesk-credentials.json"),
+        },
+    };
+    let new_path = base.join("ultradesk-rust").join("credentials.json");
+    let legacy_path = base.join("ultraviewer-linux").join("credentials.json");
+    if !new_path.exists() && legacy_path.exists() {
+        if let Some(parent) = new_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::copy(&legacy_path, &new_path);
+    }
+    new_path
 }
 
 pub fn load_saved_credentials() -> SavedCredentials {
     let path = credentials_file_path();
     if let Ok(bytes) = fs::read(&path) {
         if let Ok(mut creds) = serde_json::from_slice::<SavedCredentials>(&bytes) {
+            if creds.theme.trim().is_empty() {
+                creds.theme = default_theme_mode();
+            }
+            if creds.language.trim().is_empty() {
+                creds.language = default_ui_language();
+            }
             if !creds.partner_id.is_empty()
                 && !creds
                     .saved_remotes
@@ -647,6 +672,12 @@ pub struct SessionState {
     pub last_message: String,
     pub error: Option<String>,
     pub updated_at: f64,
+    #[serde(default = "default_theme_mode")]
+    pub saved_theme: String,
+    #[serde(default = "default_ui_language")]
+    pub saved_language: String,
+    #[serde(default)]
+    pub saved_toolbar_collapsed: bool,
     #[serde(default)]
     pub frame_version: u64,
     #[serde(default)]
@@ -713,6 +744,9 @@ impl Default for SessionState {
             last_message: "Ready to connect".to_string(),
             error: None,
             updated_at: now_epoch_secs(),
+            saved_theme: saved.theme,
+            saved_language: saved.language,
+            saved_toolbar_collapsed: saved.toolbar_collapsed,
             frame_version: 1,
             monitors: vec![(0, 0, 1024, 768)],
             selected_monitor: None,
@@ -1411,6 +1445,9 @@ impl ControlSession {
                 password: cleaned_pass.clone(),
                 remember: true,
                 saved_remotes: existing.saved_remotes,
+                theme: existing.theme,
+                language: existing.language,
+                toolbar_collapsed: existing.toolbar_collapsed,
             }
         } else {
             SavedCredentials {
@@ -1418,6 +1455,9 @@ impl ControlSession {
                 password: String::new(),
                 remember: false,
                 saved_remotes: existing.saved_remotes,
+                theme: existing.theme,
+                language: existing.language,
+                toolbar_collapsed: existing.toolbar_collapsed,
             }
         };
         let _ = save_credentials(&creds);
@@ -1427,6 +1467,54 @@ impl ControlSession {
         guard.state.remember_credentials = creds.remember;
         guard.state.saved_remotes = creds.saved_remotes;
         Self::sync_state_fields(&mut guard);
+        Ok(())
+    }
+
+    pub fn update_ui_preferences(
+        &self,
+        theme: Option<&str>,
+        language: Option<&str>,
+        toolbar_collapsed: Option<bool>,
+    ) -> Result<(), String> {
+        const VALID_THEMES: &[&str] = &[
+            "auto-time",
+            "auto-os",
+            "onedark",
+            "onelight",
+            "vscode-dark",
+            "vscode-light",
+            "gruvbox-dark",
+            "gruvbox-light",
+        ];
+        const VALID_LANGUAGES: &[&str] = &["en", "vi"];
+
+        if let Some(t) = theme {
+            if !VALID_THEMES.contains(&t) {
+                return Err(format!("Invalid theme mode: {}", t));
+            }
+        }
+        if let Some(l) = language {
+            if !VALID_LANGUAGES.contains(&l) {
+                return Err(format!("Invalid language: {}", l));
+            }
+        }
+
+        let mut creds = load_saved_credentials();
+        if let Some(t) = theme {
+            creds.theme = t.to_string();
+        }
+        if let Some(l) = language {
+            creds.language = l.to_string();
+        }
+        if let Some(c) = toolbar_collapsed {
+            creds.toolbar_collapsed = c;
+        }
+        save_credentials(&creds)?;
+
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.state.saved_theme = creds.theme;
+        guard.state.saved_language = creds.language;
+        guard.state.saved_toolbar_collapsed = creds.toolbar_collapsed;
         Ok(())
     }
 
