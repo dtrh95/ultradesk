@@ -96,6 +96,29 @@ pub fn detect_local_ip() -> String {
     "127.0.0.1".to_string()
 }
 
+pub fn effective_registration_terms(
+    reg_profile: &RegistrationProfile,
+    _detected_ip: &str,
+) -> Vec<String> {
+    reg_profile.terms.clone()
+}
+
+pub fn effective_lookup_terms(
+    partner: &PartnerProfile,
+    client_id: i32,
+    reg_temp_password: &str,
+) -> Result<Vec<String>, String> {
+    let mut terms = partner.request_terms.clone();
+    if terms.len() != 17 {
+        return Err("partner request needs seventeen terms".to_string());
+    }
+    terms[2] = connection_request_password_value(&partner.password, partner.password_type);
+    terms[6] = client_id.to_string();
+    let hash_input = format!("{}{}", terms[6], reg_temp_password);
+    terms[7] = md5_hex_lower(hash_input.as_bytes());
+    Ok(terms)
+}
+
 pub fn parse_direct_lan_target(partner_id: &str) -> Option<(String, u16)> {
     let mut trimmed = partner_id.trim();
     if let Some(rest) = trimmed.strip_prefix("lan://") {
