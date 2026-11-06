@@ -55,7 +55,10 @@ mod tests {
         decode_base64, encode_base64, materialize_embedded_gui_assets, GuiLaunchOutcome,
         PortalServer,
     };
-    use crate::session::{load_saved_credentials, looks_like_tls_record, ControlSession};
+    use crate::session::{
+        effective_lookup_terms, effective_registration_terms, load_saved_credentials,
+        looks_like_tls_record, ControlSession, PartnerProfile, RegistrationProfile,
+    };
     use image::codecs::jpeg::JpegEncoder;
     use image::{ExtendedColorType, ImageEncoder, ImageFormat};
     use std::io::{Read, Write};
@@ -1275,5 +1278,51 @@ mod tests {
         viewer.disconnect();
         let _ = host.stop();
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_establish_relay_session_populates_local_ip_and_command8_fields() {
+        let reg_profile = RegistrationProfile::default();
+        assert_eq!(reg_profile.terms[4], "127.0.0.1");
+
+        let reg_terms = effective_registration_terms(&reg_profile, "192.168.11.51");
+        assert_eq!(reg_terms[4], "192.168.11.51");
+
+        let mut zero_ip_profile = reg_profile.clone();
+        zero_ip_profile.terms[4] = "0.0.0.0".to_string();
+        assert_eq!(
+            effective_registration_terms(&zero_ip_profile, "192.168.11.51")[4],
+            "192.168.11.51"
+        );
+
+        let mut custom_ip_profile = reg_profile.clone();
+        custom_ip_profile.terms[4] = "10.0.0.42".to_string();
+        assert_eq!(
+            effective_registration_terms(&custom_ip_profile, "192.168.11.51")[4],
+            "10.0.0.42"
+        );
+
+        let mut partner = PartnerProfile::default();
+        partner.request_terms[1] = "90135737".to_string();
+        partner.password = "12345678".to_string();
+        partner.password_type = 0;
+
+        let lookup_terms = effective_lookup_terms(
+            &partner,
+            134462379,
+            reg_profile.terms.get(2).map(String::as_str).unwrap_or_default(),
+        )
+        .unwrap();
+        assert_eq!(
+            lookup_terms[2],
+            connection_request_password_value("12345678", 0)
+        );
+        assert_eq!(lookup_terms[6], "134462379");
+        assert_eq!(
+            lookup_terms[7],
+            crate::protocol::md5_hex_lower(b"13446237924055254")
+        );
+        assert_eq!(lookup_terms[12], "0");
+        assert_eq!(lookup_terms[14], "1");
     }
 }
