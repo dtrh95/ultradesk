@@ -4,11 +4,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use ultradesk_rust::gui::{launch_native_gui, GuiConfig, GuiLaunchOutcome};
 use ultradesk_rust::profile::ProfileManager;
-use ultradesk_rust::server::{
-    materialize_embedded_gui_assets, GuiLaunchOutcome, PortalServer,
-};
+use ultradesk_rust::server::{PortalServer, DEFAULT_APP_ICON_PNG};
 use ultradesk_rust::session::{
     ControlSession, PartnerProfile, RegistrationProfile, DEFAULT_ZSTD_DICT,
 };
@@ -153,17 +152,6 @@ fn find_asset_file(file_name: &str) -> Option<PathBuf> {
     candidates
         .into_iter()
         .find(|p| !p.as_os_str().is_empty() && p.exists())
-}
-
-fn resolve_gui_script() -> Option<PathBuf> {
-    if let Some(path) = find_asset_file("app_window.py") {
-        return Some(path);
-    }
-    let runtime_base = env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| env::temp_dir());
-    let target_dir = runtime_base.join("ultradesk-rust");
-    materialize_embedded_gui_assets(&target_dir).ok()
 }
 
 fn open_url_in_browser(url: &str) -> bool {
@@ -312,42 +300,31 @@ fn main() {
     let has_display = env::var("DISPLAY").is_ok() || env::var("WAYLAND_DISPLAY").is_ok();
     let mut browser_fallback_needed = args.open_browser;
     if !args.no_gui && has_display {
-        match resolve_gui_script() {
-            Some(window_script) => {
-                let started = Instant::now();
-                match Command::new("python3")
-                    .arg(&window_script)
-                    .arg(bound_port.to_string())
-                    .spawn()
-                {
-                    Ok(mut child) => {
-                        let code = child.wait().ok().and_then(|s| s.code());
-                        match GuiLaunchOutcome::from_exit(code, started.elapsed()) {
-                            GuiLaunchOutcome::ClosedCleanly => {
-                                shutdown.store(true, Ordering::SeqCst);
-                                session.disconnect();
-                                let _ = server_handle.join();
-                                return;
-                            }
-                            GuiLaunchOutcome::FallbackToBrowser(reason) => {
-                                eprintln!(
-                                    "Native WebKit2 GUI unavailable ({}), falling back to default browser at {}",
-                                    reason, url
-                                );
-                                browser_fallback_needed = true;
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!(
-                            "Failed to launch python3 for native GUI ({}), falling back to default browser at {}",
-                            err, url
-                        );
-                        browser_fallback_needed = true;
-                    }
-                }
+        let viewer_path = find_asset_file("viewer.html");
+        let gui_config = GuiConfig {
+            url: url.clone(),
+            title: "UltraDesk (Rust)".to_string(),
+            default_width: 1200.0,
+            default_height: 820.0,
+            icon_bytes: Some(DEFAULT_APP_ICON_PNG),
+            viewer_path,
+            disable_dmabuf: true,
+            disable_compositing: true,
+            enable_native_menubar: false,
+        };
+
+        match launch_native_gui(gui_config, session.clone(), shutdown.clone()) {
+            GuiLaunchOutcome::ClosedCleanly => {
+                shutdown.store(true, Ordering::SeqCst);
+                session.disconnect();
+                let _ = server_handle.join();
+                return;
             }
-            None => {
+            GuiLaunchOutcome::FallbackToBrowser(reason) => {
+                eprintln!(
+                    "Native GUI unavailable ({}), falling back to default browser at {}",
+                    reason, url
+                );
                 browser_fallback_needed = true;
             }
         }
