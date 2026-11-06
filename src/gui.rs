@@ -551,9 +551,9 @@ fn build_native_menubar() -> muda::Menu {
     let connect_item = muda::MenuItem::with_id("ToggleConnectModal", "Connect...", true, None);
     let disconnect_item = muda::MenuItem::with_id("DisconnectRemote", "Disconnect", true, None);
     let start_share_item =
-        muda::MenuItem::with_id("StartHostSharing", "Start Host Sharing", true, None);
+        muda::MenuItem::with_id("StartHostSharing", "Start host sharing", true, None);
     let stop_share_item =
-        muda::MenuItem::with_id("StopHostSharing", "Stop Host Sharing", true, None);
+        muda::MenuItem::with_id("StopHostSharing", "Stop host sharing", true, None);
     let quit_item = muda::MenuItem::with_id("QuitApplication", "Quit", true, None);
     let _ = file_menu.append_items(&[
         &connect_item,
@@ -567,19 +567,19 @@ fn build_native_menubar() -> muda::Menu {
 
     let view_menu = muda::Submenu::new("View", true);
     let fullscreen_item =
-        muda::MenuItem::with_id("ToggleFullscreen", "Toggle Fullscreen", true, None);
+        muda::MenuItem::with_id("ToggleFullscreen", "Toggle fullscreen", true, None);
     let collapse_item =
-        muda::MenuItem::with_id("ToggleToolbarCollapse", "Toggle Toolbar", true, None);
+        muda::MenuItem::with_id("ToggleToolbarCollapse", "Toggle toolbar", true, None);
     let _ = view_menu.append_items(&[&fullscreen_item, &collapse_item]);
 
     let remote_menu = muda::Submenu::new("Remote", true);
     let super_key_item =
-        muda::MenuItem::with_id("SendSpecialKey:super", "Send Super Key", true, None);
+        muda::MenuItem::with_id("SendSpecialKey:super", "Send Super key", true, None);
     let cad_key_item =
         muda::MenuItem::with_id("SendSpecialKey:ctrl_alt_del", "Send Ctrl+Alt+Del", true, None);
     let f9_key_item = muda::MenuItem::with_id(
         "SendSpecialKey:f9_next_monitor",
-        "Next Monitor (F9)",
+        "Next monitor (F9)",
         true,
         None,
     );
@@ -587,7 +587,7 @@ fn build_native_menubar() -> muda::Menu {
 
     let tools_menu = muda::Submenu::new("Tools", true);
     let toggle_tools_item =
-        muda::MenuItem::with_id("ToggleToolsPopover", "Tools Popover", true, None);
+        muda::MenuItem::with_id("ToggleToolsPopover", "Session tools", true, None);
     let chat_tab_item = muda::MenuItem::with_id("SelectToolTab:chat", "Chat", true, None);
     let files_tab_item = muda::MenuItem::with_id("SelectToolTab:files", "Files", true, None);
     let clip_tab_item =
@@ -603,10 +603,10 @@ fn build_native_menubar() -> muda::Menu {
     ]);
 
     let theme_menu = muda::Submenu::new("Theme", true);
-    let cycle_theme_item = muda::MenuItem::with_id("CycleTheme", "Cycle Theme", true, None);
+    let cycle_theme_item = muda::MenuItem::with_id("CycleTheme", "Cycle theme", true, None);
     let theme_auto_time =
-        muda::MenuItem::with_id("SetTheme:auto-time", "Auto (Time)", true, None);
-    let theme_auto_os = muda::MenuItem::with_id("SetTheme:auto-os", "Auto (OS)", true, None);
+        muda::MenuItem::with_id("SetTheme:auto-time", "Auto (system time)", true, None);
+    let theme_auto_os = muda::MenuItem::with_id("SetTheme:auto-os", "Auto (OS theme)", true, None);
     let theme_onedark = muda::MenuItem::with_id("SetTheme:onedark", "One Dark Pro", true, None);
     let theme_onelight = muda::MenuItem::with_id("SetTheme:onelight", "One Light", true, None);
     let theme_vsc_dark =

@@ -10,17 +10,10 @@ The Zstandard preset dictionary file (`8bit.dat`) is an external interoperabilit
 
 ## Rust crate dependencies
 
-All direct Rust dependencies used by `ultradesk-rust` are distributed under permissive open-source licenses:
+All direct crate dependencies are available under permissive open-source licenses.
 
-- `aes` (`0.8`), licensed under MIT or Apache-2.0.
-- `cbc` (`0.1`), licensed under MIT or Apache-2.0.
-- `cipher` (`0.4`), licensed under MIT or Apache-2.0.
-- `des` (`0.8`), licensed under MIT or Apache-2.0.
-- `image` (`0.25`), licensed under MIT or Apache-2.0.
-- `libc` (`0.2`), licensed under MIT or Apache-2.0.
-- `md-5` (`0.10`), licensed under MIT or Apache-2.0.
-- `native-tls` (`0.2`), licensed under MIT or Apache-2.0.
-- `serde` (`1.0`), licensed under MIT or Apache-2.0.
-- `serde_json` (`1.0`), licensed under MIT or Apache-2.0.
-- `x11rb` (`0.13`), licensed under MIT or Apache-2.0.
-- `zstd` (`0.13`), licensed under MIT.
+The `aes`, `cbc`, `cipher`, `des`, `flate2`, `image`, `libc`, `md-5`, `native-tls`, `serde`, `serde_json`, and `x11rb` crates are dual-licensed under the MIT License and the Apache License, Version 2.0. You may use them under either license.
+
+The `gtk` and `zstd` crates are licensed under the MIT License.
+
+The `muda`, `tao`, and `wry` crates are licensed under the Apache License, Version 2.0.
