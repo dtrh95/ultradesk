@@ -16,40 +16,19 @@ use std::time::Duration;
 
 pub const DEFAULT_VIEWER_HTML: &str = include_str!("../viewer.html");
 pub const DEFAULT_APP_ICON_PNG: &[u8] = include_bytes!("../ultradesk-rust.png");
-pub const DEFAULT_APP_WINDOW_PY: &str = include_str!("../app_window.py");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GuiLaunchOutcome {
-    ClosedCleanly,
-    FallbackToBrowser(String),
-}
-
-impl GuiLaunchOutcome {
-    pub fn from_exit(exit_code: Option<i32>, elapsed: Duration) -> Self {
-        match exit_code {
-            Some(0) => Self::ClosedCleanly,
-            Some(code) if elapsed < Duration::from_secs(3) => Self::FallbackToBrowser(format!(
-                "native GUI exited early with code {}",
-                code
-            )),
-            None if elapsed < Duration::from_secs(1) => {
-                Self::FallbackToBrowser("native GUI terminated by signal on startup".to_string())
-            }
-            _ => Self::ClosedCleanly,
-        }
-    }
-}
+pub use crate::gui::GuiLaunchOutcome;
 
 pub fn materialize_embedded_gui_assets(target_dir: &Path) -> Result<PathBuf, String> {
     fs::create_dir_all(target_dir)
         .map_err(|e| format!("failed to create runtime GUI dir: {}", e))?;
-    let script_path = target_dir.join("app_window.py");
+    let viewer_path = target_dir.join("viewer.html");
     let icon_path = target_dir.join("ultradesk-rust.png");
-    fs::write(&script_path, DEFAULT_APP_WINDOW_PY.as_bytes())
-        .map_err(|e| format!("failed to write embedded app_window.py: {}", e))?;
+    fs::write(&viewer_path, DEFAULT_VIEWER_HTML.as_bytes())
+        .map_err(|e| format!("failed to write embedded viewer.html: {}", e))?;
     fs::write(&icon_path, DEFAULT_APP_ICON_PNG)
         .map_err(|e| format!("failed to write embedded icon: {}", e))?;
-    Ok(script_path)
+    Ok(viewer_path)
 }
 
 pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
