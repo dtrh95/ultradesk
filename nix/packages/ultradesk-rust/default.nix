@@ -2,25 +2,19 @@
   lib,
   rustPlatform,
   fetchFromGitHub,
+  glib,
   gobject-introspection,
   gtk3,
   hicolor-icon-theme,
+  libsoup_3,
   libxcb,
   nix-update-script,
   openssl,
   pkg-config,
-  python3,
   webkitgtk_4_1,
   wrapGAppsHook3,
 }:
 
-let
-  pythonEnv = python3.withPackages (
-    ps: with ps; [
-      pygobject3
-    ]
-  );
-in
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "ultradesk-rust";
   version = "0.2.0";
@@ -48,10 +42,11 @@ rustPlatform.buildRustPackage (finalAttrs: {
   ];
 
   buildInputs = [
+    glib
     gtk3
+    libsoup_3
     libxcb
     openssl
-    pythonEnv
     webkitgtk_4_1
   ];
 
@@ -65,7 +60,6 @@ rustPlatform.buildRustPackage (finalAttrs: {
     if [ -f $out/bin/ultraviewer-linux ] && [ ! -f $out/bin/ultradesk-rust ]; then
       mv $out/bin/ultraviewer-linux $out/bin/ultradesk-rust
     fi
-    install -Dm644 app_window.py $out/share/ultradesk-rust/app_window.py
     install -Dm644 viewer.html $out/share/ultradesk-rust/viewer.html
     if [ -f 8bit.dat ]; then
       install -Dm644 8bit.dat $out/share/ultradesk-rust/8bit.dat
@@ -98,10 +92,6 @@ Keywords=ultradesk;ultraviewer;rust;remote;desktop;support;control;
 StartupNotify=true
 StartupWMClass=ultradesk-rust
 EOF
-  '';
-
-  postFixup = ''
-    patchShebangs $out/share/ultradesk-rust
   '';
 
   meta = {

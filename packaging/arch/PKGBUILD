@@ -9,10 +9,9 @@ depends=(
   'gcc-libs'
   'openssl'
   'libxcb'
-  'python'
-  'python-gobject'
   'gtk3'
   'webkit2gtk-4.1'
+  'libsoup3'
 )
 makedepends=(
   'cargo'
