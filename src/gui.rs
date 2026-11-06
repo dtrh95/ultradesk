@@ -345,7 +345,7 @@ fn run_native_gui_inner(
     use gtk::prelude::CssProviderExt;
     let css_provider = gtk::CssProvider::new();
     let _ = css_provider.load_from_data(
-        b"menubar, menubar menuitem, menu, menuitem { font-family: 'Inter', 'Noto Sans', 'Cantarell', sans-serif; font-size: 12px; font-weight: 500; }",
+        b"menubar, menubar menuitem, menu, menuitem { font-family: 'Host Grotesk', 'Noto Sans', 'Cantarell', sans-serif; font-size: 13px; font-weight: 500; padding: 4px 8px; } menubar { background-color: #21252b; border-bottom: 1px solid rgba(171, 178, 191, 0.14); color: #e5e9f0; } menubar menuitem:hover, menuitem:hover { background-color: #2c313c; color: #ffffff; } menu { background-color: #21252b; border: 1px solid rgba(171, 178, 191, 0.18); padding: 4px 0; }",
     );
     if let Some(screen) = gtk::gdk::Screen::default() {
         gtk::StyleContext::add_provider_for_screen(
