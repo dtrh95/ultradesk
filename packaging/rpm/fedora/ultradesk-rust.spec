@@ -12,12 +12,14 @@ BuildRequires:  make
 BuildRequires:  pkgconf-pkg-config
 BuildRequires:  openssl-devel
 BuildRequires:  libxcb-devel
-BuildRequires:  python3-devel
+BuildRequires:  gtk3-devel
+BuildRequires:  webkit2gtk4.1-devel
+BuildRequires:  libsoup3-devel
+BuildRequires:  javascriptcoregtk4.1-devel
 
-Requires:       python3
-Requires:       python3-gobject
 Requires:       gtk3
 Requires:       webkit2gtk4.1
+Requires:       libsoup3
 
 %description
 UltraDesk is a Linux-native remote desktop controller and host written in Rust,
@@ -32,7 +34,6 @@ and file transfer.
 
 %install
 %make_install PREFIX=%{_prefix} BINDIR=%{_bindir} DATADIR=%{_datadir}
-%py_byte_compile %{__python3} %{buildroot}%{_datadir}/ultradesk-rust
 
 %check
 make check

@@ -1,6 +1,6 @@
 # ultradesk-rust
 
-`ultradesk-rust` is a Linux-native remote desktop client and host written in Rust. It provides a dual-pane Spotlight UI (`viewer.html`) inside a WebKit2 GTK window (`app_window.py`) with automatic browser fallback, multi-monitor capture and selection on both Wayland and X11, kernel `uinput` and X11 `XTEST` input injection, ITU-T G.722 64 kbps audio streaming, bidirectional chat and clipboard synchronization, and chunked file transfer.
+`ultradesk-rust` is a Linux-native remote desktop client and host written in Rust. It provides a dual-pane Spotlight UI (`viewer.html`) inside a native Tauri (tao + wry + muda) desktop window with automatic browser fallback, multi-monitor capture and selection on both Wayland and X11, kernel `uinput` and X11 `XTEST` input injection, ITU-T G.722 64 kbps audio streaming, bidirectional chat and clipboard synchronization, and chunked file transfer.
 
 ## Features
 
@@ -64,7 +64,7 @@ sudo apt install ../ultradesk-rust_0.2.0-1_amd64.deb
 
 ### Ubuntu and Linux Mint (`jammy`, `noble`, `questing`, and `resolute`)
 
-Install from the signed APT repository or build the `.deb` package locally with the commands in the Debian section above. Runtime dependencies on Debian and Ubuntu include `python3-gi`, `gir1.2-gtk-3.0`, `gir1.2-webkit2-4.1` (or `gir1.2-webkit2-4.0`), `xclip`, and `wl-clipboard`.
+Install from the signed APT repository or build the `.deb` package locally with the commands in the Debian section above. Runtime dependencies on Debian and Ubuntu include `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libsoup-3.0-0`, `xclip`, and `wl-clipboard`.
 
 ### Fedora, RHEL, AlmaLinux, and Rocky Linux (`.rpm`)
 
@@ -226,7 +226,8 @@ In the Spotlight UI (`viewer.html`), click `ALL` to view or share all displays, 
 
 ## Repository layout
 
-- `src/main.rs` parses CLI subcommands (`host`, `id`, `master-password`, and `help`), loads XDG profiles, starts `HostSession` and `PortalServer`, and launches the WebKit2 GTK window or browser fallback.
+- `src/main.rs` parses CLI subcommands (`host`, `id`, `master-password`, and `help`), loads XDG profiles, starts `HostSession` and `PortalServer`, and launches the native Tauri desktop window or browser fallback.
+- `src/gui.rs` implements the native desktop window runtime with Tauri `tao` and `wry`, native menubar integration via `muda`, bidirectional clipboard synchronization, and browser fallback.
 - `src/lib.rs` exports all crate modules and houses the end-to-end integration test suite.
 - `src/protocol.rs` implements 3DES registration cryptography, P2P AES-256-CBC framing, target route parsing, and multipart byte-array field serialization.
 - `src/screen.rs` implements `RGB555Screen`, `DisplayLayout`, `MonitorSelection`, 11-field screen update decoding, scroll-copy, LRU tile caching, bottom-up JPEG atlases, and Zstandard RGB555 decompression.
@@ -240,12 +241,11 @@ In the Spotlight UI (`viewer.html`), click `ALL` to view or share all displays, 
 - `src/file_transfer.rs` manages chunked file transfers and bidirectional UTF-16LE chat across packet kinds `12`, `13`, `14`, `15`, `16`, and `21`.
 - `src/direct.rs` implements LAN direct TCP candidate exchange and probing (`DirectHandshakeMachine`).
 - `src/profile.rs` manages XDG configuration files under `~/.config/ultradesk-rust` (`host-profile.json`, `client-profile.json`, and `saved_credentials.json`).
-- `viewer.html` provides the bilingual (Vietnamese and English) Spotlight UI with a draggable and collapsible floating HUD toolbar.
-- `app_window.py` wraps the local portal URL in a native GTK3 WebKit2 window (`1280x820`).
+- `viewer.html` provides the bilingual (Vietnamese and English) Spotlight UI with a docked top menu toolbar, multi-theme switching, and session tools.
 
 ## Run tests and benchmarks
 
-Run the 44 release unit and integration tests and the verification script (`scripts/verify_upgrade.sh`):
+Run the 47 release unit and integration tests and the verification script (`scripts/verify_upgrade.sh`):
 
 ```bash
 cargo test --release
