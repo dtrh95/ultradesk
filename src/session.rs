@@ -98,9 +98,16 @@ pub fn detect_local_ip() -> String {
 
 pub fn effective_registration_terms(
     reg_profile: &RegistrationProfile,
-    _detected_ip: &str,
+    detected_ip: &str,
 ) -> Vec<String> {
-    reg_profile.terms.clone()
+    let mut terms = reg_profile.terms.clone();
+    if terms.len() > 4
+        && !detected_ip.is_empty()
+        && (terms[4].is_empty() || terms[4] == "127.0.0.1" || terms[4] == "0.0.0.0")
+    {
+        terms[4] = detected_ip.to_string();
+    }
+    terms
 }
 
 pub fn effective_lookup_terms(
@@ -116,6 +123,12 @@ pub fn effective_lookup_terms(
     terms[6] = client_id.to_string();
     let hash_input = format!("{}{}", terms[6], reg_temp_password);
     terms[7] = md5_hex_lower(hash_input.as_bytes());
+    if terms[12].is_empty() {
+        terms[12] = "0".to_string();
+    }
+    if terms[14].is_empty() || terms[14] == "0" {
+        terms[14] = "1".to_string();
+    }
     Ok(terms)
 }
 
@@ -2013,25 +2026,21 @@ impl ControlSession {
         reg_profile: &RegistrationProfile,
         partner: &PartnerProfile,
     ) -> Result<(RegistrationTransport, SessionTransport, TargetRoute), String> {
-        let mut terms = partner.request_terms.clone();
-        if terms.len() != 17 {
+        if partner.request_terms.len() != 17 {
             return Err("partner request needs seventeen terms".to_string());
         }
 
+        let local_ip = detect_local_ip();
+        let reg_terms = effective_registration_terms(reg_profile, &local_ip);
+
         let mut reg = RegistrationTransport::new(8.0, 1024 * 1024, true)?;
         reg.connect(DEFAULT_REGISTRATION_HOST, 443)?;
-        let reg_cmd = build_registration_command(&reg_profile.terms)?;
+        let reg_cmd = build_registration_command(&reg_terms)?;
         reg.send_command(&reg_cmd)?;
         let identity = reg.receive_identity()?;
 
-        terms[2] = connection_request_password_value(&partner.password, partner.password_type);
-        terms[6] = identity.client_id.to_string();
-        let hash_input = format!(
-            "{}{}",
-            terms[6],
-            reg_profile.terms.get(2).cloned().unwrap_or_default()
-        );
-        terms[7] = md5_hex_lower(hash_input.as_bytes());
+        let reg_temp_password = reg_terms.get(2).map(String::as_str).unwrap_or_default();
+        let terms = effective_lookup_terms(partner, identity.client_id, reg_temp_password)?;
 
         let req_cmd = build_connection_request_command(&terms)?;
         reg.send_command(&req_cmd)?;
