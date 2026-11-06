@@ -291,7 +291,16 @@ fn main() {
         };
 
     let bound_port = portal.port;
-    let url = format!("http://{}/", portal.bind_addr);
+    let snap = session.snapshot();
+    let pill = if snap.saved_toolbar_collapsed {
+        "collapsed"
+    } else {
+        "expanded"
+    };
+    let url = format!(
+        "http://{}/?theme={}&lang={}&pill={}",
+        portal.bind_addr, snap.saved_theme, snap.saved_language, pill
+    );
     println!("UltraDesk Controller core listening on http://127.0.0.1:{}", bound_port);
 
     let shutdown = portal.shutdown.clone();

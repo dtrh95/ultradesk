@@ -162,6 +162,16 @@ struct MasterPasswordRequest {
     password: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct PreferencesRequest {
+    #[serde(default)]
+    theme: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    toolbar_collapsed: Option<bool>,
+}
+
 pub struct PortalServer {
     pub bind_addr: String,
     pub port: u16,
@@ -517,7 +527,10 @@ fn handle_http_client(
                     "partner_id": snap.saved_partner_id,
                     "password": snap.saved_password,
                     "remember": snap.remember_credentials,
-                    "saved_remotes": snap.saved_remotes
+                    "saved_remotes": snap.saved_remotes,
+                    "theme": snap.saved_theme,
+                    "language": snap.saved_language,
+                    "toolbar_collapsed": snap.saved_toolbar_collapsed,
                 }),
             )
         }
@@ -539,6 +552,34 @@ fn handle_http_client(
                 200,
                 &json!({ "ok": true, "state": session.snapshot() }),
             )
+        }
+        ("POST", "/preferences") => {
+            let req: PreferencesRequest = match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": format!("Invalid preferences JSON: {}", e) }),
+                    );
+                }
+            };
+            match session.update_ui_preferences(
+                req.theme.as_deref(),
+                req.language.as_deref(),
+                req.toolbar_collapsed,
+            ) {
+                Ok(()) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "state": session.snapshot() }),
+                ),
+                Err(e) => write_json_response(
+                    &mut stream,
+                    400,
+                    &json!({ "ok": false, "error": e }),
+                ),
+            }
         }
         ("POST", "/disconnect") => {
             session.disconnect();

@@ -163,11 +163,35 @@ pub enum ThemeName {
     GruvboxLight,
 }
 
+impl ThemeName {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThemeName::AutoTime => "auto-time",
+            ThemeName::AutoOs => "auto-os",
+            ThemeName::Onedark => "onedark",
+            ThemeName::Onelight => "onelight",
+            ThemeName::VscodeDark => "vscode-dark",
+            ThemeName::VscodeLight => "vscode-light",
+            ThemeName::GruvboxDark => "gruvbox-dark",
+            ThemeName::GruvboxLight => "gruvbox-light",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LanguageCode {
     Vi,
     En,
+}
+
+impl LanguageCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LanguageCode::Vi => "vi",
+            LanguageCode::En => "en",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +507,7 @@ fn run_native_gui_inner(
                                 action,
                                 window_loop,
                                 &webview_loop,
+                                &session,
                                 control_flow,
                                 true,
                             );
@@ -495,6 +520,7 @@ fn run_native_gui_inner(
                                 action,
                                 window_loop,
                                 &webview_loop,
+                                &session,
                                 control_flow,
                                 false,
                             );
@@ -516,6 +542,7 @@ fn dispatch_toolbar_action(
     action: ToolbarAction,
     window: &tao::window::Window,
     webview: &wry::WebView,
+    session: &ControlSession,
     control_flow: &mut tao::event_loop::ControlFlow,
     from_webview: bool,
 ) {
@@ -530,9 +557,21 @@ fn dispatch_toolbar_action(
         ToolbarAction::QuitApplication => {
             *control_flow = tao::event_loop::ControlFlow::Exit;
         }
-        other => {
+        ref act => {
+            match act {
+                ToolbarAction::SetTheme(ref theme) => {
+                    let _ = session.update_ui_preferences(Some(theme.as_str()), None, None);
+                }
+                ToolbarAction::SetLanguage(ref lang) => {
+                    let _ = session.update_ui_preferences(None, Some(lang.as_str()), None);
+                }
+                ToolbarAction::SetToolbarCollapsed(collapsed) => {
+                    let _ = session.update_ui_preferences(None, None, Some(*collapsed));
+                }
+                _ => {}
+            }
             if !from_webview {
-                if let Ok(json_str) = serde_json::to_string(&other) {
+                if let Ok(json_str) = serde_json::to_string(act) {
                     let script = format!(
                         "if (typeof window.__ultradesk_dispatch_action === 'function') {{ const act = {}; window.__ultradesk_dispatch_action(act.action, act.payload); }}",
                         json_str
