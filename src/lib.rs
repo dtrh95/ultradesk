@@ -1186,6 +1186,23 @@ mod tests {
         assert_eq!(route.tcp_server_hostname, "functions3.ultraviewer.net");
         assert_eq!(route.partner_secret_token.as_deref(), Some("-1062728963"));
 
+        let err99 = crate::protocol::format_command8_status_error(
+            b"8:99:Partner's password is too easy to guess and must be changed for safety. Please tell your partner to change their password.:0",
+        )
+        .unwrap();
+        assert_eq!(
+            err99,
+            "Không thể kết nối tới đối tác (Status 99, Partner's password is too easy to guess and must be changed for safety. Please tell your partner to change their password.)"
+        );
+        assert_eq!(
+            crate::session::parse_direct_lan_target("192.168.1.10"),
+            Some(("192.168.1.10".to_string(), 5938))
+        );
+        assert_eq!(
+            crate::session::parse_direct_lan_target("130173637"),
+            None
+        );
+
         let tmp = std::env::temp_dir().join(format!("uv_lan_repro_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let mgr = crate::profile::ProfileManager::from_custom_dir(tmp.clone());
@@ -1244,6 +1261,15 @@ mod tests {
         assert_eq!(
             rejected.error.as_deref(),
             Some("Sai mật khẩu (Wrong Password)")
+        );
+
+        {
+            let mut guard = viewer.inner.lock().unwrap();
+            guard.host_session = host.clone();
+        }
+        assert_eq!(
+            viewer.resolve_lan_endpoint("136659993"),
+            Some(("127.0.0.1".to_string(), lan_port))
         );
 
         viewer.disconnect();

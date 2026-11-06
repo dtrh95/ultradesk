@@ -124,13 +124,7 @@ impl ProfileManager {
             }
             return Ok(());
         };
-        if !(MIN_MASTER_PASSWORD..=MAX_MASTER_PASSWORD).contains(&pw.len())
-            || !pw.bytes().all(|b| (32..=126).contains(&b))
-        {
-            return Err(format!(
-                "The master password must be {MIN_MASTER_PASSWORD}-{MAX_MASTER_PASSWORD} printable ASCII characters."
-            ));
-        }
+        validate_master_password(pw)?;
         let proof = compute_master_password_proof(pw);
         write_private(&file, &format!("{}\n", proof))
     }
@@ -148,6 +142,40 @@ impl ProfileManager {
             Err(format!("Master password file {} is invalid", file.display()))
         }
     }
+}
+
+pub fn validate_master_password(pw: &str) -> Result<(), String> {
+    if !(MIN_MASTER_PASSWORD..=MAX_MASTER_PASSWORD).contains(&pw.len())
+        || !pw.bytes().all(|b| (32..=126).contains(&b))
+    {
+        return Err(format!(
+            "The master password must be {MIN_MASTER_PASSWORD}-{MAX_MASTER_PASSWORD} printable ASCII characters."
+        ));
+    }
+    let bytes = pw.as_bytes();
+    let all_same = bytes.iter().all(|&b| b == bytes[0]);
+    let seq_asc = bytes.windows(2).all(|w| w[1] == w[0].wrapping_add(1));
+    let seq_desc = bytes.windows(2).all(|w| w[0] == w[1].wrapping_add(1));
+    const WEAK_LIST: [&str; 11] = [
+        "1234567890",
+        "12341234",
+        "123123123",
+        "password",
+        "password1",
+        "password123",
+        "qwertyui",
+        "qwerty123",
+        "ultraviewer",
+        "ultradesk",
+        "admin123",
+    ];
+    let blacklisted = WEAK_LIST.iter().any(|w| pw.eq_ignore_ascii_case(w));
+    if all_same || seq_asc || seq_desc || blacklisted {
+        return Err(
+            "The master password is too easy to guess and will be rejected with Status 99. Mix letters, numbers, or symbols.".to_string(),
+        );
+    }
+    Ok(())
 }
 
 pub fn compute_master_password_proof(password: &str) -> String {
