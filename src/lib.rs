@@ -883,6 +883,13 @@ mod tests {
         assert!(!resp_html.contains("drawImage(cursorImg"));
         assert!(resp_html.contains("--text-sm: 12px;"));
         assert!(resp_html.contains("'Noto Sans'"));
+        assert!(resp_html.contains("'Host Grotesk'"));
+        assert!(resp_html.contains("--m-ease"));
+        assert!(resp_html.contains("showNotice"));
+        assert!(resp_html.contains(".m-tab-ind"));
+        assert!(!resp_html.contains("backdrop-filter"));
+        assert!(!resp_html.contains("alert("));
+        assert!(!resp_html.contains("'Inter'"));
         assert!(!resp_html.contains("--pill-bg"));
         assert!(!resp_html.contains("(|||31|||)"));
 
