@@ -433,7 +433,7 @@ pub fn decode_host_input(payload: &[u8]) -> Option<HostInputEvent> {
     None
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputEvent {
     #[serde(rename = "type", default)]
     pub event_type: String,

@@ -535,6 +535,118 @@ pub enum HostAction {
     SessionEnded(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct VideoQos {
+    pub last_frame_sent_at: Option<Instant>,
+    pub rtt_ema_ms: f32,
+    pub target_fps: u32,
+    pub static_refresh_remaining: u8,
+}
+
+impl Default for VideoQos {
+    fn default() -> Self {
+        Self {
+            last_frame_sent_at: None,
+            rtt_ema_ms: 25.0,
+            target_fps: 30,
+            static_refresh_remaining: 0,
+        }
+    }
+}
+
+impl VideoQos {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn target_interval(&self) -> Duration {
+        Duration::from_millis((1000 / self.target_fps.max(1)).max(16) as u64)
+    }
+
+    pub fn on_frame_sent(&mut self, now: Instant) {
+        self.last_frame_sent_at = Some(now);
+    }
+
+    pub fn on_frame_ack(&mut self, now: Instant) {
+        if let Some(sent_at) = self.last_frame_sent_at {
+            let sample_ms = now.saturating_duration_since(sent_at).as_millis() as f32;
+            self.rtt_ema_ms = 0.8 * self.rtt_ema_ms + 0.2 * sample_ms;
+            self.target_fps = if self.rtt_ema_ms < 25.0 {
+                60
+            } else if self.rtt_ema_ms < 60.0 {
+                35
+            } else if self.rtt_ema_ms < 120.0 {
+                25
+            } else {
+                15
+            };
+        }
+    }
+}
+
+pub fn compute_dirty_rect(
+    prev: &[u8],
+    curr: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let expected_len = (width as usize) * (height as usize) * 2;
+    if prev.len() != curr.len() || prev.len() != expected_len || width == 0 || height == 0 {
+        return Some((0, 0, width, height));
+    }
+    if prev == curr {
+        return None;
+    }
+    let row_bytes = (width as usize) * 2;
+    let mut top = None;
+    let mut bottom = 0usize;
+
+    for y in 0..(height as usize) {
+        let start = y * row_bytes;
+        let end = start + row_bytes;
+        if prev[start..end] != curr[start..end] {
+            if top.is_none() {
+                top = Some(y);
+            }
+            bottom = y;
+        }
+    }
+
+    let y0 = top.unwrap_or(0);
+    let y1 = bottom + 1;
+
+    let mut min_x = width as usize;
+    let mut max_x = 0usize;
+
+    for y in y0..y1 {
+        let row_start = y * row_bytes;
+        let prev_row = &prev[row_start..row_start + row_bytes];
+        let curr_row = &curr[row_start..row_start + row_bytes];
+
+        for (x, (p_chunk, c_chunk)) in prev_row
+            .chunks_exact(2)
+            .zip(curr_row.chunks_exact(2))
+            .enumerate()
+        {
+            if p_chunk != c_chunk {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+            }
+        }
+    }
+
+    if min_x > max_x {
+        return None;
+    }
+
+    let x0 = min_x as u32;
+    let w = (max_x - min_x + 1) as u32;
+    let y0_u32 = y0 as u32;
+    let h = (y1 - y0) as u32;
+
+    Some((x0, y0_u32, w, h))
+}
+
 pub struct HostCore {
     pub phase: HostPhase,
     pub temp_password: String,
@@ -547,6 +659,7 @@ pub struct HostCore {
     pub waiting_ack: bool,
     pub next_frame_seq: i32,
     pub layout: DisplayLayout,
+    pub qos: VideoQos,
 }
 
 impl HostCore {
@@ -567,6 +680,7 @@ impl HostCore {
             waiting_ack: false,
             next_frame_seq: FIRST_FRAME_NUMBER,
             layout,
+            qos: VideoQos::default(),
         }
     }
 
@@ -658,6 +772,7 @@ impl HostCore {
 
         if tag == b"18" && self.phase == HostPhase::Streaming && self.waiting_ack {
             self.waiting_ack = false;
+            self.qos.on_frame_ack(now);
             actions.push(HostAction::RequestCapture);
             return actions;
         }
@@ -772,24 +887,30 @@ impl HostCore {
         let mut actions = Vec::new();
         if self.phase == HostPhase::Streaming && self.waiting_ack {
             self.waiting_ack = false;
+            self.qos.on_frame_ack(Instant::now());
             actions.push(HostAction::RequestCapture);
         }
         actions
     }
 
-    pub fn send_frame(&mut self, rgb555_top_down: &[u8]) -> Result<Vec<HostAction>, String> {
+    pub fn send_frame_rect(
+        &mut self,
+        rect: (u32, u32, u32, u32),
+        rgb555_top_down: &[u8],
+    ) -> Result<Vec<HostAction>, String> {
         if self.phase != HostPhase::Streaming || self.waiting_ack {
             return Ok(Vec::new());
         }
         let seq = self.next_frame_seq;
         self.next_frame_seq = self.next_frame_seq.wrapping_add(1);
         self.waiting_ack = true;
-        let packet = encode_host_frame(
-            (0, 0, self.layout.width, self.layout.height),
-            rgb555_top_down,
-            seq,
-        )?;
+        self.qos.on_frame_sent(Instant::now());
+        let packet = encode_host_frame(rect, rgb555_top_down, seq)?;
         Ok(vec![HostAction::SendPeer(packet)])
+    }
+
+    pub fn send_frame(&mut self, rgb555_top_down: &[u8]) -> Result<Vec<HostAction>, String> {
+        self.send_frame_rect((0, 0, self.layout.width, self.layout.height), rgb555_top_down)
     }
 
     pub fn end_session(&mut self, reason: &str) -> Vec<HostAction> {
@@ -819,11 +940,16 @@ pub trait Injector: Send {
 pub struct HeadlessCapturer {
     pub width: u32,
     pub height: u32,
+    pub cached: Option<(usize, usize, Vec<u8>)>,
 }
 
 impl HeadlessCapturer {
     pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
+        Self {
+            width,
+            height,
+            cached: None,
+        }
     }
 }
 
@@ -840,6 +966,11 @@ impl Capturer for HeadlessCapturer {
     fn capture_screen(&mut self, rect: MonitorRect) -> Result<Vec<u8>, String> {
         let w = rect.width() as usize;
         let h = rect.height() as usize;
+        if let Some((cw, ch, ref bytes)) = self.cached {
+            if cw == w && ch == h {
+                return Ok(bytes.clone());
+            }
+        }
         let mut raw = Vec::with_capacity(w * h * 2);
         for y in 0..h {
             for x in 0..w {
@@ -847,6 +978,7 @@ impl Capturer for HeadlessCapturer {
                 raw.extend_from_slice(&px.to_le_bytes());
             }
         }
+        self.cached = Some((w, h, raw.clone()));
         Ok(raw)
     }
 }
@@ -1005,6 +1137,23 @@ pub fn zpixmap_to_rgb555(
         return Err("X11 returned a short image".to_string());
     }
     let bytes = bpp / 8;
+    if bytes == 4
+        && !f.msb_first
+        && f.red_mask == 0xff0000
+        && f.green_mask == 0xff00
+        && f.blue_mask == 0xff
+    {
+        for y in (0..rows).rev() {
+            let row = &data[y * stride..y * stride + width * 4];
+            for px in row.chunks_exact(4) {
+                let w = (((px[2] as u16) >> 3) << 10)
+                    | (((px[1] as u16) >> 3) << 5)
+                    | ((px[0] as u16) >> 3);
+                out.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        return Ok(());
+    }
     for y in (0..rows).rev() {
         let row = &data[y * stride..y * stride + width * bytes];
         for px in row.chunks_exact(bytes) {
@@ -2429,6 +2578,7 @@ struct HostSessionInner {
     pending_chats: Vec<String>,
     pending_clipboard: Option<String>,
     capture_needed: bool,
+    force_keyframe: bool,
     last_frame: Vec<u8>,
 }
 
@@ -2577,6 +2727,7 @@ impl HostSession {
             pending_chats: Vec::new(),
             pending_clipboard: None,
             capture_needed: false,
+            force_keyframe: true,
             last_frame: Vec::new(),
         };
         Self::refresh_display_layout(&mut inner);
@@ -2645,6 +2796,7 @@ impl HostSession {
         let new_layout =
             Self::compute_shared_layout(&s.full_monitors, &s.monitor_selection, &s.core.layout);
         if matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
+            s.force_keyframe = true;
             let actions = s.core.update_layout(new_layout);
             Self::record_actions(s, &actions);
         } else {
@@ -2659,6 +2811,9 @@ impl HostSession {
             match act {
                 HostAction::SendPeer(bytes) => {
                     s.outbound_peer_packets.push(bytes.clone());
+                }
+                HostAction::SessionStarted(_) => {
+                    s.force_keyframe = true;
                 }
                 HostAction::RequestCapture => {
                     s.capture_needed = true;
@@ -2867,6 +3022,22 @@ impl HostSession {
             let mut next_capture_at = Instant::now();
 
             while self.is_worker_active(gen) {
+                let is_streaming = {
+                    let s = self.inner.lock().unwrap();
+                    s.core.phase == HostPhase::Streaming
+                };
+                if is_streaming {
+                    reg.set_timeout(0.005);
+                    if let Some((ref mut relay, _, _)) = active_relay {
+                        relay.set_timeout(0.005);
+                    }
+                } else {
+                    reg.set_timeout(0.03);
+                    if let Some((ref mut relay, _, _)) = active_relay {
+                        relay.set_timeout(0.02);
+                    }
+                }
+
                 if last_keepalive.elapsed() >= Duration::from_secs(50) {
                     last_keepalive = Instant::now();
                     let _ = reg.send_command(b"2");
@@ -2964,8 +3135,14 @@ impl HostSession {
                         && (s.capture_needed || Instant::now() >= next_capture_at)
                 };
                 if should_capture {
+                    let capture_start = Instant::now();
                     let _ = self.step_capture();
-                    next_capture_at = Instant::now() + Duration::from_millis(40);
+                    let interval = {
+                        let s = self.inner.lock().unwrap();
+                        s.core.qos.target_interval()
+                    };
+                    next_capture_at =
+                        Instant::now() + interval.saturating_sub(capture_start.elapsed());
                 }
 
                 if let (Some((ref mut relay, _, _)), Some((ref peer_ip, peer_port))) =
@@ -3138,10 +3315,37 @@ impl HostSession {
             bottom: s.core.layout.virtual_top + s.core.layout.height as i32,
         };
         let raw = s.backend.capturer.capture_screen(rect)?;
-        let actions = s.core.send_frame(&raw)?;
-        s.last_frame = raw;
-        Self::record_actions(&mut s, &actions);
-        Ok(actions)
+
+        if s.force_keyframe || s.last_frame.is_empty() || s.last_frame.len() != raw.len() {
+            let actions = s.core.send_frame(&raw)?;
+            s.last_frame = raw;
+            s.force_keyframe = false;
+            Self::record_actions(&mut s, &actions);
+            return Ok(actions);
+        }
+
+        match compute_dirty_rect(&s.last_frame, &raw, s.core.layout.width, s.core.layout.height) {
+            None => Ok(Vec::new()),
+            Some((dx, dy, dw, dh)) => {
+                let total_pixels = (s.core.layout.width as u64) * (s.core.layout.height as u64);
+                let dirty_pixels = (dw as u64) * (dh as u64);
+                let actions = if dirty_pixels * 4 < total_pixels * 3 {
+                    let mut sub_raw = Vec::with_capacity((dw as usize) * (dh as usize) * 2);
+                    let full_row_bytes = (s.core.layout.width as usize) * 2;
+                    let sub_row_bytes = (dw as usize) * 2;
+                    for r in 0..dh {
+                        let src_start = ((dy + r) as usize) * full_row_bytes + (dx as usize) * 2;
+                        sub_raw.extend_from_slice(&raw[src_start..src_start + sub_row_bytes]);
+                    }
+                    s.core.send_frame_rect((dx, dy, dw, dh), &sub_raw)?
+                } else {
+                    s.core.send_frame(&raw)?
+                };
+                s.last_frame = raw;
+                Self::record_actions(&mut s, &actions);
+                Ok(actions)
+            }
+        }
     }
 }
 
@@ -3682,5 +3886,40 @@ mod tests {
         assert_eq!(chats, vec!["Partner: hello cc".to_string()]);
         assert_eq!(clip, None);
         assert!(session.send_chat("xin chào"));
+    }
+
+    #[test]
+    fn test_video_qos_and_compute_dirty_rect() {
+        let mut qos = VideoQos::new();
+        assert_eq!(qos.target_fps, 30);
+        assert_eq!(qos.target_interval(), Duration::from_millis(33));
+
+        let t0 = Instant::now();
+        qos.on_frame_sent(t0);
+        qos.on_frame_ack(t0 + Duration::from_millis(10));
+        assert!(qos.rtt_ema_ms < 25.0);
+        assert_eq!(qos.target_fps, 60);
+        assert_eq!(qos.target_interval(), Duration::from_millis(16));
+
+        let w = 10u32;
+        let h = 10u32;
+        let prev = vec![0u8; (w * h * 2) as usize];
+        let curr = prev.clone();
+        assert_eq!(compute_dirty_rect(&prev, &curr, w, h), None);
+
+        let mut changed = prev.clone();
+        let idx = (2 * w * 2 + 3 * 2) as usize;
+        changed[idx] = 1;
+        let rect = compute_dirty_rect(&prev, &changed, w, h);
+        assert_eq!(rect, Some((3, 2, 1, 1)));
+
+        let mut changed_box = prev.clone();
+        for y in 2..=5 {
+            for x in 3..=7 {
+                let i = ((y * w + x) * 2) as usize;
+                changed_box[i] = 0xAA;
+            }
+        }
+        assert_eq!(compute_dirty_rect(&prev, &changed_box, w, h), Some((3, 2, 5, 4)));
     }
 }
