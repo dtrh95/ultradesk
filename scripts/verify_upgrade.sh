@@ -43,6 +43,8 @@ rg -q 'window\.__ultradesk_dispatch_action' <<< "$VIEWER_HTML"
 rg -q 'setPillCollapsed' <<< "$VIEWER_HTML"
 rg -q 'id="btnFullscreen"' <<< "$VIEWER_HTML"
 rg -q 'const I18N' <<< "$VIEWER_HTML"
+rg -q -- '--text-sm: 12px;' <<< "$VIEWER_HTML"
+! rg -q '\(\|\|\|31\|\|\|\)' <<< "$VIEWER_HTML"
 
 STATUS_JSON="$(curl -fsS "http://127.0.0.1:${PORT}/status")"
 rg -q '"host_status"' <<< "$STATUS_JSON"
