@@ -11,10 +11,9 @@ depends=(
   'gcc-libs'
   'openssl'
   'libxcb'
-  'python'
-  'python-gobject'
   'gtk3'
   'webkit2gtk-4.1'
+  'libsoup3'
 )
 source=("${url}/releases/download/v${pkgver}/ultradesk-rust-v${pkgver}-x86_64-archlinux.tar.zst")
 noextract=("ultradesk-rust-v${pkgver}-x86_64-archlinux.tar.zst")

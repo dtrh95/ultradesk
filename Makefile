@@ -24,7 +24,6 @@ install:
 		echo "Error: release binary not found in target/release" >&2; \
 		exit 1; \
 	fi
-	install -Dm644 app_window.py "$(DESTDIR)$(DATADIR)/ultradesk-rust/app_window.py"
 	install -Dm644 viewer.html "$(DESTDIR)$(DATADIR)/ultradesk-rust/viewer.html"
 	@if [ -f 8bit.dat ]; then \
 		install -Dm644 8bit.dat "$(DESTDIR)$(DATADIR)/ultradesk-rust/8bit.dat"; \
