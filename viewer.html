@@ -1631,14 +1631,29 @@ document.querySelector('#savedRemotes').onchange=e=>{
   }
 };
 
+const hasNativeToolbarIpc=Boolean(window.ipc&&typeof window.ipc.postMessage==='function');
+function postToolbarIpc(msg){
+  if(hasNativeToolbarIpc){
+    try{window.ipc.postMessage(JSON.stringify(msg));return true;}catch(_){}
+  }
+  return false;
+}
+
 async function post(path,value={}){
-  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Viewer-Token':token},body:JSON.stringify(value)});
+  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Viewer-Token':token},body:JSON.stringify(value),keepalive:true});
   const data=await r.json().catch(()=>({}));
   if(!r.ok||data.ok===false){throw Error(data.error||t('err_failed'));}
   return data;
 }
 let inputChain=Promise.resolve();
-function input(v){inputChain=inputChain.then(()=>post('/event',v)).catch(()=>{});}
+let lastUserActivity=performance.now();
+let staticRefreshed=false;
+function input(v){
+  lastUserActivity=performance.now();
+  staticRefreshed=false;
+  if(hasNativeToolbarIpc&&postToolbarIpc({action:'input',payload:v,event:v}))return;
+  inputChain=inputChain.then(()=>post('/event',v)).catch(()=>{});
+}
 function release(){
   for(const vk of held)input({type:'key',vk,down:false});
   held.clear();
@@ -1699,10 +1714,14 @@ function flushMove(){
   pendingMove=null;
   if(pt.x===lastPtX&&pt.y===lastPtY)return;
   lastMove=performance.now();
+  lastUserActivity=lastMove;
+  staticRefreshed=false;
   lastPtX=pt.x;
   lastPtY=pt.y;
+  const evt={type:'move',...pt};
+  if(hasNativeToolbarIpc&&postToolbarIpc({action:'input',payload:evt,event:evt}))return;
   moveInFlight=true;
-  post('/event',{type:'move',...pt}).catch(()=>{}).finally(()=>{
+  post('/event',evt).catch(()=>{}).finally(()=>{
     moveInFlight=false;
     if(pendingMove)scheduleMove();
   });
@@ -1717,7 +1736,7 @@ function scheduleMove(){
   }
 }
 screen.onpointermove=e=>{pendingMove=point(e);scheduleMove();};
-screen.onpointerdown=e=>{e.preventDefault();screen.focus();try{screen.setPointerCapture(e.pointerId);}catch(_){}const button=['left','middle','right'][e.button];if(button){if(moveTimer){clearTimeout(moveTimer);moveTimer=null;}pendingMove=null;const pt=point(e);lastMove=performance.now();lastPtX=pt.x;lastPtY=pt.y;input({type:'move',...pt});input({type:'button',button,down:true});buttons.add(button);}};
+screen.onpointerdown=e=>{e.preventDefault();screen.focus();try{screen.setPointerCapture(e.pointerId);}catch(_){}const button=['left','middle','right'][e.button];if(button){if(moveTimer){clearTimeout(moveTimer);moveTimer=null;}pendingMove=null;const pt=point(e);lastMove=performance.now();lastUserActivity=lastMove;staticRefreshed=false;lastPtX=pt.x;lastPtY=pt.y;input({type:'move',...pt});input({type:'button',button,down:true});buttons.add(button);}};
 screen.onpointerup=e=>{try{screen.releasePointerCapture(e.pointerId);}catch(_){}const button=['left','middle','right'][e.button];if(button){input({type:'button',button,down:false});buttons.delete(button);}};
 screen.oncontextmenu=e=>e.preventDefault();
 screen.addEventListener('wheel',e=>{e.preventDefault();input({type:'wheel',delta:e.deltaY>0?-120:120});},{passive:false});
@@ -2089,7 +2108,7 @@ function renderSidebar(s){
   chatBox.innerHTML=msgs.length===0?`<div class="muted">${t('chat_empty')}</div>`:msgs.map(m=>`<div class="muted">${m}</div>`).join('');
 }
 
-async function refresh(){
+async function refreshStatus(){
   if(busy)return;busy=true;
   try{
     const s=await(await fetch('/status',{signal:AbortSignal.timeout(3000)})).json();
@@ -2128,35 +2147,71 @@ async function refresh(){
     renderStatusBadge(s);
     renderSidebar(s);
     await pollAudio(s.audio_chunks_received||0);
-    const fVer=s.frame_version||s.frames||0;
-    if(s.frames&&fVer!==lastFrameVersion){
-      const r=await fetch('/frame.jpg?v='+lastFrameVersion+'&q=82',{cache:'no-store',signal:AbortSignal.timeout(3000)});
-      if(r.status===200){
-        const blob=await r.blob();
-        const url=URL.createObjectURL(blob);
-        try{
-          const img=new Image();
-          img.src=url;
-          await img.decode();
-          if(screen.width!==img.naturalWidth||screen.height!==img.naturalHeight){screen.width=img.naturalWidth;screen.height=img.naturalHeight;}
-          ctx.clearRect(0,0,screen.width,screen.height);
-          ctx.drawImage(img,0,0);
-          frameToggle=!frameToggle;
-          screen.style.opacity=frameToggle?'0.9999':'1';
-          lastFrameVersion=Number(r.headers.get('X-Frame-Version')||fVer);
-        }finally{
-          URL.revokeObjectURL(url);
-        }
-      }
-    }else if(!s.frames){
+    if(!s.frames){
       drawIdleCanvas();
     }
   }catch{
     document.querySelector('#status').textContent=t('status_lost');
   }finally{busy=false;}
 }
+
+let frameInFlight=false,lastRenderedQuality=0;
+async function fetchAndRenderFrame(){
+  if(frameInFlight||!lastState||!lastState.frames)return;
+  const fVer=lastState.frame_version||lastState.frames||0;
+  const isInteracting=(performance.now()-lastUserActivity)<200;
+  const targetQuality=isInteracting?72:92;
+  const needNewVersion=fVer!==lastFrameVersion;
+  const needStaticRefresh=!isInteracting&&!staticRefreshed&&(lastRenderedQuality<90);
+  if(!needNewVersion&&!needStaticRefresh)return;
+
+  frameInFlight=true;
+  try{
+    const url=needNewVersion
+      ? `/frame.jpg?v=${lastFrameVersion}&q=${targetQuality}`
+      : `/frame.jpg?q=${targetQuality}`;
+    const r=await fetch(url,{cache:'no-store',signal:AbortSignal.timeout(3000)});
+    if(r.status===304){
+      lastFrameVersion=fVer;
+      return;
+    }
+    if(r.status===200){
+      const blob=await r.blob();
+      const objUrl=URL.createObjectURL(blob);
+      try{
+        const img=new Image();
+        img.src=objUrl;
+        await img.decode();
+        if(screen.width!==img.naturalWidth||screen.height!==img.naturalHeight){screen.width=img.naturalWidth;screen.height=img.naturalHeight;}
+        ctx.clearRect(0,0,screen.width,screen.height);
+        ctx.drawImage(img,0,0);
+        frameToggle=!frameToggle;
+        screen.style.opacity=frameToggle?'0.9999':'1';
+        lastFrameVersion=Number(r.headers.get('X-Frame-Version')||fVer);
+        lastRenderedQuality=targetQuality;
+        if(targetQuality>=90)staticRefreshed=true;
+      }finally{
+        URL.revokeObjectURL(objUrl);
+      }
+    }
+  }catch(_){}finally{frameInFlight=false;}
+}
+
+async function refresh(){
+  await refreshStatus();
+  await fetchAndRenderFrame();
+}
+
+function frameRafLoop(){
+  fetchAndRenderFrame().finally(()=>{
+    try{requestAnimationFrame(frameRafLoop);}catch(_){}
+  });
+}
+
 drawIdleCanvas();
-setInterval(refresh,150);refresh();
+setInterval(refreshStatus,120);
+refresh();
+try{requestAnimationFrame(frameRafLoop);}catch(_){}
 </script>
 </body>
 </html>

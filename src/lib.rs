@@ -1153,6 +1153,7 @@ mod tests {
             ToolbarAction::ToggleFullscreen,
             ToolbarAction::CopyHostId,
             ToolbarAction::QuitApplication,
+            ToolbarAction::Input(crate::input::InputEvent::default()),
         ];
 
         for action in &actions {

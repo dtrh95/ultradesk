@@ -212,6 +212,7 @@ impl PortalServer {
             while !self.shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        let _ = stream.set_nodelay(true);
                         let session = self.session.clone();
                         let viewer_path = self.viewer_path.clone();
                         thread::spawn(move || {
@@ -219,7 +220,7 @@ impl PortalServer {
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(15));
+                        thread::sleep(Duration::from_millis(1));
                     }
                     Err(_) => break,
                 }
@@ -248,6 +249,7 @@ fn write_http_response(
     content_type: &str,
     extra_headers: &[(&str, &str)],
     body: &[u8],
+    keep_alive: bool,
 ) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
@@ -258,12 +260,14 @@ fn write_http_response(
         500 => "Internal Server Error",
         _ => "OK",
     };
+    let conn_val = if keep_alive { "keep-alive" } else { "close" };
     let mut header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: {}\r\n",
         status,
         reason,
         content_type,
-        body.len()
+        body.len(),
+        conn_val
     );
     for (k, v) in extra_headers {
         header.push_str(&format!("{}: {}\r\n", k, v));
@@ -280,6 +284,7 @@ fn write_json_response(
     stream: &mut TcpStream,
     status: u16,
     value: &serde_json::Value,
+    keep_alive: bool,
 ) -> std::io::Result<()> {
     let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
     write_http_response(
@@ -288,6 +293,7 @@ fn write_json_response(
         "application/json; charset=utf-8",
         &[],
         &body,
+        keep_alive,
     )
 }
 
@@ -296,521 +302,618 @@ fn handle_http_client(
     session: ControlSession,
     viewer_path: Option<PathBuf>,
 ) -> std::io::Result<()> {
+    let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
     let mut reader = BufReader::new(stream.try_clone()?);
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(());
-    }
-    let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
-    if parts.len() < 2 {
-        return Ok(());
-    }
-    let method = parts[0];
-    let raw_target = parts[1];
-    let (path, query_str) = match raw_target.split_once('?') {
-        Some((p, q)) => (p, q),
-        None => (raw_target, ""),
-    };
-    let query = parse_query_params(query_str);
-
-    let mut content_length = 0usize;
     loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 || line == "\r\n" || line == "\n" {
+        let mut request_line = String::new();
+        let bytes_read = match reader.read_line(&mut request_line) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if bytes_read == 0 {
             break;
         }
-        if let Some((name, val)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = val.trim().parse::<usize>().unwrap_or(0);
+        let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
+        if parts.len() < 2 {
+            break;
+        }
+        let method = parts[0];
+        let raw_target = parts[1];
+        let http_version = if parts.len() >= 3 { parts[2] } else { "HTTP/1.1" };
+        let (path, query_str) = match raw_target.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (raw_target, ""),
+        };
+        let query = parse_query_params(query_str);
+
+        let mut content_length = 0usize;
+        let mut connection_header: Option<String> = None;
+        let mut header_read_err = false;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    header_read_err = true;
+                    break;
+                }
+                Ok(_) => {
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    if let Some((name, val)) = line.split_once(':') {
+                        let name_trim = name.trim();
+                        if name_trim.eq_ignore_ascii_case("content-length") {
+                            content_length = val.trim().parse::<usize>().unwrap_or(0);
+                        } else if name_trim.eq_ignore_ascii_case("connection") {
+                            connection_header = Some(val.trim().to_lowercase());
+                        }
+                    }
+                }
+                Err(_) => {
+                    header_read_err = true;
+                    break;
+                }
             }
         }
-    }
+        if header_read_err {
+            break;
+        }
 
-    let mut body = vec![0u8; content_length.min(32 * 1024 * 1024)];
-    if !body.is_empty() {
-        reader.read_exact(&mut body)?;
-    }
+        let is_http_10 = http_version.starts_with("HTTP/1.0");
+        let keep_alive = match connection_header.as_deref() {
+            Some("close") => false,
+            Some("keep-alive") => true,
+            _ => !is_http_10,
+        };
 
-    match (method, path) {
-        ("GET", "/" | "/index.html" | "/viewer.html") => {
-            let html = viewer_path
-                .as_ref()
-                .and_then(|p| fs::read(p).ok())
-                .unwrap_or_else(|| DEFAULT_VIEWER_HTML.as_bytes().to_vec());
-            write_http_response(&mut stream, 200, "text/html; charset=utf-8", &[], &html)
+        let mut body = vec![0u8; content_length.min(32 * 1024 * 1024)];
+        if !body.is_empty() {
+            if reader.read_exact(&mut body).is_err() {
+                break;
+            }
         }
-        ("GET", "/favicon.ico" | "/ultradesk-rust.png" | "/ultraviewer-linux.png") => {
-            write_http_response(&mut stream, 200, "image/png", &[], DEFAULT_APP_ICON_PNG)
-        }
-        ("GET", "/status" | "/state") => {
-            let state = session.snapshot();
-            let val = serde_json::to_value(state).unwrap_or_else(|_| json!({}));
-            write_json_response(&mut stream, 200, &val)
-        }
-        ("GET", "/frame.png") => {
-            if let Some(v_req) = query.get("v").and_then(|s| s.parse::<u64>().ok()) {
-                let cur_v = session.frame_version();
-                if v_req == cur_v {
-                    let v_str = cur_v.to_string();
-                    return write_http_response(
+
+        let res = match (method, path) {
+            ("GET", "/" | "/index.html" | "/viewer.html") => {
+                let html = viewer_path
+                    .as_ref()
+                    .and_then(|p| fs::read(p).ok())
+                    .unwrap_or_else(|| DEFAULT_VIEWER_HTML.as_bytes().to_vec());
+                write_http_response(&mut stream, 200, "text/html; charset=utf-8", &[], &html, keep_alive)
+            }
+            ("GET", "/favicon.ico" | "/ultradesk-rust.png" | "/ultraviewer-linux.png") => {
+                write_http_response(&mut stream, 200, "image/png", &[], DEFAULT_APP_ICON_PNG, keep_alive)
+            }
+            ("GET", "/status" | "/state") => {
+                let state = session.snapshot();
+                let val = serde_json::to_value(state).unwrap_or_else(|_| json!({}));
+                write_json_response(&mut stream, 200, &val, keep_alive)
+            }
+            ("GET", "/frame.png") => {
+                let not_modified = query
+                    .get("v")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|v| v == session.frame_version())
+                    .unwrap_or(false);
+                if not_modified {
+                    let v_str = session.frame_version().to_string();
+                    write_http_response(
                         &mut stream,
                         304,
                         "image/png",
                         &[("X-Frame-Version", &v_str)],
                         &[],
-                    );
-                }
-            }
-            match session.png_frame_versioned() {
-                Ok((ver, png)) => {
-                    let v_str = ver.to_string();
-                    write_http_response(
-                        &mut stream,
-                        200,
-                        "image/png",
-                        &[("X-Frame-Version", &v_str)],
-                        &png,
+                        keep_alive,
                     )
+                } else {
+                    match session.png_frame_versioned() {
+                        Ok((ver, png)) => {
+                            let v_str = ver.to_string();
+                            write_http_response(
+                                &mut stream,
+                                200,
+                                "image/png",
+                                &[("X-Frame-Version", &v_str)],
+                                &png,
+                                keep_alive,
+                            )
+                        }
+                        Err(e) => write_json_response(
+                            &mut stream,
+                            500,
+                            &json!({ "ok": false, "error": e }),
+                            keep_alive,
+                        ),
+                    }
                 }
-                Err(e) => write_json_response(&mut stream, 500, &json!({ "ok": false, "error": e })),
             }
-        }
-        ("GET", "/frame.jpg") => {
-            let quality = query
-                .get("q")
-                .and_then(|s| s.parse::<u8>().ok())
-                .unwrap_or(80);
-            if let Some(v_req) = query.get("v").and_then(|s| s.parse::<u64>().ok()) {
-                let cur_v = session.frame_version();
-                if v_req == cur_v {
-                    let v_str = cur_v.to_string();
-                    return write_http_response(
+            ("GET", "/frame.jpg") => {
+                let quality = query
+                    .get("q")
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(80);
+                let not_modified = query
+                    .get("v")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|v| v == session.frame_version())
+                    .unwrap_or(false);
+                if not_modified {
+                    let v_str = session.frame_version().to_string();
+                    write_http_response(
                         &mut stream,
                         304,
                         "image/jpeg",
                         &[("X-Frame-Version", &v_str)],
                         &[],
-                    );
-                }
-            }
-            match session.jpeg_frame_versioned(quality) {
-                Ok((ver, jpg)) => {
-                    let v_str = ver.to_string();
-                    write_http_response(
-                        &mut stream,
-                        200,
-                        "image/jpeg",
-                        &[("X-Frame-Version", &v_str)],
-                        &jpg,
+                        keep_alive,
                     )
+                } else {
+                    match session.jpeg_frame_versioned(quality) {
+                        Ok((ver, jpg)) => {
+                            let v_str = ver.to_string();
+                            write_http_response(
+                                &mut stream,
+                                200,
+                                "image/jpeg",
+                                &[("X-Frame-Version", &v_str)],
+                                &jpg,
+                                keep_alive,
+                            )
+                        }
+                        Err(e) => write_json_response(
+                            &mut stream,
+                            500,
+                            &json!({ "ok": false, "error": e }),
+                            keep_alive,
+                        ),
+                    }
                 }
-                Err(e) => write_json_response(&mut stream, 500, &json!({ "ok": false, "error": e })),
             }
-        }
-        ("GET", "/frame.bmp") => {
-            if let Some(v_req) = query.get("v").and_then(|s| s.parse::<u64>().ok()) {
-                let cur_v = session.frame_version();
-                if v_req == cur_v {
-                    let v_str = cur_v.to_string();
-                    return write_http_response(
+            ("GET", "/frame.bmp") => {
+                let not_modified = query
+                    .get("v")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|v| v == session.frame_version())
+                    .unwrap_or(false);
+                if not_modified {
+                    let v_str = session.frame_version().to_string();
+                    write_http_response(
                         &mut stream,
                         304,
                         "image/bmp",
                         &[("X-Frame-Version", &v_str)],
                         &[],
-                    );
+                        keep_alive,
+                    )
+                } else {
+                    let (ver, bmp) = session.bmp_frame_versioned();
+                    let v_str = ver.to_string();
+                    write_http_response(
+                        &mut stream,
+                        200,
+                        "image/bmp",
+                        &[("X-Frame-Version", &v_str)],
+                        &bmp,
+                        keep_alive,
+                    )
                 }
             }
-            let (ver, bmp) = session.bmp_frame_versioned();
-            let v_str = ver.to_string();
-            write_http_response(
-                &mut stream,
-                200,
-                "image/bmp",
-                &[("X-Frame-Version", &v_str)],
-                &bmp,
-            )
-        }
-        ("GET", "/audio.wav" | "/audio/stream.wav") => {
-            let after_seq = query
-                .get("after")
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0);
-            let (latest_seq, wav) = session.audio_wav_since(after_seq);
-            let seq_str = latest_seq.to_string();
-            write_http_response(
-                &mut stream,
-                200,
-                "audio/wav",
-                &[("X-Audio-Seq", &seq_str)],
-                &wav,
-            )
-        }
-        ("GET", "/clipboard") => {
-            let snap = session.snapshot();
-            write_json_response(
-                &mut stream,
-                200,
-                &json!({
-                    "ok": true,
-                    "local_text": snap.clipboard_local,
-                    "remote_text": snap.clipboard_remote,
-                    "updates_sent": snap.clipboard_updates_sent,
-                    "updates_received": snap.clipboard_updates_received
-                }),
-            )
-        }
-        ("GET", "/files") => {
-            let snap = session.snapshot();
-            write_json_response(
-                &mut stream,
-                200,
-                &json!({
-                    "ok": true,
-                    "transfers": snap.file_transfers,
-                    "chat_messages": snap.chat_messages
-                }),
-            )
-        }
-        ("GET", "/files/download") => {
-            let file_id = query.get("file_id").cloned().unwrap_or_default();
-            if let Some((name, bytes)) = session.downloaded_file_bytes(&file_id) {
-                let disp = format!("attachment; filename=\"{}\"", name.replace('"', ""));
+            ("GET", "/audio.wav" | "/audio/stream.wav") => {
+                let after_seq = query
+                    .get("after")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let (latest_seq, wav) = session.audio_wav_since(after_seq);
+                let seq_str = latest_seq.to_string();
                 write_http_response(
                     &mut stream,
                     200,
-                    "application/octet-stream",
-                    &[("Content-Disposition", &disp)],
-                    &bytes,
+                    "audio/wav",
+                    &[("X-Audio-Seq", &seq_str)],
+                    &wav,
+                    keep_alive,
                 )
-            } else {
+            }
+            ("GET", "/clipboard") => {
+                let snap = session.snapshot();
                 write_json_response(
                     &mut stream,
-                    404,
-                    &json!({ "ok": false, "error": "File transfer not found" }),
+                    200,
+                    &json!({
+                        "ok": true,
+                        "local_text": snap.clipboard_local,
+                        "remote_text": snap.clipboard_remote,
+                        "updates_sent": snap.clipboard_updates_sent,
+                        "updates_received": snap.clipboard_updates_received
+                    }),
+                    keep_alive,
                 )
             }
-        }
-        ("POST", "/connect") => {
-            let req: ConnectRequest = serde_json::from_slice(&body).unwrap_or_default();
-            let pid = if !req.id.trim().is_empty() {
-                &req.id
-            } else {
-                &req.partner_id
-            };
-            let pwd = if !req.pass.trim().is_empty() {
-                &req.pass
-            } else {
-                &req.password
-            };
-            match session.start_connect_with_remember(pid, pwd, req.remember) {
-                Ok(state) => write_json_response(
+            ("GET", "/files") => {
+                let snap = session.snapshot();
+                write_json_response(
                     &mut stream,
                     200,
-                    &json!({ "ok": true, "state": state }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
-                }
+                    &json!({
+                        "ok": true,
+                        "transfers": snap.file_transfers,
+                        "chat_messages": snap.chat_messages
+                    }),
+                    keep_alive,
+                )
             }
-        }
-        ("GET", "/credentials") => {
-            let snap = session.snapshot();
-            write_json_response(
-                &mut stream,
-                200,
-                &json!({
-                    "ok": true,
-                    "partner_id": snap.saved_partner_id,
-                    "password": snap.saved_password,
-                    "remember": snap.remember_credentials,
-                    "saved_remotes": snap.saved_remotes,
-                    "theme": snap.saved_theme,
-                    "language": snap.saved_language,
-                    "toolbar_collapsed": snap.saved_toolbar_collapsed,
-                }),
-            )
-        }
-        ("POST", "/credentials") => {
-            let req: ConnectRequest = serde_json::from_slice(&body).unwrap_or_default();
-            let pid = if !req.id.trim().is_empty() {
-                &req.id
-            } else {
-                &req.partner_id
-            };
-            let pwd = if !req.pass.trim().is_empty() {
-                &req.pass
-            } else {
-                &req.password
-            };
-            let _ = session.update_saved_credentials(pid, pwd, req.remember);
-            write_json_response(
-                &mut stream,
-                200,
-                &json!({ "ok": true, "state": session.snapshot() }),
-            )
-        }
-        ("POST", "/preferences") => {
-            let req: PreferencesRequest = match serde_json::from_slice(&body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return write_json_response(
+            ("GET", "/files/download") => {
+                let file_id = query.get("file_id").cloned().unwrap_or_default();
+                if let Some((name, bytes)) = session.downloaded_file_bytes(&file_id) {
+                    let disp = format!("attachment; filename=\"{}\"", name.replace('"', ""));
+                    write_http_response(
                         &mut stream,
-                        400,
-                        &json!({ "ok": false, "error": format!("Invalid preferences JSON: {}", e) }),
-                    );
-                }
-            };
-            match session.update_ui_preferences(
-                req.theme.as_deref(),
-                req.language.as_deref(),
-                req.toolbar_collapsed,
-            ) {
-                Ok(()) => write_json_response(
-                    &mut stream,
-                    200,
-                    &json!({ "ok": true, "state": session.snapshot() }),
-                ),
-                Err(e) => write_json_response(
-                    &mut stream,
-                    400,
-                    &json!({ "ok": false, "error": e }),
-                ),
-            }
-        }
-        ("POST", "/disconnect") => {
-            session.disconnect();
-            write_json_response(
-                &mut stream,
-                200,
-                &json!({ "ok": true, "state": session.snapshot() }),
-            )
-        }
-        ("POST", "/event" | "/input") => {
-            let evt: InputEvent = match serde_json::from_slice(&body) {
-                Ok(v) => v,
-                Err(e) => {
-                    return write_json_response(
+                        200,
+                        "application/octet-stream",
+                        &[("Content-Disposition", &disp)],
+                        &bytes,
+                        keep_alive,
+                    )
+                } else {
+                    write_json_response(
                         &mut stream,
-                        400,
-                        &json!({ "ok": false, "error": format!("Invalid input JSON: {}", e) }),
+                        404,
+                        &json!({ "ok": false, "error": "File transfer not found" }),
+                        keep_alive,
                     )
                 }
-            };
-            match session.send_input(evt) {
-                Ok(wire) => write_json_response(
-                    &mut stream,
-                    200,
-                    &json!({ "ok": true, "bytes_sent": wire.len() }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
-                }
             }
-        }
-        ("POST", "/audio/toggle") => {
-            let req: AudioToggleRequest = serde_json::from_slice(&body).unwrap_or_default();
-            match session.toggle_remote_sound(req.enable) {
-                Ok(wire) => write_json_response(
-                    &mut stream,
-                    200,
-                    &json!({
-                        "ok": true,
-                        "audio_enabled": req.enable,
-                        "bytes_sent": wire.len(),
-                        "state": session.snapshot()
-                    }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
-                }
-            }
-        }
-        ("POST", "/clipboard") => {
-            let req: ClipboardUpdateRequest = serde_json::from_slice(&body).unwrap_or_default();
-            let res = if req.sync_from_system {
-                session
-                    .sync_from_system_clipboard()
-                    .map(|t| (t, true))
-            } else {
-                session
-                    .send_clipboard(&req.text, true)
-                    .map(|_| (req.text.clone(), false))
-            };
-            match res {
-                Ok((text, from_sys)) => write_json_response(
-                    &mut stream,
-                    200,
-                    &json!({
-                        "ok": true,
-                        "text": text,
-                        "synced_from_system": from_sys,
-                        "state": session.snapshot()
-                    }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
-                }
-            }
-        }
-        ("POST", "/files/send") => {
-            let req: FileSendRequest = serde_json::from_slice(&body).unwrap_or_default();
-            let result = if !req.file_path.trim().is_empty() {
-                session.offer_file_from_path(Path::new(req.file_path.trim()))
-            } else {
-                match decode_base64(&req.data_base64) {
-                    Ok(bytes) => {
-                        let name = if req.file_name.trim().is_empty() {
-                            "upload.bin"
-                        } else {
-                            req.file_name.trim()
-                        };
-                        session.offer_file_bytes(name, bytes)
+            ("POST", "/connect") => {
+                let req: ConnectRequest = serde_json::from_slice(&body).unwrap_or_default();
+                let pid = if !req.id.trim().is_empty() {
+                    &req.id
+                } else {
+                    &req.partner_id
+                };
+                let pwd = if !req.pass.trim().is_empty() {
+                    &req.pass
+                } else {
+                    &req.password
+                };
+                match session.start_connect_with_remember(pid, pwd, req.remember) {
+                    Ok(state) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "state": state }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
                     }
-                    Err(e) => Err(e),
                 }
-            };
-            match result {
-                Ok(file_id) => write_json_response(
+            }
+            ("GET", "/credentials") => {
+                let snap = session.snapshot();
+                write_json_response(
                     &mut stream,
                     200,
                     &json!({
                         "ok": true,
-                        "file_id": file_id,
-                        "state": session.snapshot()
+                        "partner_id": snap.saved_partner_id,
+                        "password": snap.saved_password,
+                        "remember": snap.remember_credentials,
+                        "saved_remotes": snap.saved_remotes,
+                        "theme": snap.saved_theme,
+                        "language": snap.saved_language,
+                        "toolbar_collapsed": snap.saved_toolbar_collapsed,
                     }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
-                }
+                    keep_alive,
+                )
             }
-        }
-        ("POST", "/files/accept") => {
-            let req: FileActionRequest = serde_json::from_slice(&body).unwrap_or_default();
-            match session.accept_file(&req.file_id) {
-                Ok(_) => write_json_response(
+            ("POST", "/credentials") => {
+                let req: ConnectRequest = serde_json::from_slice(&body).unwrap_or_default();
+                let pid = if !req.id.trim().is_empty() {
+                    &req.id
+                } else {
+                    &req.partner_id
+                };
+                let pwd = if !req.pass.trim().is_empty() {
+                    &req.pass
+                } else {
+                    &req.password
+                };
+                let _ = session.update_saved_credentials(pid, pwd, req.remember);
+                write_json_response(
                     &mut stream,
                     200,
                     &json!({ "ok": true, "state": session.snapshot() }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                    keep_alive,
+                )
+            }
+            ("POST", "/preferences") => {
+                let req: PreferencesRequest = match serde_json::from_slice(&body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        write_json_response(
+                            &mut stream,
+                            400,
+                            &json!({ "ok": false, "error": format!("Invalid preferences JSON: {}", e) }),
+                            keep_alive,
+                        )?;
+                        if !keep_alive {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                match session.update_ui_preferences(
+                    req.theme.as_deref(),
+                    req.language.as_deref(),
+                    req.toolbar_collapsed,
+                ) {
+                    Ok(()) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "state": session.snapshot() }),
+                        keep_alive,
+                    ),
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
-        }
-        ("POST", "/files/cancel") => {
-            let req: FileActionRequest = serde_json::from_slice(&body).unwrap_or_default();
-            match session.cancel_file(&req.file_id) {
-                Ok(_) => write_json_response(
+            ("POST", "/disconnect") => {
+                session.disconnect();
+                write_json_response(
                     &mut stream,
                     200,
                     &json!({ "ok": true, "state": session.snapshot() }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                    keep_alive,
+                )
+            }
+            ("POST", "/event" | "/input") => {
+                let evt: InputEvent = match serde_json::from_slice(&body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        write_json_response(
+                            &mut stream,
+                            400,
+                            &json!({ "ok": false, "error": format!("Invalid input JSON: {}", e) }),
+                            keep_alive,
+                        )?;
+                        if !keep_alive {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                match session.send_input(evt) {
+                    Ok(wire) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "bytes_sent": wire.len() }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
                 }
             }
-        }
-        ("POST", "/chat") => {
-            let req: ChatSendRequest = serde_json::from_slice(&body).unwrap_or_default();
-            match session.send_chat(&req.text) {
-                Ok(_) => write_json_response(
+            ("POST", "/audio/toggle") => {
+                let req: AudioToggleRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.toggle_remote_sound(req.enable) {
+                    Ok(wire) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({
+                            "ok": true,
+                            "audio_enabled": req.enable,
+                            "bytes_sent": wire.len(),
+                            "state": session.snapshot()
+                        }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
+                }
+            }
+            ("POST", "/clipboard") => {
+                let req: ClipboardUpdateRequest = serde_json::from_slice(&body).unwrap_or_default();
+                let res = if req.sync_from_system {
+                    session
+                        .sync_from_system_clipboard()
+                        .map(|t| (t, true))
+                } else {
+                    session
+                        .send_clipboard(&req.text, true)
+                        .map(|_| (req.text.clone(), false))
+                };
+                match res {
+                    Ok((text, from_sys)) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({
+                            "ok": true,
+                            "text": text,
+                            "synced_from_system": from_sys,
+                            "state": session.snapshot()
+                        }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
+                }
+            }
+            ("POST", "/files/send") => {
+                let req: FileSendRequest = serde_json::from_slice(&body).unwrap_or_default();
+                let result = if !req.file_path.trim().is_empty() {
+                    session.offer_file_from_path(Path::new(req.file_path.trim()))
+                } else {
+                    match decode_base64(&req.data_base64) {
+                        Ok(bytes) => {
+                            let name = if req.file_name.trim().is_empty() {
+                                "upload.bin"
+                            } else {
+                                req.file_name.trim()
+                            };
+                            session.offer_file_bytes(name, bytes)
+                        }
+                        Err(e) => Err(e),
+                    }
+                };
+                match result {
+                    Ok(file_id) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({
+                            "ok": true,
+                            "file_id": file_id,
+                            "state": session.snapshot()
+                        }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
+                }
+            }
+            ("POST", "/files/accept") => {
+                let req: FileActionRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.accept_file(&req.file_id) {
+                    Ok(_) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "state": session.snapshot() }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
+                }
+            }
+            ("POST", "/files/cancel") => {
+                let req: FileActionRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.cancel_file(&req.file_id) {
+                    Ok(_) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "state": session.snapshot() }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
+                }
+            }
+            ("POST", "/chat") => {
+                let req: ChatSendRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.send_chat(&req.text) {
+                    Ok(_) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "state": session.snapshot() }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
+                }
+            }
+            ("POST", "/monitor") => {
+                let req: MonitorSelectRequest = serde_json::from_slice(&body).unwrap_or_default();
+                let state = if let Some(ref indices) = req.indices {
+                    session.select_monitors(Some(indices.as_slice()))
+                } else {
+                    session.select_monitor(req.index)
+                };
+                write_json_response(&mut stream, 200, &json!({ "ok": true, "state": state }), keep_alive)
+            }
+            ("POST", "/host/monitor") => {
+                let req: MonitorSelectRequest = serde_json::from_slice(&body).unwrap_or_default();
+                let host = session.host_select_monitors(req.index, req.indices.as_deref());
+                write_json_response(
                     &mut stream,
                     200,
-                    &json!({ "ok": true, "state": session.snapshot() }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+                    &json!({ "ok": true, "host": host, "state": session.snapshot() }),
+                    keep_alive,
+                )
+            }
+            ("POST", "/text") => {
+                let req: TextSendRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.send_text(&req.text, req.caps_lock) {
+                    Ok(packets_sent) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({
+                            "ok": true,
+                            "packets_sent": packets_sent,
+                            "state": session.snapshot()
+                        }),
+                        keep_alive,
+                    ),
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
                 }
             }
-        }
-        ("POST", "/monitor") => {
-            let req: MonitorSelectRequest = serde_json::from_slice(&body).unwrap_or_default();
-            let state = if let Some(ref indices) = req.indices {
-                session.select_monitors(Some(indices.as_slice()))
-            } else {
-                session.select_monitor(req.index)
-            };
-            write_json_response(&mut stream, 200, &json!({ "ok": true, "state": state }))
-        }
-        ("POST", "/host/monitor") => {
-            let req: MonitorSelectRequest = serde_json::from_slice(&body).unwrap_or_default();
-            let host = session.host_select_monitors(req.index, req.indices.as_deref());
-            write_json_response(
-                &mut stream,
-                200,
-                &json!({ "ok": true, "host": host, "state": session.snapshot() }),
-            )
-        }
-        ("POST", "/text") => {
-            let req: TextSendRequest = serde_json::from_slice(&body).unwrap_or_default();
-            match session.send_text(&req.text, req.caps_lock) {
-                Ok(packets_sent) => write_json_response(
-                    &mut stream,
-                    200,
-                    &json!({
-                        "ok": true,
-                        "packets_sent": packets_sent,
-                        "state": session.snapshot()
-                    }),
-                ),
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+            ("GET", "/host/status") => {
+                let host = session.host_status();
+                write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+            }
+            ("POST", "/host/start") => {
+                let host = session.host_start();
+                write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+            }
+            ("POST", "/host/stop") => {
+                let host = session.host_stop();
+                write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+            }
+            ("POST", "/host/approve") => {
+                let req: HostControlRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.host_approve(req.allow_control) {
+                    Ok(host) => {
+                        write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+                    }
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
                 }
             }
-        }
-        ("GET", "/host/status") => {
-            let host = session.host_status();
-            write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
-        }
-        ("POST", "/host/start") => {
-            let host = session.host_start();
-            write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
-        }
-        ("POST", "/host/stop") => {
-            let host = session.host_stop();
-            write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
-        }
-        ("POST", "/host/approve") => {
-            let req: HostControlRequest = serde_json::from_slice(&body).unwrap_or_default();
-            match session.host_approve(req.allow_control) {
-                Ok(host) => {
-                    write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
-                }
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+            ("POST", "/host/decline") => match session.host_decline() {
+                Ok(host) => write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive),
+                Err(e) => write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive),
+            },
+            ("POST", "/host/control") => {
+                let req: HostControlRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.host_set_control(req.allow_control) {
+                    Ok(host) => {
+                        write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+                    }
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
                 }
             }
-        }
-        ("POST", "/host/decline") => match session.host_decline() {
-            Ok(host) => write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host })),
-            Err(e) => write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e })),
-        },
-        ("POST", "/host/control") => {
-            let req: HostControlRequest = serde_json::from_slice(&body).unwrap_or_default();
-            match session.host_set_control(req.allow_control) {
-                Ok(host) => {
-                    write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
-                }
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
+            ("POST", "/host/master-password") => {
+                let req: MasterPasswordRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.host_set_master_password(req.password.as_deref()) {
+                    Ok(host) => {
+                        write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+                    }
+                    Err(e) => {
+                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
+                    }
                 }
             }
+            _ => write_json_response(&mut stream, 404, &json!({ "error": "Not found" }), keep_alive),
+        };
+
+        if res.is_err() || !keep_alive {
+            break;
         }
-        ("POST", "/host/master-password") => {
-            let req: MasterPasswordRequest = serde_json::from_slice(&body).unwrap_or_default();
-            match session.host_set_master_password(req.password.as_deref()) {
-                Ok(host) => {
-                    write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }))
-                }
-                Err(e) => {
-                    write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }))
-                }
-            }
-        }
-        _ => write_json_response(&mut stream, 404, &json!({ "error": "Not found" })),
     }
+    Ok(())
 }

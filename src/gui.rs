@@ -221,6 +221,8 @@ pub enum ToolbarAction {
     ToggleFullscreen,
     CopyHostId,
     QuitApplication,
+    #[serde(rename = "input", alias = "Input")]
+    Input(crate::input::InputEvent),
 }
 
 #[derive(Debug, Clone)]
@@ -511,6 +513,14 @@ fn run_native_gui_inner(
                                 control_flow,
                                 true,
                             );
+                        } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&msg) {
+                            if val.get("action").and_then(|a| a.as_str()) == Some("input") {
+                                if let Some(event_val) = val.get("payload").or_else(|| val.get("event")) {
+                                    if let Ok(event) = serde_json::from_value::<crate::input::InputEvent>(event_val.clone()) {
+                                        let _ = session.send_input(event);
+                                    }
+                                }
+                            }
                         }
                     }
                     UserEvent::MenuEvent(menu_event) => {
@@ -556,6 +566,9 @@ fn dispatch_toolbar_action(
         }
         ToolbarAction::QuitApplication => {
             *control_flow = tao::event_loop::ControlFlow::Exit;
+        }
+        ToolbarAction::Input(ref event) => {
+            let _ = session.send_input(event.clone());
         }
         ref act => {
             match act {
