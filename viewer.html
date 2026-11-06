@@ -157,15 +157,19 @@
   margin: 0;
   padding: 0;
 }
-body {
+html, body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
   font-size: 13px;
   width: 100vw;
   height: 100vh;
+  margin: 0;
+  padding: 0;
   overflow: hidden;
-   position: relative;
+  display: flex;
+  flex-direction: column;
+  position: relative;
   user-select: none;
 }
 .svg-icon {
@@ -179,49 +183,72 @@ body {
   flex-shrink: 0;
 }
 .canvas-stage {
-  width: 100vw;
-  height: 100vh;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  height: auto;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--stage-bg);
   overflow: hidden;
+  position: relative;
 }
 canvas#screen {
   display: block;
-  max-width: 100vw;
-  max-height: 100vh;
+  max-width: 100%;
+  max-height: 100%;
   width: 100%;
   height: 100%;
   object-fit: contain;
   outline: none;
   background: var(--stage-bg);
 }
-.top-pill {
-  position: fixed;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 30;
-  background: var(--pill-bg);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  padding: 5px 8px;
+.top-pill,
+.top-pill.menu-toolbar {
+  width: 100%;
+  height: 40px;
+  min-height: 40px;
+  max-height: 40px;
+  box-sizing: border-box;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid var(--border-strong);
+  padding: 0 12px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  box-shadow: var(--pill-shadow);
+  justify-content: space-between;
+  position: relative;
+  top: 0;
+  left: 0;
+  transform: none;
+  background: var(--surface);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  z-index: 30;
+  transition: height 0.15s ease, min-height 0.15s ease, padding 0.15s ease;
 }
 .top-pill.dragging {
   user-select: none;
   border-color: var(--primary);
 }
-.top-pill.collapsed {
-  padding: 3px 6px;
-  gap: 2px;
+.top-pill.collapsed,
+.top-pill.menu-toolbar.collapsed {
+  height: 0;
+  min-height: 0;
+  max-height: 0;
+  padding: 0;
+  border-bottom: none;
+  overflow: visible;
 }
 .pill-expanded-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+.toolbar-cluster {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -234,7 +261,8 @@ canvas#screen {
   color: var(--primary);
   padding: 0 4px;
 }
-.top-pill.collapsed .pill-expanded-content {
+.top-pill.collapsed .pill-expanded-content,
+.top-pill.menu-toolbar.collapsed .pill-expanded-content {
   display: none;
 }
 .pill-drag-handle {
@@ -242,12 +270,38 @@ canvas#screen {
   color: var(--text-dim);
   border: none;
   padding: 5px 6px;
-  border-radius: 999px;
-  cursor: grab;
+  border-radius: 4px;
+  cursor: default;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   touch-action: none;
+}
+.top-pill.collapsed .pill-drag-handle,
+.top-pill.menu-toolbar.collapsed .pill-drag-handle {
+  display: none !important;
+}
+.top-pill.collapsed #btnRestorePill,
+.top-pill.menu-toolbar.collapsed #btnRestorePill {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  border-radius: 0 0 8px 8px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  border: 1px solid var(--border-strong);
+  border-top: none;
+  background: var(--surface-variant);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+.top-pill:not(.collapsed) #btnRestorePill,
+.top-pill.menu-toolbar:not(.collapsed) #btnRestorePill {
+  display: none;
 }
 .pill-drag-handle:hover {
   color: var(--text);
@@ -722,58 +776,67 @@ a.dl-link:hover {
 </style>
 </head>
 <body>
-<div id="topPill" class="top-pill">
-  <button id="pillDragHandle" class="pill-drag-handle" type="button" data-i18n-title="drag_pill_title" title="Kéo để di chuyển thanh điều khiển (nhấp đúp để đặt lại)">
+<header id="topPill" class="top-pill menu-toolbar" role="menubar">
+  <button id="pillDragHandle" class="pill-drag-handle" type="button" data-i18n-title="drag_pill_title" title="UltraDesk Toolbar">
     <svg class="svg-icon" viewBox="0 0 24 24"><circle cx="9" cy="5" r="1" fill="currentColor"/><circle cx="9" cy="12" r="1" fill="currentColor"/><circle cx="9" cy="19" r="1" fill="currentColor"/><circle cx="15" cy="5" r="1" fill="currentColor"/><circle cx="15" cy="12" r="1" fill="currentColor"/><circle cx="15" cy="19" r="1" fill="currentColor"/></svg>
   </button>
   <div id="pillExpandedContent" class="pill-expanded-content">
-    <span class="pill-brand">ULTRADESK</span>
-    <button id="btnToggleConnect" class="pill-btn active" type="button">
-      <svg class="svg-icon" viewBox="0 0 24 24"><path d="M9 12l2 2l4 -4"/><path d="M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3"/></svg>
-      <span data-i18n="nav_connect">Kết nối</span>
-    </button>
-    <span id="status" class="status-badge">Chưa kết nối</span>
-    <div class="pill-sep"></div>
-    <div id="monitorQuickBar" class="monitor-quick-bar"></div>
-    <select id="monitorSelect" class="pill-select" data-i18n-title="monitor_title" title="Chọn màn hình đối tác">
-      <option value="">Tất cả màn hình</option>
-    </select>
-    <button id="btnWinKey" class="pill-btn" type="button" data-i18n-title="win_key_title" title="Mở Start Menu trên máy đối tác (VK_LWIN)">
-      <svg class="svg-icon" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
-      <span>Super</span>
-    </button>
-    <button id="btnToggleTools" class="pill-btn" type="button">
-      <svg class="svg-icon" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h12"/></svg>
-      <span data-i18n="nav_tools">Công cụ</span>
-    </button>
-    <div class="pill-sep"></div>
-    <button id="btnCycleTheme" class="pill-btn" type="button" data-i18n-title="btn_theme_title" title="Bấm để đổi giao diện (Shift+Click: đổi nhanh Sáng/Tối)">
-      <svg id="themeBtnIcon" class="svg-icon" viewBox="0 0 24 24"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg>
-      <span id="themeBtnLabel">Auto</span>
-    </button>
-    <select id="themeSelect" class="pill-select" data-i18n-title="theme_title" title="Giao diện màu sắc (Tự động theo giờ hệ thống)">
-      <option value="auto-time" data-i18n="theme_auto_time">Auto (Theo giờ)</option>
-      <option value="auto-os" data-i18n="theme_auto_os">Auto (Hệ điều hành)</option>
-      <option value="onedark" data-i18n="theme_onedark">One Dark Pro</option>
-      <option value="onelight" data-i18n="theme_onelight">One Light</option>
-      <option value="vscode-dark" data-i18n="theme_vscode_dark">VS Code Dark+</option>
-      <option value="vscode-light" data-i18n="theme_vscode_light">VS Code Light+</option>
-      <option value="gruvbox-dark" data-i18n="theme_gruvbox_dark">Gruvbox Dark</option>
-      <option value="gruvbox-light" data-i18n="theme_gruvbox_light">Gruvbox Light</option>
-    </select>
-    <div class="lang-switch">
-      <button id="btnLangVi" class="lang-btn active" type="button">VI</button>
-      <button id="btnLangEn" class="lang-btn" type="button">EN</button>
+    <div class="toolbar-cluster left-cluster">
+      <span class="pill-brand">ULTRADESK</span>
+      <button id="btnToggleConnect" class="pill-btn active" type="button">
+        <svg class="svg-icon" viewBox="0 0 24 24"><path d="M9 12l2 2l4 -4"/><path d="M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3"/></svg>
+        <span data-i18n="nav_connect">Kết nối</span>
+      </button>
+      <span id="status" class="status-badge">Chưa kết nối</span>
     </div>
-    <button id="btnCollapsePill" class="pill-btn" type="button" style="padding:5px 7px" data-i18n-title="hide_pill_title" title="Ẩn thanh điều khiển">
-      <svg class="svg-icon" viewBox="0 0 24 24"><path d="M6 15l6 -6l6 6"/></svg>
-    </button>
+    <div class="pill-sep"></div>
+    <div class="toolbar-cluster center-cluster">
+      <div id="monitorQuickBar" class="monitor-quick-bar"></div>
+      <select id="monitorSelect" class="pill-select" data-i18n-title="monitor_title" title="Chọn màn hình đối tác">
+        <option value="">Tất cả màn hình</option>
+      </select>
+      <button id="btnWinKey" class="pill-btn" type="button" data-i18n-title="win_key_title" title="Mở Start Menu trên máy đối tác (VK_LWIN)">
+        <svg class="svg-icon" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
+        <span>Super</span>
+      </button>
+      <button id="btnToggleTools" class="pill-btn" type="button">
+        <svg class="svg-icon" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h12"/></svg>
+        <span data-i18n="nav_tools">Công cụ</span>
+      </button>
+    </div>
+    <div class="pill-sep"></div>
+    <div class="toolbar-cluster right-cluster">
+      <button id="btnCycleTheme" class="pill-btn" type="button" data-i18n-title="btn_theme_title" title="Bấm để đổi giao diện (Shift+Click: đổi nhanh Sáng/Tối)">
+        <svg id="themeBtnIcon" class="svg-icon" viewBox="0 0 24 24"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/></svg>
+        <span id="themeBtnLabel">Auto</span>
+      </button>
+      <select id="themeSelect" class="pill-select" data-i18n-title="theme_title" title="Giao diện màu sắc (Tự động theo giờ hệ thống)">
+        <option value="auto-time" data-i18n="theme_auto_time">Auto (Theo giờ)</option>
+        <option value="auto-os" data-i18n="theme_auto_os">Auto (Hệ điều hành)</option>
+        <option value="onedark" data-i18n="theme_onedark">One Dark Pro</option>
+        <option value="onelight" data-i18n="theme_onelight">One Light</option>
+        <option value="vscode-dark" data-i18n="theme_vscode_dark">VS Code Dark+</option>
+        <option value="vscode-light" data-i18n="theme_vscode_light">VS Code Light+</option>
+        <option value="gruvbox-dark" data-i18n="theme_gruvbox_dark">Gruvbox Dark</option>
+        <option value="gruvbox-light" data-i18n="theme_gruvbox_light">Gruvbox Light</option>
+      </select>
+      <div class="lang-switch">
+        <button id="btnLangVi" class="lang-btn active" type="button">VI</button>
+        <button id="btnLangEn" class="lang-btn" type="button">EN</button>
+      </div>
+      <button id="btnFullscreen" class="pill-btn" type="button" data-i18n-title="fullscreen_title" title="Toàn màn hình">
+        <svg class="svg-icon" viewBox="0 0 24 24"><path d="M4 8v-4h4"/><path d="M16 4h4v4"/><path d="M4 16v4h4"/><path d="M16 20h4v-4"/></svg>
+      </button>
+      <button id="btnCollapsePill" class="pill-btn" type="button" style="padding:5px 7px" data-i18n-title="hide_pill_title" title="Ẩn thanh điều khiển">
+        <svg class="svg-icon" viewBox="0 0 24 24"><path d="M6 15l6 -6l6 6"/></svg>
+      </button>
+    </div>
   </div>
   <button id="btnRestorePill" class="pill-restore-tab" type="button" data-i18n-title="show_pill_title" title="Hiện thanh điều khiển">
     <span id="restoreStatusDot" class="restore-dot"></span>
     <svg class="svg-icon" viewBox="0 0 24 24"><path d="M6 9l6 6l6 -6"/></svg>
   </button>
-</div>
+</header>
 
 <div class="canvas-stage">
   <canvas tabindex="0" id="screen" width="1280" height="720"></canvas>
@@ -1014,7 +1077,8 @@ const I18N={
     idle_hint:'Chưa có luồng hình ảnh từ xa',
     hide_pill_title:'Ẩn thanh điều khiển',
     show_pill_title:'Hiện thanh điều khiển',
-    drag_pill_title:'Kéo để di chuyển thanh điều khiển (nhấp đúp để đặt lại)',
+    drag_pill_title:'UltraDesk Toolbar',
+    fullscreen_title:'Toàn màn hình',
     theme_title:'Chọn giao diện (Tự động đổi Sáng/Tối theo giờ hệ thống 06:00-18:00)',
     btn_theme_title:'Bấm để chuyển đổi giao diện (Shift+Click: đổi nhanh Sáng/Tối)',
     theme_auto_time:'Auto (Theo giờ)',
@@ -1106,7 +1170,8 @@ const I18N={
     idle_hint:'No active remote video stream',
     hide_pill_title:'Hide control bar',
     show_pill_title:'Show control bar',
-    drag_pill_title:'Drag to move control bar (double-click to reset)',
+    drag_pill_title:'UltraDesk Toolbar',
+    fullscreen_title:'Fullscreen',
     theme_title:'Select theme (Auto switches Light/Dark by system time 06:00-18:00)',
     btn_theme_title:'Click to cycle theme (Shift+Click: toggle Light/Dark)',
     theme_auto_time:'Auto (System Time)',
@@ -1133,7 +1198,7 @@ const THEME_SHORT_LABELS = {
   'gruvbox-dark': 'Gruvbox',
   'gruvbox-light': 'GruvLight'
 };
-const uiState = { overlay: 'connect', toolTab: 'chat', lang: 'vi', themeMode: 'auto-time', activeTheme: 'onedark', pillCollapsed: false, pillPos: null, drag: null };
+const uiState = { overlay: 'connect', toolTab: 'chat', lang: 'vi', themeMode: 'auto-time', activeTheme: 'onedark', pillCollapsed: false };
 
 function resolveActiveTheme(mode, hourOverride = null) {
   if (mode === 'auto-time') {
@@ -1186,53 +1251,23 @@ function setToolTab(tab){
   positionToolsPopover();
 }
 
-function setPillPosition(pos,persist=true){
-  const topPill=document.querySelector('#topPill');
-  if(!topPill)return;
-  if(!pos||!Number.isFinite(Number(pos.x))||!Number.isFinite(Number(pos.y))){
-    uiState.pillPos=null;
-    if(persist){try{localStorage.removeItem('uv_pill_pos');}catch(_){}}
-    topPill.style.left='50%';
-    topPill.style.top='12px';
-    topPill.style.transform='translateX(-50%)';
-    return;
-  }
-  const r=topPill.getBoundingClientRect();
-  const w=r.width||(uiState.pillCollapsed?84:560);
-  const h=r.height||40;
-  const cx=Math.max(8,Math.min(window.innerWidth-w-8,Math.round(Number(pos.x))));
-  const cy=Math.max(8,Math.min(window.innerHeight-h-8,Math.round(Number(pos.y))));
-  uiState.pillPos={x:cx,y:cy};
-  topPill.style.left=cx+'px';
-  topPill.style.top=cy+'px';
-  topPill.style.transform='none';
-  if(persist){try{localStorage.setItem('uv_pill_pos',JSON.stringify(uiState.pillPos));}catch(_){}}
-}
-
 function positionToolsPopover(){
   const tp=document.querySelector('#toolsPopover');
-  const topPill=document.querySelector('#topPill');
-  if(!tp||!topPill)return;
-  if(uiState.pillPos===null){
-    tp.style.top='58px';
+  const btnTools=document.querySelector('#btnToggleTools');
+  if(!tp)return;
+  if(uiState.overlay!=='tools')return;
+  if(btnTools){
+    const tr=btnTools.getBoundingClientRect();
+    const popW=tp.offsetWidth||360;
+    tp.style.top=Math.max(4,tr.bottom+4)+'px';
+    const left=Math.max(8,Math.min(window.innerWidth-popW-8,tr.right-popW));
+    tp.style.left=left+'px';
+    tp.style.right='auto';
+  }else{
+    tp.style.top='44px';
     tp.style.right='16px';
     tp.style.left='auto';
-    return;
   }
-  if(uiState.overlay!=='tools')return;
-  const pr=topPill.getBoundingClientRect();
-  const pillW=pr.width||560;
-  const pillH=pr.height||40;
-  const tr=tp.getBoundingClientRect();
-  const popW=tr.width||360;
-  const popH=tr.height||260;
-  if(uiState.pillPos.y>window.innerHeight/2){
-    tp.style.top=Math.max(8,uiState.pillPos.y-popH-8)+'px';
-  }else{
-    tp.style.top=Math.min(window.innerHeight-popH-8,uiState.pillPos.y+pillH+8)+'px';
-  }
-  tp.style.right='auto';
-  tp.style.left=Math.max(8,Math.min(window.innerWidth-popW-8,uiState.pillPos.x+pillW-popW))+'px';
 }
 
 const screen=document.querySelector('#screen'),ctx=screen.getContext('2d'),held=new Set(),buttons=new Set();
@@ -1271,22 +1306,122 @@ function updateSavedRemotesDropdown(list,force=false){
   sel.innerHTML='<option value="">'+t('saved_remotes_opt',{count:list.length})+'</option>'+list.map(r=>`<option value="${r.partner_id}" ${r.partner_id===currentId?'selected':''}>${r.partner_id}</option>`).join('');
 }
 
+let dispatchingFromHost=false;
+
 function setPillCollapsed(collapsed){
   uiState.pillCollapsed=!!collapsed;
   try{localStorage.setItem('uv_pill_collapsed',uiState.pillCollapsed?'1':'0');}catch(_){}
   const topPill=document.querySelector('#topPill');
   if(topPill){
     topPill.classList.toggle('collapsed',uiState.pillCollapsed);
-    topPill.style.display='flex';
   }
   if(uiState.pillCollapsed){
     if(uiState.overlay!=='none')setOverlay('none');
     screen.focus();
   }
-  if(uiState.pillPos){
-    setPillPosition(uiState.pillPos,false);
+  if(!dispatchingFromHost && window.ipc && typeof window.ipc.postMessage==='function'){
+    window.ipc.postMessage(JSON.stringify({
+      action:'SetToolbarCollapsed',
+      payload:uiState.pillCollapsed
+    }));
   }
 }
+
+window.__ultradesk_dispatch_action=function(action,payload){
+  try{
+    dispatchingFromHost=true;
+    if(typeof action==='object'&&action!==null){
+      payload=action.payload;
+      action=action.action;
+    }
+    switch(action){
+      case 'ToggleConnectModal':
+        setOverlay(uiState.overlay==='connect'?'none':'connect');
+        break;
+      case 'DisconnectRemote':{
+        const dis=document.querySelector('#disconnect');
+        if(dis)dis.click();
+        break;
+      }
+      case 'StartHostSharing':{
+        const hs=document.querySelector('#btnHostStart');
+        if(hs)hs.click();
+        break;
+      }
+      case 'StopHostSharing':{
+        const hstop=document.querySelector('#btnHostStop');
+        if(hstop)hstop.click();
+        break;
+      }
+      case 'ToggleToolsPopover':
+        setOverlay(uiState.overlay==='tools'?'none':'tools');
+        break;
+      case 'SelectToolTab':
+        if(typeof payload==='string')setToolTab(payload);
+        break;
+      case 'SetTheme':
+        if(typeof payload==='string')setTheme(payload,true);
+        break;
+      case 'CycleTheme':
+        cycleTheme();
+        break;
+      case 'SetLanguage':
+        if(typeof payload==='string')setLanguage(payload);
+        break;
+      case 'SelectMonitor':{
+        const mSel=document.querySelector('#monitorSelect');
+        if(mSel){
+          mSel.value=payload===null||payload===undefined?'':String(payload);
+          post('/monitor',{monitor:payload}).catch(()=>{});
+        }
+        break;
+      }
+      case 'SendSpecialKey':
+        if(payload==='super'){
+          const wk=document.querySelector('#btnWinKey');
+          if(wk)wk.click();
+        }else if(payload==='ctrl_alt_del'){
+          screen.focus();
+          input({type:'key',vk:17,down:true});
+          input({type:'key',vk:18,down:true});
+          input({type:'key',vk:46,down:true});
+          setTimeout(()=>{
+            input({type:'key',vk:46,down:false});
+            input({type:'key',vk:18,down:false});
+            input({type:'key',vk:17,down:false});
+          },60);
+        }else if(payload==='f9_next_monitor'){
+          input({type:'key',vk:120,down:true});
+          setTimeout(()=>input({type:'key',vk:120,down:false}),60);
+        }
+        break;
+      case 'ToggleToolbarCollapse':
+        setPillCollapsed(!uiState.pillCollapsed);
+        break;
+      case 'SetToolbarCollapsed':
+        setPillCollapsed(Boolean(payload));
+        break;
+      case 'ToggleFullscreen':
+        if(!dispatchingFromHost && window.ipc && typeof window.ipc.postMessage==='function'){
+          window.ipc.postMessage(JSON.stringify({action:'ToggleFullscreen'}));
+        }else if(!window.ipc){
+          if(!document.fullscreenElement){
+            document.documentElement.requestFullscreen().catch(()=>{});
+          }else{
+            document.exitFullscreen().catch(()=>{});
+          }
+        }
+        break;
+      case 'CopyHostId':{
+        const cid=document.querySelector('#btnCopyHostId');
+        if(cid)cid.click();
+        break;
+      }
+    }
+  }finally{
+    dispatchingFromHost=false;
+  }
+};
 
 function renderStatusBadge(s){
   const stEl=document.querySelector('#status');
@@ -1330,6 +1465,12 @@ function setTheme(mode,persist=true,hourOverride=null){
     }
   }
   if(persist){try{localStorage.setItem('uv_theme',cleanMode);}catch(_){}}
+  if(!dispatchingFromHost && window.ipc && typeof window.ipc.postMessage==='function'){
+    window.ipc.postMessage(JSON.stringify({
+      action:'SetTheme',
+      payload:cleanMode
+    }));
+  }
   renderStatusBadge(lastState);
   drawIdleCanvas();
 }
@@ -1366,6 +1507,12 @@ function setLanguage(lang){
   renderStatusBadge(lastState);
   if(lastState)renderSidebar(lastState);
   else drawIdleCanvas();
+  if(!dispatchingFromHost && window.ipc && typeof window.ipc.postMessage==='function'){
+    window.ipc.postMessage(JSON.stringify({
+      action:'SetLanguage',
+      payload:uiState.lang
+    }));
+  }
 }
 
 document.querySelector('#btnToggleConnect').onclick=()=>{
@@ -1397,73 +1544,32 @@ setInterval(()=>{
     if(nextActive!==uiState.activeTheme)setTheme('auto-time',false);
   }
 },30000);
-let suppressRestoreClick=false;
 document.querySelector('#btnCollapsePill').onclick=()=>setPillCollapsed(true);
-document.querySelector('#btnRestorePill').onclick=()=>{
-  if(suppressRestoreClick){
-    suppressRestoreClick=false;
-    return;
-  }
-  setPillCollapsed(false);
-};
+const btnFullscreen=document.querySelector('#btnFullscreen');
+if(btnFullscreen){
+  btnFullscreen.onclick=()=>{
+    if(window.ipc&&typeof window.ipc.postMessage==='function'){
+      window.ipc.postMessage(JSON.stringify({action:'ToggleFullscreen'}));
+    }else{
+      if(!document.fullscreenElement){
+        document.documentElement.requestFullscreen().catch(()=>{});
+      }else{
+        document.exitFullscreen().catch(()=>{});
+      }
+    }
+  };
+}
+document.querySelector('#btnRestorePill').onclick=()=>setPillCollapsed(false);
 
 const dragHandle=document.querySelector('#pillDragHandle');
-const restorePillBtn=document.querySelector('#btnRestorePill');
-const topPillEl=document.querySelector('#topPill');
-function startPillDrag(e,el,threshold){
-  if(e.button!==0&&e.pointerType==='mouse')return;
-  if(threshold===0){
+if(dragHandle){
+  dragHandle.ondblclick=e=>{
     e.preventDefault();
     e.stopPropagation();
-  }
-  try{el.setPointerCapture(e.pointerId);}catch(_){}
-  const r=topPillEl.getBoundingClientRect();
-  uiState.drag={pointerId:e.pointerId,el,threshold,moved:false,startX:e.clientX,startY:e.clientY,origX:r.left,origY:r.top};
-  if(threshold===0)topPillEl.classList.add('dragging');
+    setPillCollapsed(!uiState.pillCollapsed);
+  };
 }
-function movePillDrag(e){
-  if(!uiState.drag||e.pointerId!==uiState.drag.pointerId)return;
-  const dx=e.clientX-uiState.drag.startX;
-  const dy=e.clientY-uiState.drag.startY;
-  if(!uiState.drag.moved&&uiState.drag.threshold>0){
-    if(Math.hypot(dx,dy)<=uiState.drag.threshold)return;
-    uiState.drag.moved=true;
-    topPillEl.classList.add('dragging');
-  }else{
-    uiState.drag.moved=true;
-  }
-  setPillPosition({x:uiState.drag.origX+dx,y:uiState.drag.origY+dy},false);
-  positionToolsPopover();
-}
-function endPillDrag(e){
-  if(!uiState.drag||e.pointerId!==uiState.drag.pointerId)return;
-  const wasMoved=uiState.drag.moved;
-  const wasRestore=uiState.drag.el===restorePillBtn;
-  try{uiState.drag.el.releasePointerCapture(e.pointerId);}catch(_){}
-  topPillEl.classList.remove('dragging');
-  if(wasMoved&&uiState.pillPos)setPillPosition(uiState.pillPos,true);
-  if(wasRestore&&wasMoved){
-    suppressRestoreClick=true;
-    setTimeout(()=>{suppressRestoreClick=false;},0);
-  }
-  uiState.drag=null;
-}
-dragHandle.onpointerdown=e=>startPillDrag(e,dragHandle,0);
-dragHandle.onpointermove=movePillDrag;
-dragHandle.onpointerup=endPillDrag;
-dragHandle.onpointercancel=endPillDrag;
-dragHandle.ondblclick=e=>{
-  e.preventDefault();
-  e.stopPropagation();
-  setPillPosition(null,true);
-  positionToolsPopover();
-};
-restorePillBtn.onpointerdown=e=>startPillDrag(e,restorePillBtn,4);
-restorePillBtn.onpointermove=movePillDrag;
-restorePillBtn.onpointerup=endPillDrag;
-restorePillBtn.onpointercancel=endPillDrag;
 window.addEventListener('resize',()=>{
-  if(uiState.pillPos)setPillPosition(uiState.pillPos,true);
   positionToolsPopover();
 });
 
@@ -1494,17 +1600,6 @@ try{
   if(qPill==='collapsed'||qPill==='1')uiState.pillCollapsed=true;
   else if(qPill==='expanded'||qPill==='0')uiState.pillCollapsed=false;
   else if(savedPill==='1')uiState.pillCollapsed=true;
-  const qPillX=params.get('pill_x');
-  const qPillY=params.get('pill_y');
-  if(qPillX!==null&&qPillY!==null&&qPillX!==''&&qPillY!==''){
-    const px=Number(qPillX),py=Number(qPillY);
-    if(Number.isFinite(px)&&Number.isFinite(py))uiState.pillPos={x:px,y:py};
-  }else{
-    const savedPos=JSON.parse(localStorage.getItem('uv_pill_pos')||'null');
-    if(savedPos&&Number.isFinite(Number(savedPos.x))&&Number.isFinite(Number(savedPos.y))){
-      uiState.pillPos={x:Number(savedPos.x),y:Number(savedPos.y)};
-    }
-  }
   const savedList=JSON.parse(localStorage.getItem('uv_saved_remotes_list')||'[]');
   if(Array.isArray(savedList)&&savedList.length)updateSavedRemotesDropdown(savedList,true);
   const saved=JSON.parse(localStorage.getItem('uv_saved_creds')||'null');
@@ -1519,7 +1614,6 @@ try{
 
 setLanguage(uiState.lang);
 setPillCollapsed(uiState.pillCollapsed);
-setPillPosition(uiState.pillPos,false);
 
 document.querySelector('#savedRemotes').onchange=e=>{
   const pid=e.target.value;
