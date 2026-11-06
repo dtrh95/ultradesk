@@ -259,6 +259,7 @@ pub struct ViewerLogin {
     pub custom_password_proof: String,
     pub color_mode: i32,
     pub client_version: String,
+    pub e2e_offer: Option<String>,
 }
 
 pub fn parse_viewer_login(text: &str) -> Option<ViewerLogin> {
@@ -278,6 +279,11 @@ pub fn parse_viewer_login(text: &str) -> Option<ViewerLogin> {
     let control_mode = fields[12].parse::<i16>().unwrap_or(1);
     let custom_password_proof = fields[13].to_ascii_lowercase();
     let color_mode = fields[16].parse::<i32>().unwrap_or(2);
+    let e2e_offer = fields
+        .get(20)
+        .map(|s| s.trim())
+        .filter(|s| s.contains(crate::e2e::E2E_HANDSHAKE_PREFIX))
+        .map(ToString::to_string);
     let client_version = fields[21].to_string();
 
     Some(ViewerLogin {
@@ -291,6 +297,7 @@ pub fn parse_viewer_login(text: &str) -> Option<ViewerLogin> {
         custom_password_proof,
         color_mode,
         client_version,
+        e2e_offer,
     })
 }
 
@@ -373,6 +380,10 @@ impl LoginThrottle {
 }
 
 pub fn encode_host_screen_init(layout: &DisplayLayout) -> Vec<u8> {
+    encode_host_screen_init_with_e2e(layout, &[])
+}
+
+pub fn encode_host_screen_init_with_e2e(layout: &DisplayLayout, e2e_answer: &[u8]) -> Vec<u8> {
     let width_bytes = (layout.width as i32).to_le_bytes();
     let height_bytes = (layout.height as i32).to_le_bytes();
     let ox = layout.virtual_left;
@@ -398,7 +409,7 @@ pub fn encode_host_screen_init(layout: &DisplayLayout) -> Vec<u8> {
         &[0],
         &width_bytes,
         &height_bytes,
-        &[],
+        e2e_answer,
         &[],
         &[0],
         HOST_VERSION,
@@ -663,6 +674,7 @@ pub struct HostCore {
     pub next_frame_seq: i32,
     pub layout: DisplayLayout,
     pub qos: VideoQos,
+    pub e2e: crate::e2e::E2eNegotiationState,
 }
 
 impl HostCore {
@@ -684,6 +696,15 @@ impl HostCore {
             next_frame_seq: FIRST_FRAME_NUMBER,
             layout,
             qos: VideoQos::default(),
+            e2e: crate::e2e::E2eNegotiationState::Disabled,
+        }
+    }
+
+    pub fn seal_peer_packet(&mut self, payload: &[u8]) -> Vec<u8> {
+        if let Some(cipher) = self.e2e.cipher_mut() {
+            cipher.seal(payload, false)
+        } else {
+            payload.to_vec()
         }
     }
 
@@ -702,6 +723,7 @@ impl HostCore {
     pub fn handle_packet(&mut self, payload: &[u8], now: Instant) -> Vec<HostAction> {
         let mut actions = Vec::new();
         if payload.starts_with(b"login:") {
+            self.e2e = crate::e2e::E2eNegotiationState::Disabled;
             if self.throttle.is_locked(now) {
                 actions.push(HostAction::SendPeer(encode_host_auth_failed()));
                 return actions;
@@ -730,17 +752,39 @@ impl HostCore {
                 return actions;
             }
 
+            let matched_proof = if is_master && !login.custom_password_proof.is_empty() {
+                &login.custom_password_proof
+            } else if !login.password_proof.is_empty() {
+                &login.password_proof
+            } else {
+                &login.custom_password_proof
+            };
+            let negotiated = login.e2e_offer.as_deref().and_then(|offer_str| {
+                crate::e2e::accept_viewer_offer_on_host(offer_str, &login.nonce, matched_proof)
+            });
+
             if self.phase == HostPhase::Streaming && self.active_viewer.is_some() {
                 self.active_viewer = Some(login.clone());
                 self.phase = HostPhase::Starting;
                 self.control_allowed = login.wants_control;
                 self.next_frame_seq = FIRST_FRAME_NUMBER;
                 self.waiting_ack = false;
+                let (answer_bytes, next_e2e) = match negotiated {
+                    Some((ans, cipher)) => (
+                        ans,
+                        crate::e2e::E2eNegotiationState::Established(cipher),
+                    ),
+                    None => (Vec::new(), crate::e2e::E2eNegotiationState::Disabled),
+                };
                 actions.push(HostAction::ReleaseAllInput);
-                actions.push(HostAction::SendPeer(encode_host_screen_init(&self.layout)));
-                actions.push(HostAction::SendPeer(encode_host_control_permission(
-                    self.control_allowed,
+                actions.push(HostAction::SendPeer(encode_host_screen_init_with_e2e(
+                    &self.layout,
+                    &answer_bytes,
                 )));
+                self.e2e = next_e2e;
+                let ctrl_pkt =
+                    self.seal_peer_packet(&encode_host_control_permission(self.control_allowed));
+                actions.push(HostAction::SendPeer(ctrl_pkt));
                 actions.push(HostAction::SessionStarted(login));
                 return actions;
             }
@@ -751,18 +795,51 @@ impl HostCore {
                 self.control_allowed = login.wants_control;
                 self.next_frame_seq = FIRST_FRAME_NUMBER;
                 self.waiting_ack = false;
-                actions.push(HostAction::SendPeer(encode_host_screen_init(&self.layout)));
-                actions.push(HostAction::SendPeer(encode_host_control_permission(
-                    self.control_allowed,
+                let (answer_bytes, next_e2e) = match negotiated {
+                    Some((ans, cipher)) => (
+                        ans,
+                        crate::e2e::E2eNegotiationState::Established(cipher),
+                    ),
+                    None => (Vec::new(), crate::e2e::E2eNegotiationState::Disabled),
+                };
+                actions.push(HostAction::SendPeer(encode_host_screen_init_with_e2e(
+                    &self.layout,
+                    &answer_bytes,
                 )));
+                self.e2e = next_e2e;
+                let ctrl_pkt =
+                    self.seal_peer_packet(&encode_host_control_permission(self.control_allowed));
+                actions.push(HostAction::SendPeer(ctrl_pkt));
                 actions.push(HostAction::SessionStarted(login));
             } else {
                 self.active_viewer = Some(login.clone());
                 self.phase = HostPhase::Approval;
+                self.e2e = match negotiated {
+                    Some((answer_token, cipher)) => crate::e2e::E2eNegotiationState::Offered {
+                        offer: crate::e2e::E2eOfferPayload::HostPending {
+                            answer_token,
+                            cipher,
+                        },
+                    },
+                    None => crate::e2e::E2eNegotiationState::Disabled,
+                };
                 actions.push(HostAction::PromptApproval(login));
             }
             return actions;
         }
+
+        let decrypted_buf: Vec<u8>;
+        let payload: &[u8] = if let Some(cipher) = self.e2e.cipher_mut() {
+            let Ok((raw, unicode_flag)) = cipher.open(payload) else {
+                return self.end_session("E2E decryption or authentication failed");
+            };
+            decrypted_buf = decode_peer_payload(&raw, unicode_flag).unwrap_or(raw);
+            &decrypted_buf
+        } else if crate::e2e::is_e2e_frame(payload) {
+            return self.end_session("Unexpected E2E frame on unencrypted session");
+        } else {
+            payload
+        };
 
         let tag = peer_command_tag(payload);
 
@@ -784,6 +861,7 @@ impl HostCore {
             self.phase = HostPhase::None;
             self.active_viewer = None;
             self.waiting_ack = false;
+            self.e2e = crate::e2e::E2eNegotiationState::Disabled;
             actions.push(HostAction::ReleaseAllInput);
             actions.push(HostAction::SessionEnded(
                 "Viewer disconnected".to_string(),
@@ -792,7 +870,8 @@ impl HostCore {
         }
 
         if tag == b"20" {
-            actions.push(HostAction::SendPeer(encode_host_keepalive_reply()));
+            let reply = self.seal_peer_packet(&encode_host_keepalive_reply());
+            actions.push(HostAction::SendPeer(reply));
             return actions;
         }
 
@@ -836,10 +915,26 @@ impl HostCore {
         self.control_allowed = allow_control;
         self.next_frame_seq = FIRST_FRAME_NUMBER;
         self.waiting_ack = false;
-        actions.push(HostAction::SendPeer(encode_host_screen_init(&self.layout)));
-        actions.push(HostAction::SendPeer(encode_host_control_permission(
-            allow_control,
+        let (answer_bytes, next_e2e) = match std::mem::take(&mut self.e2e) {
+            crate::e2e::E2eNegotiationState::Offered {
+                offer:
+                    crate::e2e::E2eOfferPayload::HostPending {
+                        answer_token,
+                        cipher,
+                    },
+            } => (
+                answer_token,
+                crate::e2e::E2eNegotiationState::Established(cipher),
+            ),
+            other => (Vec::new(), other),
+        };
+        actions.push(HostAction::SendPeer(encode_host_screen_init_with_e2e(
+            &self.layout,
+            &answer_bytes,
         )));
+        self.e2e = next_e2e;
+        let ctrl_pkt = self.seal_peer_packet(&encode_host_control_permission(allow_control));
+        actions.push(HostAction::SendPeer(ctrl_pkt));
         if let Some(ref v) = self.active_viewer {
             actions.push(HostAction::SessionStarted(v.clone()));
         }
@@ -850,6 +945,7 @@ impl HostCore {
         let mut actions = Vec::new();
         self.phase = HostPhase::None;
         self.active_viewer = None;
+        self.e2e = crate::e2e::E2eNegotiationState::Disabled;
         actions.push(HostAction::SendPeer(encode_host_reject()));
         actions.push(HostAction::SessionEnded("Session declined".to_string()));
         actions
@@ -864,7 +960,8 @@ impl HostCore {
         if !allowed {
             actions.push(HostAction::ReleaseAllInput);
         }
-        actions.push(HostAction::SendPeer(encode_host_control_permission(allowed)));
+        let ctrl_pkt = self.seal_peer_packet(&encode_host_control_permission(allowed));
+        actions.push(HostAction::SendPeer(ctrl_pkt));
         actions
     }
 
@@ -878,10 +975,11 @@ impl HostCore {
             self.phase = HostPhase::Starting;
             self.waiting_ack = false;
             actions.push(HostAction::ReleaseAllInput);
-            actions.push(HostAction::SendPeer(encode_host_screen_init(&self.layout)));
-            actions.push(HostAction::SendPeer(encode_host_control_permission(
-                self.control_allowed,
-            )));
+            let init_pkt = self.seal_peer_packet(&encode_host_screen_init(&self.layout));
+            let ctrl_pkt =
+                self.seal_peer_packet(&encode_host_control_permission(self.control_allowed));
+            actions.push(HostAction::SendPeer(init_pkt));
+            actions.push(HostAction::SendPeer(ctrl_pkt));
         }
         actions
     }
@@ -908,7 +1006,7 @@ impl HostCore {
         self.next_frame_seq = self.next_frame_seq.wrapping_add(1);
         self.waiting_ack = true;
         self.qos.on_frame_sent(Instant::now());
-        let packet = encode_host_frame(rect, rgb555_top_down, seq)?;
+        let packet = self.seal_peer_packet(&encode_host_frame(rect, rgb555_top_down, seq)?);
         Ok(vec![HostAction::SendPeer(packet)])
     }
 
@@ -919,11 +1017,13 @@ impl HostCore {
     pub fn end_session(&mut self, reason: &str) -> Vec<HostAction> {
         let mut actions = Vec::new();
         if self.active_viewer.is_some() {
-            actions.push(HostAction::SendPeer(encode_host_reject()));
+            let reject_pkt = self.seal_peer_packet(&encode_host_reject());
+            actions.push(HostAction::SendPeer(reject_pkt));
         }
         self.phase = HostPhase::None;
         self.active_viewer = None;
         self.waiting_ack = false;
+        self.e2e = crate::e2e::E2eNegotiationState::Disabled;
         actions.push(HostAction::ReleaseAllInput);
         actions.push(HostAction::SessionEnded(reason.to_string()));
         actions
@@ -2566,6 +2666,12 @@ pub struct HostStatus {
     pub selected_monitors: Vec<usize>,
     #[serde(default)]
     pub lan_port: u16,
+    #[serde(default)]
+    pub e2e_enabled: bool,
+    #[serde(default)]
+    pub e2e_cipher: String,
+    #[serde(default)]
+    pub e2e_fingerprint: String,
 }
 
 struct HostSessionInner {
@@ -2849,7 +2955,8 @@ impl HostSession {
     pub fn send_chat(&self, text: &str) -> bool {
         let mut s = self.inner.lock().unwrap();
         if matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
-            s.outbound_peer_packets.push(encode_host_chat(text));
+            let pkt = s.core.seal_peer_packet(&encode_host_chat(text));
+            s.outbound_peer_packets.push(pkt);
             true
         } else {
             false
@@ -2859,7 +2966,8 @@ impl HostSession {
     pub fn send_clipboard(&self, text: &str) -> bool {
         let mut s = self.inner.lock().unwrap();
         if matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
-            s.outbound_peer_packets.push(encode_host_clipboard(text));
+            let pkt = s.core.seal_peer_packet(&encode_host_clipboard(text));
+            s.outbound_peer_packets.push(pkt);
             true
         } else {
             false
@@ -3442,6 +3550,9 @@ impl HostSession {
             selected_monitor,
             selected_monitors,
             lan_port: s.lan_port,
+            e2e_enabled: s.core.e2e.is_enabled(),
+            e2e_cipher: s.core.e2e.cipher_name().to_string(),
+            e2e_fingerprint: s.core.e2e.fingerprint().to_string(),
         }
     }
 
@@ -4106,5 +4217,152 @@ mod tests {
             }
         }
         assert_eq!(compute_dirty_rect(&prev, &changed_box, w, h), Some((3, 2, 5, 4)));
+    }
+
+    #[test]
+    fn test_host_core_e2e_handshake_auto_and_manual_approve_and_session_packets() {
+        let layout = DisplayLayout {
+            width: 4,
+            height: 4,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 4,
+                bottom: 4,
+            }],
+        };
+        let now = Instant::now();
+        let nonce = "12345678";
+        let temp_pw = "temp_pass";
+        let proof = md5_hex_lower(format!("{}{}", nonce, temp_pw).as_bytes());
+        let (offer_wire, viewer_offer_state) =
+            crate::e2e::create_viewer_offer(nonce, &proof, &"0".repeat(32));
+
+        let login_pkt = format!(
+            "login:{nonce}:{proof}:1920:1080:7:15:15:30:16:111222333:E2E Viewer:1:{}:x:conn:2:45:0:0:{offer_wire}:6.6.133:0",
+            "0".repeat(32)
+        )
+        .into_bytes();
+
+        let mut manual_core = HostCore::new(temp_pw, None, layout.clone());
+        let prompt_actions = manual_core.handle_packet(&login_pkt, now);
+        assert_eq!(manual_core.phase, HostPhase::Approval);
+        assert!(!manual_core.e2e.is_enabled());
+        assert!(!manual_core.e2e.fingerprint().is_empty());
+        assert!(matches!(prompt_actions.as_slice(), [HostAction::PromptApproval(_)]));
+
+        let approve_actions = manual_core.approve(true);
+        assert_eq!(manual_core.phase, HostPhase::Starting);
+        assert!(manual_core.e2e.is_enabled());
+        assert_eq!(approve_actions.len(), 3);
+
+        let init_plain = match &approve_actions[0] {
+            HostAction::SendPeer(p) => p.clone(),
+            _ => panic!("expected plaintext screen_init"),
+        };
+        assert!(!crate::e2e::is_e2e_frame(&init_plain));
+        let init_fields = decode_byte_array_fields_checked(&init_plain, Some(11)).unwrap();
+        assert_eq!(init_fields[0], vec![0]);
+        assert!(init_fields[3].starts_with(crate::e2e::E2E_HANDSHAKE_PREFIX.as_bytes()));
+
+        let mut viewer_e2e =
+            crate::e2e::finalize_viewer_handshake(&viewer_offer_state, &init_fields[3]).unwrap();
+        assert!(viewer_e2e.is_enabled());
+        assert_eq!(viewer_e2e.fingerprint(), manual_core.e2e.fingerprint());
+
+        let ctrl_sealed = match &approve_actions[1] {
+            HostAction::SendPeer(p) => p.clone(),
+            _ => panic!("expected sealed control_permission"),
+        };
+        assert!(crate::e2e::is_e2e_frame(&ctrl_sealed));
+        assert_eq!(manual_core.e2e.cipher_mut().unwrap().tx_seqnum, 1);
+
+        let (ctrl_plain, _) = viewer_e2e.cipher_mut().unwrap().open(&ctrl_sealed).unwrap();
+        assert_eq!(ctrl_plain, encode_host_control_permission(true));
+        assert_eq!(viewer_e2e.cipher_mut().unwrap().rx_seqnum, 1);
+
+        let mut auto_core = HostCore::new(temp_pw, None, layout);
+        auto_core.auto_approve = true;
+        let (offer_wire_2, viewer_offer_2) =
+            crate::e2e::create_viewer_offer(nonce, &proof, &"0".repeat(32));
+        let login_pkt_2 = format!(
+            "login:{nonce}:{proof}:1920:1080:7:15:15:30:16:111222333:E2E Viewer:1:{}:x:conn:2:45:0:0:{offer_wire_2}:6.6.133:0",
+            "0".repeat(32)
+        )
+        .into_bytes();
+
+        let auto_actions = auto_core.handle_packet(&login_pkt_2, now);
+        assert_eq!(auto_core.phase, HostPhase::Starting);
+        assert!(auto_core.e2e.is_enabled());
+        assert_eq!(auto_actions.len(), 3);
+
+        let auto_init = match &auto_actions[0] {
+            HostAction::SendPeer(p) => p.clone(),
+            _ => panic!("expected screen_init"),
+        };
+        let auto_init_fields = decode_byte_array_fields_checked(&auto_init, Some(11)).unwrap();
+        let mut viewer_e2e_2 =
+            crate::e2e::finalize_viewer_handshake(&viewer_offer_2, &auto_init_fields[3]).unwrap();
+        assert_eq!(viewer_e2e_2.fingerprint(), auto_core.e2e.fingerprint());
+
+        let auto_ctrl = match &auto_actions[1] {
+            HostAction::SendPeer(p) => p.clone(),
+            _ => panic!("expected sealed control_permission"),
+        };
+        let (auto_ctrl_plain, _) = viewer_e2e_2.cipher_mut().unwrap().open(&auto_ctrl).unwrap();
+        assert_eq!(auto_ctrl_plain, encode_host_control_permission(true));
+
+        let sealed_17 = viewer_e2e_2.cipher_mut().unwrap().seal(b"17", false);
+        let start_acts = auto_core.handle_packet(&sealed_17, now);
+        assert_eq!(auto_core.phase, HostPhase::Streaming);
+        assert_eq!(start_acts, vec![HostAction::RequestCapture]);
+
+        let raw_pixels = vec![0x1fu8; 4 * 4 * 2];
+        let frame_acts = auto_core.send_frame(&raw_pixels).unwrap();
+        let sealed_frame = match &frame_acts[0] {
+            HostAction::SendPeer(p) => p.clone(),
+            _ => panic!("expected sealed frame"),
+        };
+        assert!(crate::e2e::is_e2e_frame(&sealed_frame));
+        let (plain_frame, _) = viewer_e2e_2
+            .cipher_mut()
+            .unwrap()
+            .open(&sealed_frame)
+            .unwrap();
+        let frame_fields = decode_byte_array_fields_checked(&plain_frame, Some(11)).unwrap();
+        assert_eq!(frame_fields[0], vec![1]);
+
+        let sealed_18 = viewer_e2e_2.cipher_mut().unwrap().seal(b"18", false);
+        let ack_acts = auto_core.handle_packet(&sealed_18, now);
+        assert_eq!(ack_acts, vec![HostAction::RequestCapture]);
+
+        let mouse_raw = b"8|||512|||0|||2|||2";
+        let sealed_mouse = viewer_e2e_2.cipher_mut().unwrap().seal(mouse_raw, false);
+        let mouse_acts = auto_core.handle_packet(&sealed_mouse, now);
+        assert_eq!(mouse_acts, vec![HostAction::InjectInput(mouse_raw.to_vec())]);
+
+        let sealed_chat = viewer_e2e_2
+            .cipher_mut()
+            .unwrap()
+            .seal(b"12|||encrypted hello", false);
+        let chat_acts = auto_core.handle_packet(&sealed_chat, now);
+        assert_eq!(
+            chat_acts,
+            vec![HostAction::ChatReceived("encrypted hello".to_string())]
+        );
+
+        let (clip_pkt, clip_unicode) =
+            crate::clipboard::encode_clipboard_for_remote("secret clip").unwrap();
+        let sealed_clip = viewer_e2e_2
+            .cipher_mut()
+            .unwrap()
+            .seal(&clip_pkt, clip_unicode);
+        let clip_acts = auto_core.handle_packet(&sealed_clip, now);
+        assert_eq!(
+            clip_acts,
+            vec![HostAction::ClipboardReceived("secret clip".to_string())]
+        );
     }
 }

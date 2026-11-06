@@ -337,6 +337,15 @@ canvas#screen {
   border: 1px solid var(--border);
   white-space: nowrap;
 }
+.status-badge.e2e-badge {
+  background: var(--primary-soft);
+  color: var(--status-ok);
+  border-color: var(--status-ok);
+  font-family: var(--mono);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .pill-select {
   background: var(--surface-variant);
   color: var(--text-muted);
@@ -782,6 +791,7 @@ a.dl-link:hover {
         <span data-i18n="nav_connect">Kết nối</span>
       </button>
       <span id="status" class="status-badge">Chưa kết nối</span>
+      <span id="e2eBadge" class="status-badge e2e-badge" style="display:none" title="End-to-End Encrypted"></span>
     </div>
     <div class="pill-sep"></div>
     <div class="toolbar-cluster center-cluster">
@@ -1082,7 +1092,10 @@ const I18N={
     theme_vscode_dark:'VS Code Dark+',
     theme_vscode_light:'VS Code Light+',
     theme_gruvbox_dark:'Gruvbox Dark',
-    theme_gruvbox_light:'Gruvbox Light'
+    theme_gruvbox_light:'Gruvbox Light',
+    e2e_active:'E2E {fp}',
+    e2e_tooltip:'Mã hóa đầu cuối ({cipher}) / Vân tay bảo mật {fp}',
+    e2e_standard:'Tiêu chuẩn (Legacy)'
   },
   en:{
     nav_connect:'Connect',
@@ -1175,7 +1188,10 @@ const I18N={
     theme_vscode_dark:'VS Code Dark+',
     theme_vscode_light:'VS Code Light+',
     theme_gruvbox_dark:'Gruvbox Dark',
-    theme_gruvbox_light:'Gruvbox Light'
+    theme_gruvbox_light:'Gruvbox Light',
+    e2e_active:'E2E {fp}',
+    e2e_tooltip:'End-to-End Encrypted ({cipher}) / Security Fingerprint {fp}',
+    e2e_standard:'Standard (Legacy)'
   }
 };
 
@@ -1425,11 +1441,13 @@ window.__ultradesk_dispatch_action=function(action,payload){
 function renderStatusBadge(s){
   const stEl=document.querySelector('#status');
   const dotEl=document.querySelector('#restoreStatusDot');
+  const e2eEl=document.querySelector('#e2eBadge');
   if(!stEl)return;
   const dimCol=cssVar('--text-dim','#928374');
   if(!s){
     stEl.style.color=dimCol;
     if(dotEl){dotEl.style.background=dimCol;dotEl.style.color=dimCol;}
+    if(e2eEl)e2eEl.style.display='none';
     stEl.textContent=t('status_disconnected');
     return;
   }
@@ -1440,6 +1458,17 @@ function renderStatusBadge(s){
   if(dotEl){dotEl.style.background=col;dotEl.style.color=col;}
   const base=s.state==='connected'?t('status_connected'):(s.state==='connecting'?t('status_connecting'):t('status_disconnected'));
   stEl.textContent=base+(s.error?' ('+s.error+')':'');
+  if(e2eEl){
+    const hs=s.host_status;
+    const activeE2e=(s.state==='connected'&&s.e2e_enabled)?s:((hs&&hs.e2e_enabled)?hs:null);
+    if(activeE2e&&activeE2e.e2e_fingerprint){
+      e2eEl.style.display='inline-flex';
+      e2eEl.textContent=t('e2e_active',{fp:activeE2e.e2e_fingerprint});
+      e2eEl.title=t('e2e_tooltip',{cipher:activeE2e.e2e_cipher||'X25519-AES256CTR-HMACSHA256',fp:activeE2e.e2e_fingerprint});
+    }else{
+      e2eEl.style.display='none';
+    }
+  }
 }
 
 function setTheme(mode,persist=true,hourOverride=null){
@@ -2013,10 +2042,11 @@ function renderSidebar(s){
     document.querySelector('#hostIdVal').textContent=hs.host_id||'---';
     document.querySelector('#hostPassVal').textContent=hs.temp_password||'---';
     document.querySelector('#hostPhaseBadge').textContent=(hs.running?'ON: ':'OFF: ')+hs.phase;
+    const e2eLabel=(hs.e2e_enabled&&hs.e2e_fingerprint)?(' | E2E '+hs.e2e_fingerprint):'';
     document.querySelector('#hostStatusInfo').textContent=t('host_status_info',{
       backend:hs.backend_name||'Headless',
       mp:hs.has_master_password?t('mp_set'):t('mp_unset')
-    });
+    })+e2eLabel;
     const appBox=document.querySelector('#hostApprovalBox');
     if(hs.phase==='approval'){
       appBox.style.display='flex';
