@@ -384,6 +384,20 @@ canvas#screen {
   background: var(--action);
   color: var(--on-primary);
 }
+#btnToggleConnect[data-conn-state="connected"]:not(.active) {
+  background: var(--surface-variant);
+  border-color: var(--line);
+  color: var(--status-ok);
+}
+#btnToggleConnect[data-conn-state="connecting"]:not(.active) {
+  background: var(--surface-variant);
+  border-color: var(--line);
+  color: var(--secondary);
+}
+#btnToggleConnect[data-conn-state="connected"]:not(.active):hover,
+#btnToggleConnect[data-conn-state="connecting"]:not(.active):hover {
+  border-color: var(--line-strong);
+}
 .pill-sep {
   width: 1px;
   height: 18px;
@@ -998,11 +1012,10 @@ button:active,
   <div id="pillExpandedContent" class="pill-expanded-content">
     <div class="toolbar-cluster left-cluster">
       <span class="pill-brand">UltraDesk</span>
-      <button id="btnToggleConnect" class="pill-btn active" type="button">
+      <button id="btnToggleConnect" class="pill-btn active" type="button" data-conn-state="disconnected">
         <svg class="svg-icon" viewBox="0 0 24 24"><path d="M9 12l2 2l4 -4"/><path d="M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3"/></svg>
-        <span data-i18n="nav_connect">Kết nối</span>
+        <span id="status" data-i18n="nav_connect">Kết nối</span>
       </button>
-      <span id="status" class="status-badge">Chưa kết nối</span>
       <span id="e2eBadge" class="status-badge e2e-badge" style="display:none" title="End-to-End Encrypted"></span>
     </div>
     <div class="pill-sep"></div>
@@ -1769,23 +1782,24 @@ window.__ultradesk_dispatch_action=function(action,payload){
 
 function renderStatusBadge(s){
   const stEl=document.querySelector('#status');
+  const btnEl=document.querySelector('#btnToggleConnect');
   const dotEl=document.querySelector('#restoreStatusDot');
   const e2eEl=document.querySelector('#e2eBadge');
   if(!stEl)return;
   const dimCol=cssVar('--text-dim','#928374');
   if(!s){
-    stEl.style.color=dimCol;
+    if(btnEl)btnEl.setAttribute('data-conn-state','disconnected');
     if(dotEl){dotEl.style.background=dimCol;dotEl.style.color=dimCol;}
     if(e2eEl)e2eEl.style.display='none';
-    stEl.textContent=t('status_disconnected');
+    stEl.textContent=t('nav_connect');
     return;
   }
   const okCol=cssVar('--status-ok','#b8bb26');
   const warnCol=cssVar('--secondary','#fabd2f');
   const col=s.state==='connected'?okCol:(s.state==='connecting'?warnCol:dimCol);
-  stEl.style.color=col;
+  if(btnEl)btnEl.setAttribute('data-conn-state',s.state||'disconnected');
   if(dotEl){dotEl.style.background=col;dotEl.style.color=col;}
-  const base=s.state==='connected'?t('status_connected'):(s.state==='connecting'?t('status_connecting'):t('status_disconnected'));
+  const base=s.state==='connected'?t('status_connected'):(s.state==='connecting'?t('status_connecting'):t('nav_connect'));
   stEl.textContent=base+(s.error?' ('+s.error+')':'');
   if(e2eEl){
     const hs=s.host_status;
@@ -2047,6 +2061,8 @@ document.querySelector('#connect').onclick=()=>{
   const remember=document.querySelector('#rememberCreds').checked;
   if(!id||!pass){showNotice(t('err_missing_creds'),'error');return;}
   persistCredsLocal(id,pass,remember);
+  const btnEl=document.querySelector('#btnToggleConnect');
+  if(btnEl)btnEl.setAttribute('data-conn-state','connecting');
   document.querySelector('#status').textContent=t('status_initiating');
   post('/connect',{id,pass,remember}).then(()=>setOverlay('none')).catch(e=>showNotice(e.message,'error'));
 };
@@ -2520,6 +2536,8 @@ async function refreshStatus(){
       drawIdleCanvas();
     }
   }catch{
+    const btnEl=document.querySelector('#btnToggleConnect');
+    if(btnEl)btnEl.setAttribute('data-conn-state','disconnected');
     document.querySelector('#status').textContent=t('status_lost');
   }finally{busy=false;}
 }
