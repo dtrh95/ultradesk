@@ -5,11 +5,14 @@ DESTDIR ?=
 
 BINARY := $(firstword $(wildcard target/release/ultradesk-rust target/release/ultraviewer-linux))
 
-.PHONY: all build check install clean
+.PHONY: all build build-web check install clean
 
 all: build
 
-build:
+build-web:
+	cd web && npm run build
+
+build: build-web
 	cargo build --release --locked || cargo build --release
 
 check:
