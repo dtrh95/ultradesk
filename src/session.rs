@@ -402,7 +402,9 @@ impl RegistrationTransport {
         let n = ch.read(&mut temp).map_err(|e| {
             if matches!(
                 e.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::Interrupted
             ) {
                 "TimeoutError: transport deadline".to_string()
             } else {

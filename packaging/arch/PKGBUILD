@@ -16,6 +16,9 @@ depends=(
 makedepends=(
   'cargo'
   'pkgconf'
+  'gtk3'
+  'webkit2gtk-4.1'
+  'libsoup3'
 )
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
 sha256sums=('SKIP')

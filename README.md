@@ -30,21 +30,9 @@ make build
 sudo make install PREFIX=/usr
 ```
 
-### Arch Linux and Manjaro (AUR and makepkg)
+### Arch Linux and Manjaro (makepkg)
 
-Install from the Arch User Repository with an AUR helper such as `yay` or `paru`:
-
-```bash
-yay -S ultradesk-rust
-```
-
-To install the prebuilt binary package without compiling Rust from source:
-
-```bash
-yay -S ultradesk-rust-bin
-```
-
-To build locally from the repository `PKGBUILD`:
+Build and install locally from `packaging/arch/PKGBUILD`:
 
 ```bash
 cd packaging/arch
@@ -251,7 +239,7 @@ The test suite exercises 3DES and AES-256-CBC cryptography, 11-field screen deco
 
 GitHub Actions workflows in `.github/workflows/` handle continuous integration and package distribution. On every push and pull request, `build.yml` and `nix.yml` run the release test suite and evaluate Nix flake checks. When tagging a release, `build-and-release.yml` produces binary packages for Debian, Fedora, openSUSE, Arch Linux, and NixOS, publishing signed repositories for APT, DNF, and Zypper on GitHub Pages alongside release assets.
 
-Dedicated publishing workflows target individual distribution ecosystems. For Debian, `publish-debian.yml` targets bookworm, trixie, forky, and sid. For Ubuntu, `publish-ubuntu.yml` packages for jammy, noble, questing, and resolute, uploading signed source packages to Launchpad PPA. For Arch Linux, `publish-aur.yml` updates the `ultradesk-rust` and `ultradesk-rust-bin` packages on the AUR. For NixOS, `publish-nixos.yml` and `update-nix-hash.yaml` build the flake closure, push binary substitutes to Cachix, export portable `.nar.xz` archives, and submit a pull request updating the package hash in `nix/packages/ultradesk-rust/default.nix`.
+Dedicated publishing workflows target individual distribution ecosystems. For Debian, `publish-debian.yml` targets bookworm, trixie, forky, and sid. For Ubuntu, `publish-ubuntu.yml` packages for jammy, noble, questing, and resolute, uploading signed source packages to Launchpad PPA. For NixOS, `publish-nixos.yml` and `update-nix-hash.yaml` build the flake closure, push binary substitutes to Cachix, export portable `.nar.xz` archives, and submit a pull request updating the package hash in `nix/packages/ultradesk-rust/default.nix`.
 
 ## License and trademark notice
 

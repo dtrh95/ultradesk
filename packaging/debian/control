@@ -3,8 +3,8 @@ Section: net
 Priority: optional
 Maintainer: Hieu Doan <dtrunghieu96@gmail.com>
 Build-Depends: debhelper-compat (= 13),
-               cargo,
-               rustc,
+               ca-certificates,
+               curl,
                pkg-config,
                libssl-dev,
                libxcb1-dev,

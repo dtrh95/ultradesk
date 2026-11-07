@@ -107,4 +107,13 @@ rg -q 'dtrunghieu96@gmail\.com' <<< "$PUBKEY_UID"
 ! rg -q 'fcitx5-lotus' <<< "$PUBKEY_UID"
 ! rg -q 'hieudoan@ultradesk\.io|maintainers@ultradesk\.local' packaging/ .github/workflows/publish-ubuntu.yml
 
+! test -f .github/workflows/publish-aur.yml
+! test -f packaging/arch/PKGBUILD-bin
+! test -f packaging/arch/.SRCINFO
+! rg -q 'publish-aur|AUR_SSH_PRIVATE_KEY|ultradesk-rust-bin' .github/workflows/ README.md
+rg -q 'ca-certificates' packaging/debian/control
+rg -q 'curl' packaging/debian/control
+! rg -q '^\s*(cargo|rustc),' packaging/debian/control
+rg -q 'sh\.rustup\.rs' packaging/debian/rules
+
 echo "VERIFIED: All unit tests, benchmarks, and live HTTP portal checks passed."

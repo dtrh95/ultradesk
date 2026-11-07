@@ -3,7 +3,7 @@ name: Auto Retry Failed Builds
 on:
   workflow_run:
     workflows:
-      ['CI', 'Build on Nix', 'Build & Release', 'Publish to AUR', 'Publish Debian APT', 'Publish Ubuntu APT & PPA', 'Publish NixOS & Cachix']
+      ['CI', 'Build on Nix', 'Build & Release', 'Publish Debian APT', 'Publish Ubuntu APT & PPA', 'Publish NixOS & Cachix']
     types: [completed]
 
 permissions:

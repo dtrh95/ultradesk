@@ -2295,14 +2295,14 @@ struct RawLinuxInputEvent {
     value: i32,
 }
 
-const UI_SET_EVBIT: libc::c_ulong = 0x4004_5564;
-const UI_SET_KEYBIT: libc::c_ulong = 0x4004_5565;
-const UI_SET_RELBIT: libc::c_ulong = 0x4004_5566;
-const UI_SET_ABSBIT: libc::c_ulong = 0x4004_5567;
-const UI_DEV_SETUP: libc::c_ulong = 0x405c_5503;
-const UI_ABS_SETUP: libc::c_ulong = 0x401c_5504;
-const UI_DEV_CREATE: libc::c_ulong = 0x5501;
-const UI_DEV_DESTROY: libc::c_ulong = 0x5502;
+const UI_SET_EVBIT: libc::Ioctl = 0x4004_5564 as libc::Ioctl;
+const UI_SET_KEYBIT: libc::Ioctl = 0x4004_5565 as libc::Ioctl;
+const UI_SET_RELBIT: libc::Ioctl = 0x4004_5566 as libc::Ioctl;
+const UI_SET_ABSBIT: libc::Ioctl = 0x4004_5567 as libc::Ioctl;
+const UI_DEV_SETUP: libc::Ioctl = 0x405c_5503 as libc::Ioctl;
+const UI_ABS_SETUP: libc::Ioctl = 0x401c_5504 as libc::Ioctl;
+const UI_DEV_CREATE: libc::Ioctl = 0x5501 as libc::Ioctl;
+const UI_DEV_DESTROY: libc::Ioctl = 0x5502 as libc::Ioctl;
 const UINPUT_ABS_MAX: i32 = 65535;
 
 pub struct UinputInjector {
@@ -2989,9 +2989,13 @@ impl HostSession {
                 drop(s);
                 return self.status();
             }
-            let listener = TcpListener::bind(("0.0.0.0", DEFAULT_LAN_PORT))
-                .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))
-                .ok();
+            let listener = if use_tls {
+                TcpListener::bind(("0.0.0.0", DEFAULT_LAN_PORT))
+                    .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))
+                    .ok()
+            } else {
+                TcpListener::bind(("0.0.0.0", 0)).ok()
+            };
             if let Some(ref l) = listener {
                 let _ = l.set_nonblocking(true);
             }
@@ -3106,7 +3110,9 @@ impl HostSession {
                             Err(ref e)
                                 if matches!(
                                     e.kind(),
-                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                    std::io::ErrorKind::WouldBlock
+                                        | std::io::ErrorKind::TimedOut
+                                        | std::io::ErrorKind::Interrupted
                                 ) => {}
                             Err(_) => {
                                 disconnected = true;
