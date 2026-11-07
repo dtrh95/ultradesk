@@ -207,7 +207,7 @@ pub fn looks_like_tls_record(prefix: &[u8]) -> bool {
     if prefix.len() < 3 {
         return false;
     }
-    matches!(prefix[0], 20 | 21 | 22 | 23) && prefix[1] == 3 && prefix[2] <= 4
+    matches!(prefix[0], 20..=23) && prefix[1] == 3 && prefix[2] <= 4
 }
 
 pub fn now_epoch_secs() -> f64 {
@@ -941,18 +941,20 @@ impl ControlSession {
         let profile_manager = ProfileManager::from_xdg().unwrap_or_else(|_| {
             ProfileManager::from_custom_dir(std::env::temp_dir().join("ultradesk-rust"))
         });
-        let client_profile = profile_manager.load_or_create_client().unwrap_or_else(|_| {
-            ClientProfile {
-                device_id: "0123456789ABCDEF0123456789ABCDEF".to_string(),
-                temp_password: "12345678".to_string(),
-                display_name: "UltraDesk".to_string(),
-                synthetic_mac: "0223456789AB".to_string(),
-                local_ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
-                path: std::env::temp_dir().join("profile"),
-            }
-        });
-        let host_profile = profile_manager.load_or_create_host().unwrap_or_else(|_| {
-            HostProfile {
+        let client_profile =
+            profile_manager
+                .load_or_create_client()
+                .unwrap_or_else(|_| ClientProfile {
+                    device_id: "0123456789ABCDEF0123456789ABCDEF".to_string(),
+                    temp_password: "12345678".to_string(),
+                    display_name: "UltraDesk".to_string(),
+                    synthetic_mac: "0223456789AB".to_string(),
+                    local_ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
+                    path: std::env::temp_dir().join("profile"),
+                });
+        let host_profile = profile_manager
+            .load_or_create_host()
+            .unwrap_or_else(|_| HostProfile {
                 device_id: "FEDCBA9876543210FEDCBA9876543210".to_string(),
                 temp_password: "87654321".to_string(),
                 display_name: "UltraDesk".to_string(),
@@ -960,8 +962,7 @@ impl ControlSession {
                 local_ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
                 master_password_proof: None,
                 path: std::env::temp_dir().join("host-profile"),
-            }
-        });
+            });
         let host_session = HostSession::with_profile(
             &host_profile.device_id,
             "",
@@ -1026,7 +1027,10 @@ impl ControlSession {
                     return Ok((v, bytes.clone()));
                 }
             }
-            (guard.screen.version, guard.screen.active_view_buffer().into_owned())
+            (
+                guard.screen.version,
+                guard.screen.active_view_buffer().into_owned(),
+            )
         };
         let mut out = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut out);
@@ -1054,7 +1058,10 @@ impl ControlSession {
                     return Ok((v, bytes.clone()));
                 }
             }
-            (guard.screen.version, guard.screen.active_view_buffer().into_owned())
+            (
+                guard.screen.version,
+                guard.screen.active_view_buffer().into_owned(),
+            )
         };
         let bytes = view.to_jpeg(q)?;
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1427,10 +1434,9 @@ impl ControlSession {
                                 guard.clipboard.local_text = sys_clip;
                             }
                         }
-                        if let Ok(pkt48) = encode_byte_array_fields(&[
-                            &[48u8][..],
-                            &[effective_bs as u8][..],
-                        ]) {
+                        if let Ok(pkt48) =
+                            encode_byte_array_fields(&[&[48u8][..], &[effective_bs as u8][..]])
+                        {
                             let _ = Self::dispatch_payload(&mut guard, &pkt48, false, None);
                         }
                         let _ = Self::dispatch_payload(&mut guard, b"17", false, None);
@@ -1447,12 +1453,7 @@ impl ControlSession {
                     } else if fields[1].len() == 2 {
                         i16::from_le_bytes([fields[1][0], fields[1][1]]) as i32
                     } else if fields[1].len() == 4 {
-                        i32::from_le_bytes([
-                            fields[1][0],
-                            fields[1][1],
-                            fields[1][2],
-                            fields[1][3],
-                        ])
+                        i32::from_le_bytes([fields[1][0], fields[1][1], fields[1][2], fields[1][3]])
                     } else {
                         0
                     };
@@ -1468,10 +1469,8 @@ impl ControlSession {
                             guard.frames_applied += 1;
                             guard.rectangles_applied += applied;
                             let _ = Self::dispatch_payload(&mut guard, b"18", false, None);
-                            guard.state.last_message = format!(
-                                "Frame #{} ({} rects)",
-                                guard.frames_applied, applied
-                            );
+                            guard.state.last_message =
+                                format!("Frame #{} ({} rects)", guard.frames_applied, applied);
                             Self::sync_state_fields(&mut guard);
                             return;
                         }
@@ -1489,7 +1488,7 @@ impl ControlSession {
                         if matches!(cmd, crate::cursor::CursorCommand::Position { .. })
                             && guard
                                 .last_local_move_at
-                                .map_or(false, |t| t.elapsed() < Duration::from_millis(300))
+                                .is_some_and(|t| t.elapsed() < Duration::from_millis(300))
                         {
                             return;
                         }
@@ -1520,14 +1519,19 @@ impl ControlSession {
             if guard.clipboard.auto_sync_system {
                 let _ = set_linux_system_clipboard(&clip_msg.text);
             }
-            guard.state.last_message =
-                format!("Clipboard synced from remote ({} chars)", clip_msg.text.len());
+            guard.state.last_message = format!(
+                "Clipboard synced from remote ({} chars)",
+                clip_msg.text.len()
+            );
             Self::sync_state_fields(&mut guard);
             return;
         }
 
         if let Ok(Some((ft_pkt, replies))) = guard.files.handle_packet(payload) {
-            if matches!(ft_pkt, crate::file_transfer::FileTransferPacket::ChatMessage { .. }) {
+            if matches!(
+                ft_pkt,
+                crate::file_transfer::FileTransferPacket::ChatMessage { .. }
+            ) {
                 if let Some(last) = guard.files.chat_messages.last_mut() {
                     if !last.starts_with("Partner: ") && !last.starts_with("Me: ") {
                         *last = format!("Partner: {}", last);
@@ -1842,7 +1846,7 @@ impl ControlSession {
     ) {
         let queued: Vec<(Vec<u8>, bool, Option<InputEvent>)> = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let raw_items: Vec<_> = guard.outbound_queue.drain(..).collect();
+            let raw_items: Vec<_> = std::mem::take(&mut guard.outbound_queue);
             raw_items
                 .into_iter()
                 .map(|(payload, unicode_bytes, evt_opt)| {

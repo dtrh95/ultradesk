@@ -4,10 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "=== [1/3] Running release unit & integration test suite ==="
+echo "=== [1/4] Checking Rust formatting and Clippy lints ==="
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+
+echo "=== [2/4] Running release unit & integration test suite ==="
 cargo test --release -- --nocapture
 
-echo "=== [2/3] Building release binary ==="
+echo "=== [3/4] Building release binary ==="
 cargo build --release
 
 PORT=18769
@@ -26,7 +30,7 @@ for _ in $(seq 1 30); do
   sleep 0.1
 done
 
-echo "=== [3/3] Verifying live HTTP Portal & Host/Client endpoints ==="
+echo "=== [4/4] Verifying live HTTP Portal & Host/Client endpoints ==="
 VIEWER_HTML="$(curl -fsS "http://127.0.0.1:${PORT}/")"
 rg -q '<html lang="en">' <<< "$VIEWER_HTML"
 rg -q 'id="connectModal"' <<< "$VIEWER_HTML"

@@ -229,11 +229,13 @@ pub fn decode_peer_payload(payload: &[u8], unicode_bytes: bool) -> Option<Vec<u8
     if !unicode_bytes {
         return Some(payload.to_vec());
     }
-    if payload.len() > 2_097_152 || payload.len() % 2 != 0 {
+    if payload.len() > 2_097_152 || !payload.len().is_multiple_of(2) {
         return None;
     }
     let units: Vec<u16> = payload
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     let text = String::from_utf16(&units).ok()?;
@@ -332,19 +334,10 @@ pub fn verify_login_credentials(
     (false, false)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LoginThrottle {
     failures: u32,
     locked_until: Option<Instant>,
-}
-
-impl Default for LoginThrottle {
-    fn default() -> Self {
-        Self {
-            failures: 0,
-            locked_until: None,
-        }
-    }
 }
 
 impl LoginThrottle {
@@ -426,11 +419,7 @@ pub fn offset_host_input_packet(packet: &[u8], offset_x: i32, offset_y: i32) -> 
         return packet.to_vec();
     }
     if let Some(HostInputEvent::Mouse {
-        msg,
-        wparam,
-        x,
-        y,
-        ..
+        msg, wparam, x, y, ..
     }) = decode_host_input(packet)
     {
         if msg == 0x0200 {
@@ -638,8 +627,10 @@ pub fn compute_dirty_rect(
         let curr_row = &curr[row_start..row_start + row_bytes];
 
         for (x, (p_chunk, c_chunk)) in prev_row
-            .chunks_exact(2)
-            .zip(curr_row.chunks_exact(2))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(curr_row.as_chunks::<2>().0.iter())
             .enumerate()
         {
             if p_chunk != c_chunk {
@@ -770,10 +761,9 @@ impl HostCore {
                 self.next_frame_seq = FIRST_FRAME_NUMBER;
                 self.waiting_ack = false;
                 let (answer_bytes, next_e2e) = match negotiated {
-                    Some((ans, cipher)) => (
-                        ans,
-                        crate::e2e::E2eNegotiationState::Established(cipher),
-                    ),
+                    Some((ans, cipher)) => {
+                        (ans, crate::e2e::E2eNegotiationState::Established(cipher))
+                    }
                     None => (Vec::new(), crate::e2e::E2eNegotiationState::Disabled),
                 };
                 actions.push(HostAction::ReleaseAllInput);
@@ -796,10 +786,9 @@ impl HostCore {
                 self.next_frame_seq = FIRST_FRAME_NUMBER;
                 self.waiting_ack = false;
                 let (answer_bytes, next_e2e) = match negotiated {
-                    Some((ans, cipher)) => (
-                        ans,
-                        crate::e2e::E2eNegotiationState::Established(cipher),
-                    ),
+                    Some((ans, cipher)) => {
+                        (ans, crate::e2e::E2eNegotiationState::Established(cipher))
+                    }
                     None => (Vec::new(), crate::e2e::E2eNegotiationState::Disabled),
                 };
                 actions.push(HostAction::SendPeer(encode_host_screen_init_with_e2e(
@@ -863,9 +852,7 @@ impl HostCore {
             self.waiting_ack = false;
             self.e2e = crate::e2e::E2eNegotiationState::Disabled;
             actions.push(HostAction::ReleaseAllInput);
-            actions.push(HostAction::SessionEnded(
-                "Viewer disconnected".to_string(),
-            ));
+            actions.push(HostAction::SessionEnded("Viewer disconnected".to_string()));
             return actions;
         }
 
@@ -1011,7 +998,10 @@ impl HostCore {
     }
 
     pub fn send_frame(&mut self, rgb555_top_down: &[u8]) -> Result<Vec<HostAction>, String> {
-        self.send_frame_rect((0, 0, self.layout.width, self.layout.height), rgb555_top_down)
+        self.send_frame_rect(
+            (0, 0, self.layout.width, self.layout.height),
+            rgb555_top_down,
+        )
     }
 
     pub fn end_session(&mut self, reason: &str) -> Vec<HostAction> {
@@ -1140,7 +1130,9 @@ impl Injector for X11CommandInjector {
         }
         if let Some(evt) = decode_host_input(packet) {
             match evt {
-                HostInputEvent::Mouse { msg, x, y, wheel, .. } => match msg {
+                HostInputEvent::Mouse {
+                    msg, x, y, wheel, ..
+                } => match msg {
                     0x0200 => {
                         let _ = Command::new("xdotool")
                             .args(["mousemove", &x.to_string(), &y.to_string()])
@@ -1248,7 +1240,7 @@ pub fn zpixmap_to_rgb555(
     {
         for y in (0..rows).rev() {
             let row = &data[y * stride..y * stride + width * 4];
-            for px in row.chunks_exact(4) {
+            for px in row.as_chunks::<4>().0 {
                 let w = (((px[2] as u16) >> 3) << 10)
                     | (((px[1] as u16) >> 3) << 5)
                     | ((px[0] as u16) >> 3);
@@ -1645,7 +1637,7 @@ impl Drop for X11Capturer {
 
 pub fn rgb555_bottom_up_to_top_down(bottom_up: &[u8], width: usize) -> Vec<u8> {
     let stride = width * 2;
-    if stride == 0 || bottom_up.is_empty() || bottom_up.len() % stride != 0 {
+    if stride == 0 || bottom_up.is_empty() || !bottom_up.len().is_multiple_of(stride) {
         return bottom_up.to_vec();
     }
     let mut top_down = Vec::with_capacity(bottom_up.len());
@@ -1975,10 +1967,9 @@ pub fn parse_ppm_to_rgb555_top_down(ppm: &[u8]) -> Result<(u32, u32, Vec<u8>), S
     }
     let rgb = &ppm[idx..idx + expected_rgb];
     let mut out = Vec::with_capacity(pixel_count * 2);
-    for px in rgb.chunks_exact(3) {
-        let w = (((px[0] as u16) >> 3) << 10)
-            | (((px[1] as u16) >> 3) << 5)
-            | ((px[2] as u16) >> 3);
+    for px in rgb.as_chunks::<3>().0 {
+        let w =
+            (((px[0] as u16) >> 3) << 10) | (((px[1] as u16) >> 3) << 5) | ((px[2] as u16) >> 3);
         out.extend_from_slice(&w.to_le_bytes());
     }
     Ok((width, height, out))
@@ -2326,17 +2317,12 @@ pub struct UinputInjector {
 impl UinputInjector {
     pub fn connect(shared_size: Arc<Mutex<(u32, u32)>>) -> Result<Self, String> {
         unsafe {
-            let pointer_fd = libc::open(
-                c"/dev/uinput".as_ptr(),
-                libc::O_WRONLY | libc::O_NONBLOCK,
-            );
+            let pointer_fd = libc::open(c"/dev/uinput".as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK);
             if pointer_fd < 0 {
                 return Err("cannot open /dev/uinput for pointer".to_string());
             }
-            let keyboard_fd = libc::open(
-                c"/dev/uinput".as_ptr(),
-                libc::O_WRONLY | libc::O_NONBLOCK,
-            );
+            let keyboard_fd =
+                libc::open(c"/dev/uinput".as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK);
             if keyboard_fd < 0 {
                 libc::close(pointer_fd);
                 return Err("cannot open /dev/uinput for keyboard".to_string());
@@ -2364,7 +2350,11 @@ impl UinputInjector {
                         resolution: 0,
                     },
                 };
-                libc::ioctl(pointer_fd, UI_ABS_SETUP, &abs_setup as *const UinputAbsSetup);
+                libc::ioctl(
+                    pointer_fd,
+                    UI_ABS_SETUP,
+                    &abs_setup as *const UinputAbsSetup,
+                );
             }
 
             let mut p_name = [0u8; 80];
@@ -2776,7 +2766,14 @@ impl HostSession {
         layout: DisplayLayout,
         backend: DesktopBackend,
     ) -> Self {
-        Self::with_id("", "", temp_password, master_password_proof, layout, backend)
+        Self::with_id(
+            "",
+            "",
+            temp_password,
+            master_password_proof,
+            layout,
+            backend,
+        )
     }
 
     pub fn with_id(
@@ -2985,18 +2982,10 @@ impl HostSession {
         self.start_with_endpoint(DEFAULT_REGISTRATION_HOST, 443, true)
     }
 
-    pub fn start_with_endpoint(
-        &self,
-        reg_host: &str,
-        reg_port: u16,
-        use_tls: bool,
-    ) -> HostStatus {
+    pub fn start_with_endpoint(&self, reg_host: &str, reg_port: u16, use_tls: bool) -> HostStatus {
         let (gen, lan_listener) = {
             let mut s = self.inner.lock().unwrap();
-            if s.running
-                && !s.host_id.is_empty()
-                && s.host_id.bytes().all(|b| b.is_ascii_digit())
-            {
+            if s.running && !s.host_id.is_empty() && s.host_id.bytes().all(|b| b.is_ascii_digit()) {
                 drop(s);
                 return self.status();
             }
@@ -3148,7 +3137,7 @@ impl HostSession {
                         let outbound: Vec<Vec<u8>> = {
                             let mut s = self.inner.lock().unwrap();
                             if authenticated || !s.outbound_peer_packets.is_empty() {
-                                s.outbound_peer_packets.drain(..).collect()
+                                std::mem::take(&mut s.outbound_peer_packets)
                             } else {
                                 Vec::new()
                             }
@@ -3435,7 +3424,7 @@ impl HostSession {
                         if s.lan_viewer_active {
                             Vec::new()
                         } else {
-                            s.outbound_peer_packets.drain(..).collect()
+                            std::mem::take(&mut s.outbound_peer_packets)
                         }
                     };
                     for pkt in outbound {
@@ -3451,7 +3440,7 @@ impl HostSession {
                         if s.lan_viewer_active {
                             Vec::new()
                         } else {
-                            s.outbound_peer_packets.drain(..).collect()
+                            std::mem::take(&mut s.outbound_peer_packets)
                         }
                     };
                     for pkt in outbound {
@@ -3536,7 +3525,11 @@ impl HostSession {
             auto_approve: s.core.auto_approve,
             phase: s.core.phase,
             viewer_id: s.core.active_viewer.as_ref().map(|v| v.claimed_id.clone()),
-            viewer_name: s.core.active_viewer.as_ref().map(|v| v.display_name.clone()),
+            viewer_name: s
+                .core
+                .active_viewer
+                .as_ref()
+                .map(|v| v.display_name.clone()),
             control_allowed: s.core.control_allowed,
             waiting_ack: s.core.waiting_ack,
             frame_seq: s.core.next_frame_seq,
@@ -3620,7 +3613,12 @@ impl HostSession {
             return Ok(actions);
         }
 
-        match compute_dirty_rect(&s.last_frame, &raw, s.core.layout.width, s.core.layout.height) {
+        match compute_dirty_rect(
+            &s.last_frame,
+            &raw,
+            s.core.layout.width,
+            s.core.layout.height,
+        ) {
             None => Ok(Vec::new()),
             Some((dx, dy, dw, dh)) => {
                 let total_pixels = (s.core.layout.width as u64) * (s.core.layout.height as u64);
@@ -3744,7 +3742,9 @@ mod tests {
         let valid_payload = sample_login_payload("temp_pass", "2", 1);
         let actions = core.handle_packet(&valid_payload, now);
         assert_eq!(core.phase, HostPhase::Approval);
-        assert!(matches!(&actions[0], HostAction::PromptApproval(v) if v.claimed_id == "111222333"));
+        assert!(
+            matches!(&actions[0], HostAction::PromptApproval(v) if v.claimed_id == "111222333")
+        );
 
         let approve_actions = core.approve(true);
         assert_eq!(core.phase, HostPhase::Starting);
@@ -3853,7 +3853,11 @@ mod tests {
         assert_eq!(char_keysym(0x20ac), Some(0x10020ac));
         assert_eq!(char_keysym(0xd800), None);
         assert_eq!(
-            (evdev_keycode(0x1e), evdev_keycode(0xe048), evdev_keycode(0xe0ff)),
+            (
+                evdev_keycode(0x1e),
+                evdev_keycode(0xe048),
+                evdev_keycode(0xe0ff)
+            ),
             (Some(0x1e), Some(103), None)
         );
     }
@@ -4018,8 +4022,7 @@ mod tests {
             assert_eq!(init_fields[0], vec![0]);
             assert_eq!(init_fields[7], vec![1]);
 
-            let start_frame =
-                encode_relay_frame(&utf16le("17"), "198.51.100.9", 54321, 1).unwrap();
+            let start_frame = encode_relay_frame(&utf16le("17"), "198.51.100.9", 54321, 1).unwrap();
             relay_stream.write_all(&start_frame).unwrap();
             relay_stream.flush().unwrap();
 
@@ -4216,7 +4219,10 @@ mod tests {
                 changed_box[i] = 0xAA;
             }
         }
-        assert_eq!(compute_dirty_rect(&prev, &changed_box, w, h), Some((3, 2, 5, 4)));
+        assert_eq!(
+            compute_dirty_rect(&prev, &changed_box, w, h),
+            Some((3, 2, 5, 4))
+        );
     }
 
     #[test]
@@ -4251,7 +4257,10 @@ mod tests {
         assert_eq!(manual_core.phase, HostPhase::Approval);
         assert!(!manual_core.e2e.is_enabled());
         assert!(!manual_core.e2e.fingerprint().is_empty());
-        assert!(matches!(prompt_actions.as_slice(), [HostAction::PromptApproval(_)]));
+        assert!(matches!(
+            prompt_actions.as_slice(),
+            [HostAction::PromptApproval(_)]
+        ));
 
         let approve_actions = manual_core.approve(true);
         assert_eq!(manual_core.phase, HostPhase::Starting);
@@ -4341,7 +4350,10 @@ mod tests {
         let mouse_raw = b"8|||512|||0|||2|||2";
         let sealed_mouse = viewer_e2e_2.cipher_mut().unwrap().seal(mouse_raw, false);
         let mouse_acts = auto_core.handle_packet(&sealed_mouse, now);
-        assert_eq!(mouse_acts, vec![HostAction::InjectInput(mouse_raw.to_vec())]);
+        assert_eq!(
+            mouse_acts,
+            vec![HostAction::InjectInput(mouse_raw.to_vec())]
+        );
 
         let sealed_chat = viewer_e2e_2
             .cipher_mut()

@@ -103,7 +103,10 @@ fn decode_cursor_resource(file: &CursorFile) -> Result<RgbaCursor, String> {
         return Err("Invalid cursor dimensions".to_string());
     }
 
-    if file.resource.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]) {
+    if file
+        .resource
+        .starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
+    {
         let img = image::load_from_memory_with_format(&file.resource, image::ImageFormat::Png)
             .map_err(|e| format!("Failed to decode cursor PNG: {}", e))?;
         let rgba = img.to_rgba8();
@@ -178,9 +181,7 @@ fn decode_dib_resource(file: &CursorFile) -> Result<RgbaCursor, String> {
                 1 | 4 | 8 => {
                     let i = match bits {
                         1 => ((b[row + x / 8] >> (7 - x % 8)) & 1) as usize,
-                        4 => {
-                            ((b[row + x / 2] >> if x % 2 == 0 { 4 } else { 0 }) & 15) as usize
-                        }
+                        4 => ((b[row + x / 2] >> if x % 2 == 0 { 4 } else { 0 }) & 15) as usize,
                         _ => b[row + x] as usize,
                     };
                     if i >= colors {
@@ -270,7 +271,9 @@ pub fn decode_cursor_parts(parts: &[Vec<u8>]) -> Result<CursorCommand, String> {
     if parts.is_empty() {
         return Err("Empty cursor parts list".to_string());
     }
-    let cmd = *parts[0].first().ok_or_else(|| "Missing command byte".to_string())?;
+    let cmd = *parts[0]
+        .first()
+        .ok_or_else(|| "Missing command byte".to_string())?;
     match cmd {
         3 => {
             if parts.len() < 2 || parts[1].len() < 4 {
@@ -382,9 +385,8 @@ impl CursorManager {
                 {
                     if let Some(oldest) = self.lru_order.pop_front() {
                         if let Some(evicted) = self.cache.remove(&oldest) {
-                            self.current_memory_bytes = self
-                                .current_memory_bytes
-                                .saturating_sub(evicted.rgba.len());
+                            self.current_memory_bytes =
+                                self.current_memory_bytes.saturating_sub(evicted.rgba.len());
                         }
                     }
                 }
@@ -431,7 +433,13 @@ impl CursorManager {
 mod tests {
     use super::*;
 
-    fn build_test_cur_file(width: u8, height: u8, hot_x: u16, hot_y: u16, png_data: &[u8]) -> Vec<u8> {
+    fn build_test_cur_file(
+        width: u8,
+        height: u8,
+        hot_x: u16,
+        hot_y: u16,
+        png_data: &[u8],
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&2u16.to_le_bytes());
@@ -464,10 +472,7 @@ mod tests {
             hot_x: 0,
             hot_y: 1,
             rgba: vec![
-                255, 0, 0, 255,
-                0, 255, 0, 255,
-                0, 0, 255, 255,
-                255, 255, 0, 255,
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
             ],
         };
         let png_bytes = cursor_orig.to_png().unwrap();
@@ -487,7 +492,11 @@ mod tests {
         let cmd3 = decode_cursor_parts(&parts3).unwrap();
         assert_eq!(cmd3, CursorCommand::Selection(42));
 
-        let parts28 = vec![vec![28u8], 150i16.to_le_bytes().to_vec(), 250i16.to_le_bytes().to_vec()];
+        let parts28 = vec![
+            vec![28u8],
+            150i16.to_le_bytes().to_vec(),
+            250i16.to_le_bytes().to_vec(),
+        ];
         let cmd28 = decode_cursor_parts(&parts28).unwrap();
         assert_eq!(cmd28, CursorCommand::Position { x: 150, y: 250 });
 
@@ -539,7 +548,10 @@ mod tests {
             hot_y: 0,
             rgba: vec![200; 16],
         };
-        mgr.handle_command(CursorCommand::Shape { hash: 101, cursor: cursor1.clone() });
+        mgr.handle_command(CursorCommand::Shape {
+            hash: 101,
+            cursor: cursor1.clone(),
+        });
         assert_eq!(mgr.cache_len(), 1);
         assert_eq!(mgr.current_cursor().unwrap().rgba, cursor1.rgba);
 

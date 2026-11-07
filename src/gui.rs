@@ -264,10 +264,9 @@ impl GuiLaunchOutcome {
     pub fn from_exit(exit_code: Option<i32>, elapsed: Duration) -> Self {
         match exit_code {
             Some(0) => Self::ClosedCleanly,
-            Some(code) if elapsed < Duration::from_secs(3) => Self::FallbackToBrowser(format!(
-                "native GUI exited early with code {}",
-                code
-            )),
+            Some(code) if elapsed < Duration::from_secs(3) => {
+                Self::FallbackToBrowser(format!("native GUI exited early with code {}", code))
+            }
             None if elapsed < Duration::from_secs(1) => {
                 Self::FallbackToBrowser("native GUI terminated by signal on startup".to_string())
             }
@@ -427,9 +426,9 @@ fn run_native_gui_inner(
     let webview_timer = webview.clone();
     let clip_machine_timer = clip_machine.clone();
     let viewer_path = config.viewer_path.clone();
-    let mut last_mtime: Option<std::time::SystemTime> = viewer_path.as_ref().and_then(|p| {
-        std::fs::metadata(p).ok().and_then(|m| m.modified().ok())
-    });
+    let mut last_mtime: Option<std::time::SystemTime> = viewer_path
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()));
 
     let timeout_proxy = event_loop.create_proxy();
 
@@ -627,8 +626,12 @@ fn build_native_menubar() -> muda::Menu {
     let remote_menu = muda::Submenu::new("Remote", true);
     let super_key_item =
         muda::MenuItem::with_id("SendSpecialKey:super", "Send Super key", true, None);
-    let cad_key_item =
-        muda::MenuItem::with_id("SendSpecialKey:ctrl_alt_del", "Send Ctrl+Alt+Del", true, None);
+    let cad_key_item = muda::MenuItem::with_id(
+        "SendSpecialKey:ctrl_alt_del",
+        "Send Ctrl+Alt+Del",
+        true,
+        None,
+    );
     let f9_key_item = muda::MenuItem::with_id(
         "SendSpecialKey:f9_next_monitor",
         "Next monitor (F9)",
@@ -642,8 +645,7 @@ fn build_native_menubar() -> muda::Menu {
         muda::MenuItem::with_id("ToggleToolsPopover", "Session tools", true, None);
     let chat_tab_item = muda::MenuItem::with_id("SelectToolTab:chat", "Chat", true, None);
     let files_tab_item = muda::MenuItem::with_id("SelectToolTab:files", "Files", true, None);
-    let clip_tab_item =
-        muda::MenuItem::with_id("SelectToolTab:clipboard", "Clipboard", true, None);
+    let clip_tab_item = muda::MenuItem::with_id("SelectToolTab:clipboard", "Clipboard", true, None);
     let audio_tab_item = muda::MenuItem::with_id("SelectToolTab:audio", "Audio", true, None);
     let _ = tools_menu.append_items(&[
         &toggle_tools_item,

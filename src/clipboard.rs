@@ -61,10 +61,7 @@ pub fn decode_clipboard_packet(payload: &[u8]) -> Option<ClipboardMessage> {
         };
         if fields.len() >= 2 && kind_opt == Some(PACKET_CLIPBOARD_SHORT) {
             let text = decode_clipboard_text_bytes(&fields[1], 0);
-            return Some(ClipboardMessage {
-                client_id: 0,
-                text,
-            });
+            return Some(ClipboardMessage { client_id: 0, text });
         }
         if fields.len() >= 3 && kind_opt == Some(PACKET_CLIPBOARD_SYNC) {
             let meta = if fields[1].len() >= 4 {
@@ -80,10 +77,7 @@ pub fn decode_clipboard_packet(payload: &[u8]) -> Option<ClipboardMessage> {
         }
         if fields.len() == 2 && kind_opt == Some(PACKET_CLIPBOARD_SYNC) {
             let text = decode_clipboard_text_bytes(&fields[1], 0);
-            return Some(ClipboardMessage {
-                client_id: 0,
-                text,
-            });
+            return Some(ClipboardMessage { client_id: 0, text });
         }
         if fields.len() >= 2
             && (fields[0].starts_with(b"|||33|||")
@@ -145,12 +139,14 @@ fn decode_clipboard_text_bytes(raw: &[u8], expected_uncompressed: usize) -> Stri
         return String::new();
     }
     if raw.starts_with(b"\x28\xb5\x2f\xfd") {
-        let cap = expected_uncompressed.max(raw.len() * 8).clamp(4096, 16 * 1024 * 1024);
+        let cap = expected_uncompressed
+            .max(raw.len() * 8)
+            .clamp(4096, 16 * 1024 * 1024);
         if let Ok(decompressed) = zstd::bulk::decompress(raw, cap) {
             return decode_utf16le_lossy(&decompressed);
         }
     }
-    if raw.len() % 2 == 0 && (raw.contains(&0) || std::str::from_utf8(raw).is_err()) {
+    if raw.len().is_multiple_of(2) && (raw.contains(&0) || std::str::from_utf8(raw).is_err()) {
         return decode_utf16le_lossy(raw);
     }
     match std::str::from_utf8(raw) {

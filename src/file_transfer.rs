@@ -17,7 +17,7 @@ pub const PACKET_FILE_ACK: u8 = 21;
 pub const DEFAULT_FILE_CHUNK_SIZE: usize = 16_384;
 
 pub fn is_utf16_string_packet(payload: &[u8]) -> bool {
-    if payload.len() < 6 || payload.len() % 2 != 0 {
+    if payload.len() < 6 || !payload.len().is_multiple_of(2) {
         return false;
     }
     if &payload[..6] == b"|\x00|\x00|\x00" {
@@ -225,7 +225,8 @@ fn decode_text_field(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    if bytes.len() % 2 == 0 && (bytes.contains(&0) || std::str::from_utf8(bytes).is_err()) {
+    if bytes.len().is_multiple_of(2) && (bytes.contains(&0) || std::str::from_utf8(bytes).is_err())
+    {
         return decode_utf16le_lossy(bytes);
     }
     String::from_utf8_lossy(bytes).to_string()
@@ -261,7 +262,11 @@ pub fn decode_file_transfer_packet(payload: &[u8]) -> Option<FileTransferPacket>
                     PACKET_FILE_ACCEPT if fields.len() >= 2 => {
                         let resume = if fields.len() >= 3 {
                             let v = decode_int_le(&fields[2]);
-                            if v <= 1 { 0 } else { v }
+                            if v <= 1 {
+                                0
+                            } else {
+                                v
+                            }
                         } else {
                             0
                         };
@@ -297,8 +302,7 @@ pub fn decode_file_transfer_packet(payload: &[u8]) -> Option<FileTransferPacket>
                 }
             }
         }
-        if fields.len() >= 2
-            && (fields[0].starts_with(b"|||15") || fields[0].starts_with(b"15|||"))
+        if fields.len() >= 2 && (fields[0].starts_with(b"|||15") || fields[0].starts_with(b"15|||"))
         {
             let header = String::from_utf8_lossy(&fields[0]);
             let parts = parse_command_fields(&header);
@@ -371,10 +375,9 @@ fn decode_raw_file_chunk_stream(payload: &[u8]) -> Option<FileTransferPacket> {
         if parts.len() >= 2 {
             let (file_id, offset) = if parts[0] == "15" && parts.len() >= 3 {
                 (parts[1].clone(), parts[2].parse::<u64>().unwrap_or(0))
-            } else if let Some(stripped) = parts[0].strip_prefix("15") {
-                (stripped.to_string(), parts[1].parse::<u64>().unwrap_or(0))
             } else {
-                return None;
+                let stripped = parts[0].strip_prefix("15")?;
+                (stripped.to_string(), parts[1].parse::<u64>().unwrap_or(0))
             };
             let data = payload[pos3 + 3..].to_vec();
             return Some(FileTransferPacket::Chunk {
@@ -410,7 +413,10 @@ fn parse_legacy_file_command(text: &str) -> Option<FileTransferPacket> {
                     file_size: parts[2].parse::<u64>().unwrap_or(0),
                 }),
                 "14" if !parts.is_empty() => {
-                    let flag = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
+                    let flag = parts
+                        .get(1)
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(1);
                     let resume = if flag <= 1 { 0 } else { flag };
                     Some(FileTransferPacket::Accept {
                         file_id: parts[0].to_string(),
@@ -422,7 +428,10 @@ fn parse_legacy_file_command(text: &str) -> Option<FileTransferPacket> {
                 }),
                 "21" if !parts.is_empty() => Some(FileTransferPacket::Ack {
                     file_id: parts[0].to_string(),
-                    next_offset: parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0),
+                    next_offset: parts
+                        .get(1)
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0),
                 }),
                 _ => None,
             };
@@ -502,7 +511,8 @@ impl FileTransferManager {
     }
 
     pub fn offer_file_from_path(&mut self, path: &Path) -> Result<(String, Vec<u8>), String> {
-        let data = fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let data =
+            fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -607,7 +617,10 @@ impl FileTransferManager {
         None
     }
 
-    pub fn handle_packet(&mut self, payload: &[u8]) -> Result<Option<(FileTransferPacket, Vec<Vec<u8>>)>, String> {
+    pub fn handle_packet(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<Option<(FileTransferPacket, Vec<Vec<u8>>)>, String> {
         let pkt = match decode_file_transfer_packet(payload) {
             Some(p) => p,
             None => return Ok(None),
@@ -688,11 +701,7 @@ impl FileTransferManager {
                         entry.transferred_bytes = entry.buffer.len() as u64;
                         entry.status = TransferStatus::Transferring;
 
-                        replies.push(encode_file_ack(
-                            &key,
-                            entry.transferred_bytes,
-                            false,
-                        )?);
+                        replies.push(encode_file_ack(&key, entry.transferred_bytes, false)?);
 
                         if entry.transferred_bytes >= entry.file_size {
                             entry.status = TransferStatus::Completed;

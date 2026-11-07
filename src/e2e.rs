@@ -122,11 +122,7 @@ impl E2eSessionCipher {
         Self::from_directional_keys(tx_key, rx_key, fingerprint)
     }
 
-    pub fn from_directional_keys(
-        tx_key: [u8; 32],
-        rx_key: [u8; 32],
-        fingerprint: String,
-    ) -> Self {
+    pub fn from_directional_keys(tx_key: [u8; 32], rx_key: [u8; 32], fingerprint: String) -> Self {
         let tx_enc_key = hmac_sha256(&tx_key, b"ude2-aes256-ctr-key");
         let tx_mac_key = hmac_sha256(&tx_key, b"ude2-hmac-sha256-key");
         let rx_enc_key = hmac_sha256(&rx_key, b"ude2-aes256-ctr-key");
@@ -168,13 +164,8 @@ impl E2eSessionCipher {
         let ct_slice = &mut out[E2E_HEADER_LEN..E2E_HEADER_LEN + plaintext.len()];
         xor_aes256_ctr(&self.tx_aes, seq, ct_slice);
 
-        let tag = compute_packet_tag_preexpanded(
-            &self.tx_ipad,
-            &self.tx_opad,
-            seq,
-            flag_byte,
-            ct_slice,
-        );
+        let tag =
+            compute_packet_tag_preexpanded(&self.tx_ipad, &self.tx_opad, seq, flag_byte, ct_slice);
         out.extend_from_slice(&tag);
     }
 
@@ -344,8 +335,8 @@ pub fn finalize_viewer_handshake(
         return Ok(E2eNegotiationState::Disabled);
     }
 
-    let text = std::str::from_utf8(trimmed)
-        .map_err(|_| "invalid UTF-8 in host E2E answer".to_string())?;
+    let text =
+        std::str::from_utf8(trimmed).map_err(|_| "invalid UTF-8 in host E2E answer".to_string())?;
     let rest = text
         .strip_prefix(E2E_HANDSHAKE_PREFIX)
         .ok_or_else(|| "unsupported host E2E version".to_string())?;
@@ -413,7 +404,7 @@ pub fn compute_session_base(
 
     let mut fp_hasher = Sha256::new();
     fp_hasher.update(b"ultradesk-e2e-fp-v1");
-    fp_hasher.update(&base);
+    fp_hasher.update(base);
     fp_hasher.update(viewer_pub);
     fp_hasher.update(host_pub);
     let fp_digest: [u8; 32] = fp_hasher.finalize().into();
@@ -443,17 +434,16 @@ fn xor_aes256_ctr(cipher: &Aes256, seqnum: u64, data: &mut [u8]) {
     ctr_block[..8].copy_from_slice(&seq_le);
 
     let mut block_idx = 0u64;
-    let mut chunks = data.chunks_exact_mut(16);
-    for chunk in &mut chunks {
+    let (chunks, rem) = data.as_chunks_mut::<16>();
+    for chunk in chunks {
         ctr_block[8..].copy_from_slice(&block_idx.to_be_bytes());
         block_idx = block_idx.wrapping_add(1);
         let mut keystream = aes::Block::from(ctr_block);
         cipher.encrypt_block(&mut keystream);
-        let p = u128::from_ne_bytes(chunk.try_into().unwrap());
+        let p = u128::from_ne_bytes(*chunk);
         let k = u128::from_ne_bytes(keystream.as_slice().try_into().unwrap());
-        chunk.copy_from_slice(&(p ^ k).to_ne_bytes());
+        *chunk = (p ^ k).to_ne_bytes();
     }
-    let rem = chunks.into_remainder();
     if !rem.is_empty() {
         ctr_block[8..].copy_from_slice(&block_idx.to_be_bytes());
         let mut keystream = aes::Block::from(ctr_block);
@@ -475,14 +465,14 @@ fn compute_packet_tag_preexpanded(
     let mut inner = Sha256::new();
     inner.update(ipad);
     inner.update(E2E_FRAME_MAGIC);
-    inner.update(&seqnum.to_le_bytes());
-    inner.update(&[unicode_flag]);
+    inner.update(seqnum.to_le_bytes());
+    inner.update([unicode_flag]);
     inner.update(ciphertext);
     let inner_hash = inner.finalize();
 
     let mut outer = Sha256::new();
     outer.update(opad);
-    outer.update(&inner_hash);
+    outer.update(inner_hash);
     let full = outer.finalize();
     let mut tag = [0u8; 16];
     tag.copy_from_slice(&full[..16]);
@@ -492,13 +482,13 @@ fn compute_packet_tag_preexpanded(
 pub fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     let (ipad, opad) = expand_hmac_pads(key);
     let mut inner = Sha256::new();
-    inner.update(&ipad);
+    inner.update(ipad);
     inner.update(data);
     let inner_hash = inner.finalize();
 
     let mut outer = Sha256::new();
-    outer.update(&opad);
-    outer.update(&inner_hash);
+    outer.update(opad);
+    outer.update(inner_hash);
     outer.finalize().into()
 }
 

@@ -133,7 +133,11 @@ fn find_asset_file(file_name: &str) -> Option<PathBuf> {
         .ok()
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| {
+            env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
         .map(|base| base.join("ultradesk-rust").join(file_name))
         .unwrap_or_default();
     let candidates = [
@@ -187,12 +191,16 @@ fn main() {
             println!("  ultradesk-rust id                             Print Host ID, Temp Password, and XDG profile info");
             println!("  ultradesk-rust master-password <PW>|--clear   Set or clear persistent Host master password");
             println!("\nOptions:");
-            println!("  --host <ADDR>          Bind address for Portal HTTP server (default: 127.0.0.1)");
+            println!(
+                "  --host <ADDR>          Bind address for Portal HTTP server (default: 127.0.0.1)"
+            );
             println!("  --port <PORT>          Bind port for Portal HTTP server (default: auto)");
             println!("  --partner-id <ID>      Auto-connect to partner ID on startup");
             println!("  --password <PW>        Partner password for auto-connect");
             println!("  --auto-approve         Auto-approve incoming Host connections");
-            println!("  --no-gui               Run headless without opening WebKit2/browser window");
+            println!(
+                "  --no-gui               Run headless without opening WebKit2/browser window"
+            );
             println!("  --open-browser         Open Portal URL in default web browser");
             return;
         }
@@ -200,8 +208,12 @@ fn main() {
             ProfileManager::from_custom_dir(env::temp_dir().join("ultradesk-rust"))
         });
         if sub == "id" {
-            let host_prof = pm.load_or_create_host().expect("Failed to load host profile");
-            let client_prof = pm.load_or_create_client().expect("Failed to load client profile");
+            let host_prof = pm
+                .load_or_create_host()
+                .expect("Failed to load host profile");
+            let client_prof = pm
+                .load_or_create_client()
+                .expect("Failed to load client profile");
             let live_id = ultradesk_rust::host::query_live_host_id(
                 &host_prof.device_id,
                 &host_prof.hardware_mac,
@@ -301,7 +313,10 @@ fn main() {
         "http://{}/?theme={}&lang={}&pill={}",
         portal.bind_addr, snap.saved_theme, snap.saved_language, pill
     );
-    println!("UltraDesk Controller core listening on http://127.0.0.1:{}", bound_port);
+    println!(
+        "UltraDesk Controller core listening on http://127.0.0.1:{}",
+        bound_port
+    );
 
     let shutdown = portal.shutdown.clone();
     let server_handle = portal.spawn(listener);

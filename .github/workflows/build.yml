@@ -32,13 +32,13 @@ jobs:
       - name: Install dependencies (glibc)
         if: matrix.install == 'arch'
         run: |
-          pacman -Syu --noconfirm base-devel rust cargo git openssl libxcb pkgconf python
+          pacman -Syu --noconfirm base-devel rust cargo git openssl libxcb pkgconf python gtk3 webkit2gtk-4.1 libsoup3
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install dependencies (musl)
         if: matrix.install == 'alpine'
         run: |
-          apk add --no-cache build-base rust cargo rustfmt clippy git openssl-dev libxcb-dev pkgconf python3
+          apk add --no-cache build-base rust cargo rustfmt rust-clippy git openssl-dev libxcb-dev pkgconf python3 gtk+3.0-dev webkit2gtk-4.1-dev libsoup3-dev
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@v7
@@ -55,16 +55,25 @@ jobs:
       - name: Run tests
         run: cargo test --release
 
-  python-lint:
-    name: Python lint
+  web-lint:
+    name: Web UI lint and typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Run Ruff Lint check
-        uses: astral-sh/ruff-action@v4.1.0
+      - uses: actions/setup-node@v4
         with:
-          args: 'check app_window.py'
-      - name: Run Ruff Format check
-        uses: astral-sh/ruff-action@v4.1.0
-        with:
-          args: 'format --check app_window.py'
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Run TypeScript typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Run ESLint check
+        working-directory: web
+        run: npm run lint
+      - name: Run Prettier format check
+        working-directory: web
+        run: npm run format:check

@@ -59,11 +59,19 @@ pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 
 pub fn encode_base64(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
         out.push(TABLE[b0 >> 2] as char);
         out.push(TABLE[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
         if chunk.len() > 1 {
@@ -316,13 +324,17 @@ fn handle_http_client(
         if bytes_read == 0 {
             break;
         }
-        let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
         if parts.len() < 2 {
             break;
         }
         let method = parts[0];
         let raw_target = parts[1];
-        let http_version = if parts.len() >= 3 { parts[2] } else { "HTTP/1.1" };
+        let http_version = if parts.len() >= 3 {
+            parts[2]
+        } else {
+            "HTTP/1.1"
+        };
         let (path, query_str) = match raw_target.split_once('?') {
             Some((p, q)) => (p, q),
             None => (raw_target, ""),
@@ -370,10 +382,8 @@ fn handle_http_client(
         };
 
         let mut body = vec![0u8; content_length.min(32 * 1024 * 1024)];
-        if !body.is_empty() {
-            if reader.read_exact(&mut body).is_err() {
-                break;
-            }
+        if !body.is_empty() && reader.read_exact(&mut body).is_err() {
+            break;
         }
 
         let res = match (method, path) {
@@ -382,10 +392,24 @@ fn handle_http_client(
                     .as_ref()
                     .and_then(|p| fs::read(p).ok())
                     .unwrap_or_else(|| DEFAULT_VIEWER_HTML.as_bytes().to_vec());
-                write_http_response(&mut stream, 200, "text/html; charset=utf-8", &[], &html, keep_alive)
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "text/html; charset=utf-8",
+                    &[],
+                    &html,
+                    keep_alive,
+                )
             }
             ("GET", "/favicon.ico" | "/ultradesk-rust.png" | "/ultraviewer-linux.png") => {
-                write_http_response(&mut stream, 200, "image/png", &[], DEFAULT_APP_ICON_PNG, keep_alive)
+                write_http_response(
+                    &mut stream,
+                    200,
+                    "image/png",
+                    &[],
+                    DEFAULT_APP_ICON_PNG,
+                    keep_alive,
+                )
             }
             ("GET", "/status" | "/state") => {
                 let state = session.snapshot();
@@ -585,9 +609,12 @@ fn handle_http_client(
                         &json!({ "ok": true, "state": state }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("GET", "/credentials") => {
@@ -695,9 +722,12 @@ fn handle_http_client(
                         &json!({ "ok": true, "bytes_sent": wire.len() }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/audio/toggle") => {
@@ -714,17 +744,18 @@ fn handle_http_client(
                         }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/clipboard") => {
                 let req: ClipboardUpdateRequest = serde_json::from_slice(&body).unwrap_or_default();
                 let res = if req.sync_from_system {
-                    session
-                        .sync_from_system_clipboard()
-                        .map(|t| (t, true))
+                    session.sync_from_system_clipboard().map(|t| (t, true))
                 } else {
                     session
                         .send_clipboard(&req.text, true)
@@ -742,9 +773,12 @@ fn handle_http_client(
                         }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/files/send") => {
@@ -775,9 +809,12 @@ fn handle_http_client(
                         }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/files/accept") => {
@@ -789,9 +826,12 @@ fn handle_http_client(
                         &json!({ "ok": true, "state": session.snapshot() }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/files/cancel") => {
@@ -803,9 +843,12 @@ fn handle_http_client(
                         &json!({ "ok": true, "state": session.snapshot() }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/chat") => {
@@ -817,9 +860,12 @@ fn handle_http_client(
                         &json!({ "ok": true, "state": session.snapshot() }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/monitor") => {
@@ -829,7 +875,12 @@ fn handle_http_client(
                 } else {
                     session.select_monitor(req.index)
                 };
-                write_json_response(&mut stream, 200, &json!({ "ok": true, "state": state }), keep_alive)
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "state": state }),
+                    keep_alive,
+                )
             }
             ("POST", "/host/monitor") => {
                 let req: MonitorSelectRequest = serde_json::from_slice(&body).unwrap_or_default();
@@ -854,61 +905,112 @@ fn handle_http_client(
                         }),
                         keep_alive,
                     ),
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("GET", "/host/status") => {
                 let host = session.host_status();
-                write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "host": host }),
+                    keep_alive,
+                )
             }
             ("POST", "/host/start") => {
                 let host = session.host_start();
-                write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "host": host }),
+                    keep_alive,
+                )
             }
             ("POST", "/host/stop") => {
                 let host = session.host_stop();
-                write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "host": host }),
+                    keep_alive,
+                )
             }
             ("POST", "/host/approve") => {
                 let req: HostControlRequest = serde_json::from_slice(&body).unwrap_or_default();
                 match session.host_approve(req.allow_control) {
-                    Ok(host) => {
-                        write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
-                    }
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Ok(host) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "host": host }),
+                        keep_alive,
+                    ),
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/host/decline") => match session.host_decline() {
-                Ok(host) => write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive),
-                Err(e) => write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive),
+                Ok(host) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "host": host }),
+                    keep_alive,
+                ),
+                Err(e) => write_json_response(
+                    &mut stream,
+                    400,
+                    &json!({ "ok": false, "error": e }),
+                    keep_alive,
+                ),
             },
             ("POST", "/host/control") => {
                 let req: HostControlRequest = serde_json::from_slice(&body).unwrap_or_default();
                 match session.host_set_control(req.allow_control) {
-                    Ok(host) => {
-                        write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
-                    }
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Ok(host) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "host": host }),
+                        keep_alive,
+                    ),
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
             ("POST", "/host/master-password") => {
                 let req: MasterPasswordRequest = serde_json::from_slice(&body).unwrap_or_default();
                 match session.host_set_master_password(req.password.as_deref()) {
-                    Ok(host) => {
-                        write_json_response(&mut stream, 200, &json!({ "ok": true, "host": host }), keep_alive)
-                    }
-                    Err(e) => {
-                        write_json_response(&mut stream, 400, &json!({ "ok": false, "error": e }), keep_alive)
-                    }
+                    Ok(host) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "host": host }),
+                        keep_alive,
+                    ),
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
                 }
             }
-            _ => write_json_response(&mut stream, 404, &json!({ "error": "Not found" }), keep_alive),
+            _ => write_json_response(
+                &mut stream,
+                404,
+                &json!({ "error": "Not found" }),
+                keep_alive,
+            ),
         };
 
         if res.is_err() || !keep_alive {

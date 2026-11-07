@@ -101,7 +101,11 @@ pub fn keyboard(vk: i32, down: bool, system: bool) -> Result<Vec<u8>, String> {
     }
     let vk = normalize_vk(vk);
     let event = if system {
-        if down { 260 } else { 261 }
+        if down {
+            260
+        } else {
+            261
+        }
     } else if down {
         256
     } else {
@@ -116,7 +120,11 @@ pub fn keyboard_legacy_5field(vk: i32, down: bool, system: bool) -> Result<Vec<u
     }
     let vk = normalize_vk(vk);
     let event = if system {
-        if down { 260 } else { 261 }
+        if down {
+            260
+        } else {
+            261
+        }
     } else if down {
         256
     } else {
@@ -144,12 +152,12 @@ pub fn supports_binary_keyboard(partner_version: &str) -> bool {
         .filter_map(|s| s.trim().parse().ok())
         .collect();
     let target = [6, 2, 13];
-    for i in 0..3 {
+    for (i, &t) in target.iter().enumerate() {
         let v = parts.get(i).copied().unwrap_or(0);
-        if v > target[i] {
+        if v > t {
             return true;
         }
-        if v < target[i] {
+        if v < t {
             return false;
         }
     }
@@ -314,7 +322,7 @@ pub enum HostInputEvent {
 pub fn decode_host_input(payload: &[u8]) -> Option<HostInputEvent> {
     if payload.first() == Some(&30) {
         if payload.len() != 11
-            || payload[1..4] != [b'|', b'|', b'|']
+            || payload[1..4] != *b"|||"
             || !(1..=4).contains(&payload[4])
             || payload[10] > 1
         {
@@ -366,19 +374,17 @@ pub fn decode_host_input(payload: &[u8]) -> Option<HostInputEvent> {
         });
     }
 
-    if msg_code == WM_MOUSEMOVE {
-        if fields.len() == 5 {
-            let wparam: i32 = fields[2].parse().ok()?;
-            let x: i32 = fields[3].parse().ok()?;
-            let y: i32 = fields[4].parse().ok()?;
-            return Some(HostInputEvent::Mouse {
-                msg: WM_MOUSEMOVE,
-                wparam,
-                x,
-                y,
-                wheel: 0,
-            });
-        }
+    if msg_code == WM_MOUSEMOVE && fields.len() == 5 {
+        let wparam: i32 = fields[2].parse().ok()?;
+        let x: i32 = fields[3].parse().ok()?;
+        let y: i32 = fields[4].parse().ok()?;
+        return Some(HostInputEvent::Mouse {
+            msg: WM_MOUSEMOVE,
+            wparam,
+            x,
+            y,
+            wheel: 0,
+        });
     }
 
     if msg_code == WM_MOUSEWHEEL {
@@ -484,14 +490,9 @@ impl InputEvent {
             } else {
                 vk_to_scancode(self.vk as u8)
             };
-            return Ok(encode_keyboard_binary(
-                kind,
-                self.vk as u8,
-                scan,
-                self.ch,
-                self.caps_lock,
-            )
-            .to_vec());
+            return Ok(
+                encode_keyboard_binary(kind, self.vk as u8, scan, self.ch, self.caps_lock).to_vec(),
+            );
         }
 
         if self.event_type == "text" || !self.text.is_empty() {
@@ -580,7 +581,7 @@ mod tests {
     fn test_unicode_text_packets() {
         let packets = encode_unicode_text_packets("Xin chào", false);
         assert_eq!(packets.len(), 8 * 2);
-        for pair in packets.chunks_exact(2) {
+        for pair in packets.as_chunks::<2>().0 {
             let down = decode_host_input(&pair[0]).unwrap();
             let up = decode_host_input(&pair[1]).unwrap();
             let (down_kind, down_vk, down_ch) = match down {

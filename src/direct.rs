@@ -282,8 +282,8 @@ impl DirectListener {
                             continue;
                         };
                         let peer_ip = *v4.ip();
-                        let ok_source =
-                            is_lan_address(peer_ip) || (allow_loopback && peer_ip.octets()[0] == 127);
+                        let ok_source = is_lan_address(peer_ip)
+                            || (allow_loopback && peer_ip.octets()[0] == 127);
 
                         if !ok_source || cls_map.lock().unwrap().len() >= MAX_DIRECT_CANDIDATES {
                             let _ = stream.shutdown(Shutdown::Both);
@@ -448,7 +448,14 @@ fn random_16_bytes() -> [u8; 16] {
     let seed = format!("{now}:{count}");
     let hex = crate::protocol::md5_hex_lower(seed.as_bytes());
     let mut out = [0u8; 16];
-    for (i, chunk) in hex.as_bytes().chunks_exact(2).take(16).enumerate() {
+    for (i, chunk) in hex
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .take(16)
+        .enumerate()
+    {
         if let Ok(s) = std::str::from_utf8(chunk) {
             out[i] = u8::from_str_radix(s, 16).unwrap_or(0);
         }
@@ -487,10 +494,11 @@ mod tests {
     fn test_direct_codec_fixtures() {
         let codec = DirectCodec::new("password").unwrap();
         let payload = &[0x48, 0, 0x69, 0];
-        let want = unhex(
-            "20000000000102030405060708090a0b0c0d0e0f8ee36820538aebf76ccad1f1fe63df42",
-        );
-        let encoded = codec.encode_frame_with_iv(true, payload, &test_iv()).unwrap();
+        let want =
+            unhex("20000000000102030405060708090a0b0c0d0e0f8ee36820538aebf76ccad1f1fe63df42");
+        let encoded = codec
+            .encode_frame_with_iv(true, payload, &test_iv())
+            .unwrap();
         assert_eq!(encoded, want);
 
         let (flag, decoded) = codec.decode_frame(&want[4..]).unwrap();
@@ -525,17 +533,16 @@ mod tests {
     #[test]
     fn test_loopback_direct_listener_exchange() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let listener = DirectListener::start(
-            Ipv4Addr::new(127, 0, 0, 1),
-            "test-direct-key",
-            true,
-            tx,
-        )
-        .unwrap();
+        let listener =
+            DirectListener::start(Ipv4Addr::new(127, 0, 0, 1), "test-direct-key", true, tx)
+                .unwrap();
 
         let mut client = TcpStream::connect(("127.0.0.1", listener.port)).unwrap();
-        let DirectEvent::Connected { id, peer_ip, writer } =
-            rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        let DirectEvent::Connected {
+            id,
+            peer_ip,
+            writer,
+        } = rx.recv_timeout(Duration::from_secs(5)).unwrap()
         else {
             panic!("Expected Connected event");
         };
@@ -545,8 +552,11 @@ mod tests {
         let client_frame = client_codec.encode_frame(true, b"hello-direct").unwrap();
         client.write_all(&client_frame).unwrap();
 
-        let DirectEvent::Message { id: mid, format_flag, payload } =
-            rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        let DirectEvent::Message {
+            id: mid,
+            format_flag,
+            payload,
+        } = rx.recv_timeout(Duration::from_secs(5)).unwrap()
         else {
             panic!("Expected Message event");
         };

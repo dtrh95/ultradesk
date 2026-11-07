@@ -365,7 +365,7 @@ jobs:
             set -euo pipefail
             pacman -Syu --noconfirm \
               base-devel rust cargo openssl libxcb python \
-              make pkgconf zstd
+              make pkgconf zstd gtk3 webkit2gtk-4.1 libsoup3
 
             cd /work
             make build

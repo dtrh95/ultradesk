@@ -12,7 +12,10 @@ all: build
 build-web:
 	cd web && npm run build
 
-build: build-web
+build:
+	@if [ ! -f viewer.html ] && command -v npm >/dev/null 2>&1; then \
+		$(MAKE) build-web; \
+	fi
 	cargo build --release --locked || cargo build --release
 
 check:

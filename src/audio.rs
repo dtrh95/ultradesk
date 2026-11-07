@@ -66,9 +66,7 @@ where
     if attempted {
         let op_name = operation.unwrap();
         let step_res: Result<(), String> = (|| {
-            let body = fields
-                .get(1)
-                .ok_or_else(|| "IndexError".to_string())?;
+            let body = fields.get(1).ok_or_else(|| "IndexError".to_string())?;
             let audio_bytes: Vec<u8> = if kind == 42 || kind == 50 {
                 if body.len() < 4 {
                     return Err("ValueError".to_string());
@@ -222,18 +220,16 @@ fn block4(state: &mut G722CodecState, band_idx: usize, d: i32) {
     b.sz = 0;
     for i in 1..=6 {
         b.sg[i] = b.d[i] >> 15;
-        b.bp[i] = saturate(
-            b.b[i] - (b.b[i] >> 8) + (if (b.sg[0] ^ b.sg[i]) == 0 { 128 } else { -128 }),
-        );
+        b.bp[i] =
+            saturate(b.b[i] - (b.b[i] >> 8) + (if (b.sg[0] ^ b.sg[i]) == 0 { 128 } else { -128 }));
         b.sz = saturate(b.sz + ((b.bp[i] * b.d[i]) >> 14));
     }
     b.sg[0] = b.p[0] >> 15;
     b.sg[1] = b.p[1] >> 15;
     b.sg[2] = b.p[2] >> 15;
 
-    b.ap[1] = saturate(
-        b.a[1] - (b.a[1] >> 8) + (if (b.sg[0] ^ b.sg[1]) == 0 { 192 } else { -192 }),
-    );
+    b.ap[1] =
+        saturate(b.a[1] - (b.a[1] >> 8) + (if (b.sg[0] ^ b.sg[1]) == 0 { 192 } else { -192 }));
     let a2p = if (b.sg[0] ^ b.sg[2]) == 0 { 128 } else { -128 }
         - if (b.sg[1] ^ b.sg[2]) == 0 {
             b.a[1] >> 7

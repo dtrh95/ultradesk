@@ -1,3 +1,9 @@
+#![allow(
+    clippy::large_enum_variant,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+
 pub mod audio;
 pub mod clipboard;
 pub mod cursor;
@@ -30,8 +36,8 @@ mod tests {
         FileTransferPacket, TransferDirection, TransferStatus,
     };
     use crate::gui::{
-        ClipboardAction, ClipboardEvent, ClipboardSeedingState, ClipboardSyncMachine,
-        LanguageCode, SpecialKey, ThemeName, ToolTab, ToolbarAction,
+        ClipboardAction, ClipboardEvent, ClipboardSeedingState, ClipboardSyncMachine, LanguageCode,
+        SpecialKey, ThemeName, ToolTab, ToolbarAction,
     };
     use crate::input::{
         keyboard, mouse_button, mouse_move, mouse_wheel, with_held_key, InputEvent,
@@ -44,9 +50,9 @@ mod tests {
         decrypt_registration_bytes, derive_p2p_aes_key, derive_vfunction_key_bytes, dib_stride,
         encode_byte_array_fields, encode_p2p_frame, encode_relay_frame, encode_senddata_string,
         encode_transport_frame, encrypt_p2p_aes_body, encrypt_registration_bytes, export_cache,
-        extract_command3_identity,
-        extract_tile, http_service_preface, import_cache, login_password_fields, pack_atlas,
-        restore_atlas, tile_sample_score, CachedItem, FrameStream, REGISTRATION_PASSWORD,
+        extract_command3_identity, extract_tile, http_service_preface, import_cache,
+        login_password_fields, pack_atlas, restore_atlas, tile_sample_score, CachedItem,
+        FrameStream, REGISTRATION_PASSWORD,
     };
     use crate::screen::{
         apply_rgb555_update, compress_rgb555_with_dict, desktop_size_from_login, RGB555Screen,
@@ -93,7 +99,21 @@ mod tests {
         }
         let mut atlas = vec![0u8; 4 * 4 * 3];
         let mut restored_frame = vec![0u8; stride24 * 4];
-        pack_atlas(&frame24, &mut atlas, 3, 12, stride24 as isize, 1, 1, 0, 0, 2, 2, 4).unwrap();
+        pack_atlas(
+            &frame24,
+            &mut atlas,
+            3,
+            12,
+            stride24 as isize,
+            1,
+            1,
+            0,
+            0,
+            2,
+            2,
+            4,
+        )
+        .unwrap();
         restore_atlas(
             &atlas,
             &mut restored_frame,
@@ -245,8 +265,7 @@ mod tests {
         assert_eq!(dec_raw, p2p_plain);
 
         let enc_frame = encode_p2p_frame(p2p_plain, false, Some("secret"), Some(&iv)).unwrap();
-        let (dec_enc, flag_enc) =
-            decode_p2p_frame_body(&enc_frame[4..], Some("secret")).unwrap();
+        let (dec_enc, flag_enc) = decode_p2p_frame_body(&enc_frame[4..], Some("secret")).unwrap();
         assert!(!flag_enc);
         assert_eq!(dec_enc, p2p_plain);
     }
@@ -276,10 +295,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(res42.event_id, None);
-        assert_eq!(
-            seen,
-            vec![("Play16BitAudio".to_string(), vec![0u8; 12])]
-        );
+        assert_eq!(seen, vec![("Play16BitAudio".to_string(), vec![0u8; 12])]);
 
         seen.clear();
         let pkt51 = encode_byte_array_fields(&[&[51u8], b"\xaa\xbb"]).unwrap();
@@ -518,15 +534,7 @@ mod tests {
         assert_eq!(keyboard(165, false, true).unwrap(), b"8|||261|||18");
 
         let mut sent = Vec::new();
-        with_held_key(
-            |pkt| sent.push(pkt),
-            18,
-            true,
-            || {
-                Ok(())
-            },
-        )
-        .unwrap();
+        with_held_key(|pkt| sent.push(pkt), 18, true, || Ok(())).unwrap();
         assert_eq!(
             sent,
             vec![b"8|||260|||18".to_vec(), b"8|||261|||18".to_vec()]
@@ -630,8 +638,7 @@ mod tests {
         let utf16_bytes = encode_senddata_string(&long_text, true);
         let zstd_bytes = zstd::bulk::compress(&utf16_bytes, 1).unwrap();
         let uncomp_len = (utf16_bytes.len() as i32).to_le_bytes();
-        let vserver_zstd =
-            encode_byte_array_fields(&[&[33u8], &uncomp_len, &zstd_bytes]).unwrap();
+        let vserver_zstd = encode_byte_array_fields(&[&[33u8], &uncomp_len, &zstd_bytes]).unwrap();
         let msg_vserver_zstd = decode_clipboard_packet(&vserver_zstd).unwrap();
         assert_eq!(msg_vserver_zstd.text, long_text);
 
@@ -781,7 +788,8 @@ mod tests {
         let b64 = encode_base64(b"hello-rust-uv");
         assert_eq!(decode_base64(&b64).unwrap(), b"hello-rust-uv");
 
-        let test_creds_dir = std::env::temp_dir().join(format!("uv_creds_test_{}", std::process::id()));
+        let test_creds_dir =
+            std::env::temp_dir().join(format!("uv_creds_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&test_creds_dir);
         let _ = std::fs::create_dir_all(&test_creds_dir);
         let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
@@ -805,11 +813,9 @@ mod tests {
 
         let clip_pkt = encode_clipboard_modern_packet(1, "Remote clip 123").unwrap();
         session.handle_session_payload(&clip_pkt);
-        let host_chat_pkt = encode_byte_array_fields(&[
-            &[12u8, 0u8],
-            &encode_senddata_string("hello cc", true),
-        ])
-        .unwrap();
+        let host_chat_pkt =
+            encode_byte_array_fields(&[&[12u8, 0u8], &encode_senddata_string("hello cc", true)])
+                .unwrap();
         session.handle_session_payload(&host_chat_pkt);
         assert_eq!(
             session.snapshot().chat_messages,
@@ -848,7 +854,10 @@ mod tests {
         let resp_evt = http_post(&addr, "/event", "{\"type\":\"move\",\"x\":150,\"y\":250}");
         assert!(resp_evt.contains("\"ok\":true"));
         let snap_after_move = session.snapshot();
-        assert_eq!((snap_after_move.cursor_x, snap_after_move.cursor_y), (150, 250));
+        assert_eq!(
+            (snap_after_move.cursor_x, snap_after_move.cursor_y),
+            (150, 250)
+        );
 
         let resp_pref = http_post(
             &addr,
@@ -859,12 +868,12 @@ mod tests {
         let snap_pref = session.snapshot();
         assert_eq!(snap_pref.saved_theme, "gruvbox-light");
         assert_eq!(snap_pref.saved_language, "vi");
-        assert_eq!(snap_pref.saved_toolbar_collapsed, true);
+        assert!(snap_pref.saved_toolbar_collapsed);
 
         let creds_from_disk = load_saved_credentials();
         assert_eq!(creds_from_disk.theme, "gruvbox-light");
         assert_eq!(creds_from_disk.language, "vi");
-        assert_eq!(creds_from_disk.toolbar_collapsed, true);
+        assert!(creds_from_disk.toolbar_collapsed);
 
         let resp_html = http_get(&addr, "/");
         assert!(resp_html.contains("<html lang=\"en\">"));
@@ -972,7 +981,8 @@ mod tests {
         }
 
         let valid_hash: i32 = 424242;
-        let sel_pkt = encode_byte_array_fields(&[&[3u8][..], &valid_hash.to_le_bytes()[..]]).unwrap();
+        let sel_pkt =
+            encode_byte_array_fields(&[&[3u8][..], &valid_hash.to_le_bytes()[..]]).unwrap();
         session.handle_session_payload(&sel_pkt);
         {
             let guard = session.inner.lock().unwrap();
@@ -998,7 +1008,7 @@ mod tests {
         assert_eq!(snap_mon.height, 1080);
 
         let ver = snap_mon.frame_version;
-        let resp_jpg = http_get(&addr, &format!("/frame.jpg?v=0&q=75"));
+        let resp_jpg = http_get(&addr, "/frame.jpg?v=0&q=75");
         assert!(resp_jpg.starts_with("HTTP/1.1 200 OK"));
         assert!(resp_jpg.contains(&format!("X-Frame-Version: {}", ver)));
 
@@ -1071,10 +1081,7 @@ mod tests {
         assert_eq!(machine.on_host_clipboard("initial local text", true), None);
         assert_eq!(machine.seeding_state(), ClipboardSeedingState::Seeded);
 
-        assert_eq!(
-            machine.on_host_clipboard("second local text", false),
-            None
-        );
+        assert_eq!(machine.on_host_clipboard("second local text", false), None);
 
         assert_eq!(
             machine.on_host_clipboard("third local text", true),
@@ -1182,7 +1189,8 @@ mod tests {
         let json = serde_json::to_string(&ToolbarAction::SetLanguage(LanguageCode::Vi)).unwrap();
         assert_eq!(json, r#"{"action":"SetLanguage","payload":"vi"}"#);
 
-        let json = serde_json::to_string(&ToolbarAction::SendSpecialKey(SpecialKey::Super)).unwrap();
+        let json =
+            serde_json::to_string(&ToolbarAction::SendSpecialKey(SpecialKey::Super)).unwrap();
         assert_eq!(json, r#"{"action":"SendSpecialKey","payload":"super"}"#);
     }
 
@@ -1209,10 +1217,7 @@ mod tests {
             crate::session::parse_direct_lan_target("192.168.1.10"),
             Some(("192.168.1.10".to_string(), 5938))
         );
-        assert_eq!(
-            crate::session::parse_direct_lan_target("130173637"),
-            None
-        );
+        assert_eq!(crate::session::parse_direct_lan_target("130173637"), None);
 
         let tmp = std::env::temp_dir().join(format!("uv_lan_repro_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1318,7 +1323,11 @@ mod tests {
         let lookup_terms = effective_lookup_terms(
             &partner,
             134462379,
-            reg_profile.terms.get(2).map(String::as_str).unwrap_or_default(),
+            reg_profile
+                .terms
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or_default(),
         )
         .unwrap();
         assert_eq!(
@@ -1410,10 +1419,8 @@ mod tests {
             let (_, offer_state) = crate::e2e::create_viewer_offer("12345678", "proof1", "proof2");
             guard.e2e = offer_state;
         }
-        let legacy_init = crate::host::encode_host_screen_init_with_e2e(
-            &layout,
-            &[0xffu8, 0xfe, 0x00, 0x80],
-        );
+        let legacy_init =
+            crate::host::encode_host_screen_init_with_e2e(&layout, &[0xffu8, 0xfe, 0x00, 0x80]);
         legacy_viewer.handle_session_payload(&legacy_init);
         let legacy_snap = legacy_viewer.snapshot();
         assert_eq!(legacy_snap.state, "connected");

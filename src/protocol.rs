@@ -26,7 +26,7 @@ pub fn sha1_digest(data: &[u8]) -> [u8; 20] {
     }
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 80];
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
@@ -40,7 +40,7 @@ pub fn sha1_digest(data: &[u8]) -> [u8; 20] {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
-        for i in 0..80 {
+        for (i, &wi) in w.iter().enumerate() {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
@@ -52,7 +52,7 @@ pub fn sha1_digest(data: &[u8]) -> [u8; 20] {
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
-                .wrapping_add(w[i]);
+                .wrapping_add(wi);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -107,11 +107,7 @@ fn copy_rows(
     for i in 0..height {
         let s = source + i * source_step;
         let d = destination + i * destination_step;
-        if s < 0
-            || d < 0
-            || (s as usize) + sz > src.len()
-            || (d as usize) + sz > dst.len()
-        {
+        if s < 0 || d < 0 || (s as usize) + sz > src.len() || (d as usize) + sz > dst.len() {
             return Err("copy exceeds buffer".to_string());
         }
         pairs.push((s as usize, d as usize));
@@ -530,7 +526,9 @@ pub fn encode_senddata_string(text: &str, unicode_bytes: bool) -> Vec<u8> {
 
 pub fn decode_utf16le_lossy(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     String::from_utf16_lossy(&units)
@@ -825,7 +823,8 @@ pub fn login_password_fields(
     salt: Option<&str>,
 ) -> Result<LoginPasswordFields, String> {
     if password_type == 0 {
-        let s = salt.ok_or_else(|| "type0 login requires an explicit eight-digit salt".to_string())?;
+        let s =
+            salt.ok_or_else(|| "type0 login requires an explicit eight-digit salt".to_string())?;
         let primary = login_numeric_salt_digest(password, s)?;
         let secondary = connection_request_password_value(password, 0);
         Ok(LoginPasswordFields {
@@ -906,7 +905,7 @@ pub fn encrypt_p2p_aes_body(
 }
 
 pub fn decrypt_p2p_aes_body(body: &[u8], password: &str) -> Result<Vec<u8>, String> {
-    if body.len() < 32 || (body.len() - 16) % 16 != 0 {
+    if body.len() < 32 || !(body.len() - 16).is_multiple_of(16) {
         return Err("P2P body needs IV16 and complete ciphertext blocks".to_string());
     }
     let key = derive_p2p_aes_key(password)?;

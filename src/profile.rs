@@ -139,7 +139,10 @@ impl ProfileManager {
         if proof.len() == 32 && proof.chars().all(|c| c.is_ascii_hexdigit()) {
             Ok(Some(proof.to_ascii_lowercase()))
         } else {
-            Err(format!("Master password file {} is invalid", file.display()))
+            Err(format!(
+                "Master password file {} is invalid",
+                file.display()
+            ))
         }
     }
 }
@@ -231,7 +234,12 @@ pub fn normalize_display_name(name: &str) -> String {
     if trimmed.is_empty() {
         DEFAULT_DISPLAY_NAME.to_string()
     } else {
-        trimmed.chars().take(20).collect::<String>().trim().to_string()
+        trimmed
+            .chars()
+            .take(20)
+            .collect::<String>()
+            .trim()
+            .to_string()
     }
 }
 
@@ -497,7 +505,10 @@ mod tests {
 
     #[test]
     fn test_operating_system_wire_value() {
-        assert_eq!(operating_system_wire_value("6.8.0-45-generic"), "0|6|0|8|0|0");
+        assert_eq!(
+            operating_system_wire_value("6.8.0-45-generic"),
+            "0|6|0|8|0|0"
+        );
         assert_eq!(operating_system_wire_value("24.1.0"), "0|24|0|1|0|0");
         assert_eq!(
             operating_system_wire_value("5.15.153.1-microsoft"),

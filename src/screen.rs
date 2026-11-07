@@ -94,8 +94,7 @@ pub fn compress_rgb555_with_dict(raw: &[u8], level: i32) -> Result<Vec<u8>, Stri
 }
 
 pub fn compress_rgb555_standard(raw: &[u8], level: i32) -> Result<Vec<u8>, String> {
-    zstd::bulk::compress(raw, level)
-        .map_err(|e| format!("Zstd standard compression failed: {}", e))
+    zstd::bulk::compress(raw, level).map_err(|e| format!("Zstd standard compression failed: {}", e))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,8 +204,7 @@ impl DisplayLayout {
                 }
             }
             MonitorSelection::Subset(list) => {
-                let mut valid: Vec<usize> =
-                    list.iter().copied().filter(|&i| i < total).collect();
+                let mut valid: Vec<usize> = list.iter().copied().filter(|&i| i < total).collect();
                 valid.sort_unstable();
                 valid.dedup();
                 if valid.is_empty() {
@@ -309,13 +307,15 @@ pub fn decode_11_field_screen_update(fields: &[Vec<u8>]) -> Result<DecodedScreen
         {
             let left = i32::from_le_bytes([fields[1][0], fields[1][1], fields[1][2], fields[1][3]]);
             let top = i32::from_le_bytes([fields[1][4], fields[1][5], fields[1][6], fields[1][7]]);
-            let right = i32::from_le_bytes([fields[1][8], fields[1][9], fields[1][10], fields[1][11]]);
-            let bottom = i32::from_le_bytes([fields[1][12], fields[1][13], fields[1][14], fields[1][15]]);
+            let right =
+                i32::from_le_bytes([fields[1][8], fields[1][9], fields[1][10], fields[1][11]]);
+            let bottom =
+                i32::from_le_bytes([fields[1][12], fields[1][13], fields[1][14], fields[1][15]]);
             let width = (right - left).max(0) as u32;
             let height = (bottom - top).max(0) as u32;
             main_rects.push((left as u32, top as u32, width, height));
-        } else if fields[1].len() % 8 == 0 {
-            for chunk in fields[1].chunks_exact(8) {
+        } else if fields[1].len().is_multiple_of(8) {
+            for chunk in fields[1].as_chunks::<8>().0 {
                 let x = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
                 let y = u16::from_le_bytes([chunk[2], chunk[3]]) as u32;
                 let width = u16::from_le_bytes([chunk[4], chunk[5]]) as u32;
@@ -339,10 +339,10 @@ pub fn decode_11_field_screen_update(fields: &[Vec<u8>]) -> Result<DecodedScreen
     };
     let mut clip_rects = Vec::new();
     if !fields[5].is_empty() {
-        if fields[5].len() % 8 != 0 {
+        if !fields[5].len().is_multiple_of(8) {
             return Err("invalid clip rect length".to_string());
         }
-        for chunk in fields[5].chunks_exact(8) {
+        for chunk in fields[5].as_chunks::<8>().0 {
             clip_rects.push((
                 i16::from_le_bytes([chunk[0], chunk[1]]),
                 i16::from_le_bytes([chunk[2], chunk[3]]),
@@ -352,7 +352,7 @@ pub fn decode_11_field_screen_update(fields: &[Vec<u8>]) -> Result<DecodedScreen
         }
     }
     let scroll = if !fields[6].is_empty() {
-        if fields[6].len() < 10 || (fields[6].len() - 10) % 8 != 0 {
+        if fields[6].len() < 10 || !(fields[6].len() - 10).is_multiple_of(8) {
             return Err("invalid scroll-copy record length".to_string());
         }
         let delta = i16::from_le_bytes([fields[6][0], fields[6][1]]);
@@ -361,7 +361,7 @@ pub fn decode_11_field_screen_update(fields: &[Vec<u8>]) -> Result<DecodedScreen
         let w = i16::from_le_bytes([fields[6][6], fields[6][7]]);
         let h = i16::from_le_bytes([fields[6][8], fields[6][9]]);
         let mut copy_back = Vec::new();
-        for chunk in fields[6][10..].chunks_exact(8) {
+        for chunk in fields[6][10..].as_chunks::<8>().0 {
             copy_back.push((
                 i16::from_le_bytes([chunk[0], chunk[1]]),
                 i16::from_le_bytes([chunk[2], chunk[3]]),
@@ -380,10 +380,10 @@ pub fn decode_11_field_screen_update(fields: &[Vec<u8>]) -> Result<DecodedScreen
     };
     let mut jpeg_rects = Vec::new();
     if !fields[8].is_empty() {
-        if fields[8].len() % 8 != 0 {
+        if !fields[8].len().is_multiple_of(8) {
             return Err("invalid jpeg rect length".to_string());
         }
-        for chunk in fields[8].chunks_exact(8) {
+        for chunk in fields[8].as_chunks::<8>().0 {
             jpeg_rects.push((
                 i16::from_le_bytes([chunk[0], chunk[1]]),
                 i16::from_le_bytes([chunk[2], chunk[3]]),
@@ -394,10 +394,10 @@ pub fn decode_11_field_screen_update(fields: &[Vec<u8>]) -> Result<DecodedScreen
     }
     let mut cache_refs = Vec::new();
     if !fields[9].is_empty() {
-        if fields[9].len() % 8 != 0 {
+        if !fields[9].len().is_multiple_of(8) {
             return Err("invalid cache refs length".to_string());
         }
-        for chunk in fields[9].chunks_exact(8) {
+        for chunk in fields[9].as_chunks::<8>().0 {
             cache_refs.push((
                 i16::from_le_bytes([chunk[0], chunk[1]]),
                 i16::from_le_bytes([chunk[2], chunk[3]]),
@@ -407,10 +407,10 @@ pub fn decode_11_field_screen_update(fields: &[Vec<u8>]) -> Result<DecodedScreen
     }
     let mut cache_adds = Vec::new();
     if !fields[10].is_empty() {
-        if fields[10].len() % 12 != 0 {
+        if !fields[10].len().is_multiple_of(12) {
             return Err("invalid cache adds length".to_string());
         }
-        for chunk in fields[10].chunks_exact(12) {
+        for chunk in fields[10].as_chunks::<12>().0 {
             cache_adds.push((
                 i16::from_le_bytes([chunk[0], chunk[1]]),
                 i16::from_le_bytes([chunk[2], chunk[3]]),
@@ -464,7 +464,7 @@ impl RgbBuffer {
         let count = (width as usize) * (height as usize);
         let mut pixels = Vec::with_capacity(count * 3);
         let lut = rgb555_lut();
-        for chunk in raw.chunks_exact(2).take(count) {
+        for chunk in raw.as_chunks::<2>().0.iter().take(count) {
             let val = u16::from_le_bytes([chunk[0], chunk[1]]);
             let rgb = lut[(val & 0x7FFF) as usize];
             pixels.push((rgb >> 16) as u8);
@@ -497,7 +497,7 @@ impl RgbBuffer {
             let dst_start = ((y as usize + row) * dst_width + x as usize) * 3;
             let dst_slice = &mut self.pixels[dst_start..dst_start + copy_w * 3];
 
-            for (col, chunk) in src_slice.chunks_exact(2).enumerate() {
+            for (col, chunk) in src_slice.as_chunks::<2>().0.iter().enumerate() {
                 let val = u16::from_le_bytes([chunk[0], chunk[1]]);
                 let rgb = lut[(val & 0x7FFF) as usize];
                 let dst_idx = col * 3;
@@ -542,7 +542,8 @@ impl RgbBuffer {
                 continue;
             }
             let src_start = (row as usize) * (tile.width as usize) * 3;
-            let dst_start = (((dst_y + row) as usize) * (self.width as usize) + (dst_x as usize)) * 3;
+            let dst_start =
+                (((dst_y + row) as usize) * (self.width as usize) + (dst_x as usize)) * 3;
             let row_bytes = copy_w * 3;
             self.pixels[dst_start..dst_start + row_bytes]
                 .copy_from_slice(&tile.pixels[src_start..src_start + row_bytes]);
@@ -564,7 +565,7 @@ impl RgbBuffer {
     }
 
     pub fn to_bmp(&self) -> Vec<u8> {
-        let row_stride = ((self.width as usize * 3 + 3) / 4) * 4;
+        let row_stride = (self.width as usize * 3).div_ceil(4) * 4;
         let pad_len = row_stride - (self.width as usize * 3);
         let image_size = row_stride * (self.height as usize);
         let file_size = 54 + image_size;
@@ -592,14 +593,12 @@ impl RgbBuffer {
         for y in (0..height_usize).rev() {
             let row_start = y * width_usize * 3;
             let row_slice = &self.pixels[row_start..row_start + width_usize * 3];
-            for rgb in row_slice.chunks_exact(3) {
+            for rgb in row_slice.as_chunks::<3>().0 {
                 bmp.push(rgb[2]);
                 bmp.push(rgb[1]);
                 bmp.push(rgb[0]);
             }
-            for _ in 0..pad_len {
-                bmp.push(0);
-            }
+            bmp.extend(std::iter::repeat_n(0u8, pad_len));
         }
         bmp
     }
@@ -616,7 +615,7 @@ where
     if fields.len() < 5 || fields[0].is_empty() || fields[0][0] != 1 {
         return Err("expected kind1 screen update".to_string());
     }
-    if fields[1].is_empty() || fields[1].len() % 8 != 0 {
+    if fields[1].is_empty() || !fields[1].len().is_multiple_of(8) {
         return Err("expected UInt16 x/y/w/h rectangle records".to_string());
     }
     if !fields[2].starts_with(b"\x28\xb5\x2f\xfd") {
@@ -636,7 +635,8 @@ where
         let left = i32::from_le_bytes([fields[1][0], fields[1][1], fields[1][2], fields[1][3]]);
         let top = i32::from_le_bytes([fields[1][4], fields[1][5], fields[1][6], fields[1][7]]);
         let right = i32::from_le_bytes([fields[1][8], fields[1][9], fields[1][10], fields[1][11]]);
-        let bottom = i32::from_le_bytes([fields[1][12], fields[1][13], fields[1][14], fields[1][15]]);
+        let bottom =
+            i32::from_le_bytes([fields[1][12], fields[1][13], fields[1][14], fields[1][15]]);
         let width = (right - left).max(0) as u32;
         let height = (bottom - top).max(0) as u32;
         if width == 0
@@ -652,7 +652,7 @@ where
         rectangles.push((left as u32, top as u32, width, height));
     } else {
         rectangles.reserve(fields[1].len() / 8);
-        for chunk in fields[1].chunks_exact(8) {
+        for chunk in fields[1].as_chunks::<8>().0 {
             let x = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
             let y = u16::from_le_bytes([chunk[2], chunk[3]]) as u32;
             let width = u16::from_le_bytes([chunk[4], chunk[5]]) as u32;
@@ -861,25 +861,29 @@ impl RGB555Screen {
         if fields.len() != 11 || fields[0].is_empty() || fields[0][0] != 1 {
             return Err("expected eleven-field kind1 update".to_string());
         }
-        if fields[5].len() % 8 != 0 || fields[9].len() % 8 != 0 || fields[10].len() % 12 != 0 {
+        if !fields[5].len().is_multiple_of(8)
+            || !fields[9].len().is_multiple_of(8)
+            || !fields[10].len().is_multiple_of(12)
+        {
             return Err("invalid screen cache record length".to_string());
         }
         let strict_small = self.canvas.width <= 4 && self.canvas.height <= 4;
-        let check_bounds = |x: i32, y: i32, w: i32, h: i32, cw: u32, ch: u32| -> Result<(), String> {
-            if w <= 0
-                || h <= 0
-                || x < 0
-                || y < 0
-                || (x as u32) >= cw
-                || (y as u32) >= ch
-                || (strict_small && ((x + w) as u32 > cw || (y + h) as u32 > ch))
-            {
-                return Err("cache rectangle outside canvas".to_string());
-            }
-            Ok(())
-        };
+        let check_bounds =
+            |x: i32, y: i32, w: i32, h: i32, cw: u32, ch: u32| -> Result<(), String> {
+                if w <= 0
+                    || h <= 0
+                    || x < 0
+                    || y < 0
+                    || (x as u32) >= cw
+                    || (y as u32) >= ch
+                    || (strict_small && ((x + w) as u32 > cw || (y + h) as u32 > ch))
+                {
+                    return Err("cache rectangle outside canvas".to_string());
+                }
+                Ok(())
+            };
 
-        for chunk in fields[5].chunks_exact(8) {
+        for chunk in fields[5].as_chunks::<8>().0 {
             let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
             let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
             let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -888,7 +892,7 @@ impl RGB555Screen {
         }
 
         if !fields[6].is_empty() {
-            if fields[6].len() < 10 || (fields[6].len() - 10) % 8 != 0 {
+            if fields[6].len() < 10 || !(fields[6].len() - 10).is_multiple_of(8) {
                 return Err("invalid scroll-copy record length".to_string());
             }
             let delta = i16::from_le_bytes([fields[6][0], fields[6][1]]) as i32;
@@ -899,7 +903,7 @@ impl RGB555Screen {
             check_bounds(x, y, w, h, self.canvas.width, self.canvas.height)?;
 
             let shifted_y = y - delta;
-            for chunk in fields[6][10..].chunks_exact(8) {
+            for chunk in fields[6][10..].as_chunks::<8>().0 {
                 let rx = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                 let ry = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                 let rw = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -914,11 +918,11 @@ impl RGB555Screen {
         if !fields[7].is_empty() || !fields[8].is_empty() {
             if !fields[7].starts_with(b"\xff\xd8")
                 || fields[8].is_empty()
-                || fields[8].len() % 8 != 0
+                || !fields[8].len().is_multiple_of(8)
             {
                 return Err("invalid JPEG atlas fields".to_string());
             }
-            for chunk in fields[8].chunks_exact(8) {
+            for chunk in fields[8].as_chunks::<8>().0 {
                 let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                 let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                 let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -927,7 +931,7 @@ impl RGB555Screen {
             }
         }
 
-        for chunk in fields[9].chunks_exact(8) {
+        for chunk in fields[9].as_chunks::<8>().0 {
             let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
             let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
             let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
@@ -943,7 +947,7 @@ impl RGB555Screen {
             }
         }
 
-        for chunk in fields[10].chunks_exact(12) {
+        for chunk in fields[10].as_chunks::<12>().0 {
             let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
             let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
             let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -965,7 +969,7 @@ impl RGB555Screen {
             let cropped = self.canvas.crop(x as u32, y as u32, cw, ch);
             let shifted_y = y - delta;
 
-            for chunk in fields[6][10..].chunks_exact(8) {
+            for chunk in fields[6][10..].as_chunks::<8>().0 {
                 let rx = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                 let ry = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                 let rw = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -984,7 +988,7 @@ impl RGB555Screen {
         if !fields[9].is_empty() {
             if !fields[5].is_empty() {
                 let mut clip_rects = Vec::with_capacity(fields[5].len() / 8);
-                for chunk in fields[5].chunks_exact(8) {
+                for chunk in fields[5].as_chunks::<8>().0 {
                     let rx = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                     let ry = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                     let rw = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -992,7 +996,7 @@ impl RGB555Screen {
                     clip_rects.push((rx, ry, rw, rh));
                 }
                 let mut temp_canvas = self.canvas.clone();
-                for chunk in fields[9].chunks_exact(8) {
+                for chunk in fields[9].as_chunks::<8>().0 {
                     let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                     let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                     let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
@@ -1002,9 +1006,9 @@ impl RGB555Screen {
                     let (_, tile) = self.cache.remove(pos);
                     let tw = tile.width as i32;
                     let th = tile.height as i32;
-                    let intersects_clip = clip_rects
-                        .iter()
-                        .any(|&(rx, ry, rw, rh)| x < rx + rw && x + tw > rx && y < ry + rh && y + th > ry);
+                    let intersects_clip = clip_rects.iter().any(|&(rx, ry, rw, rh)| {
+                        x < rx + rw && x + tw > rx && y < ry + rh && y + th > ry
+                    });
                     if intersects_clip {
                         temp_canvas.paste(&tile, x as u32, y as u32);
                     } else {
@@ -1023,7 +1027,7 @@ impl RGB555Screen {
                     }
                 }
             } else {
-                for chunk in fields[9].chunks_exact(8) {
+                for chunk in fields[9].as_chunks::<8>().0 {
                     let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                     let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                     let key = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
@@ -1058,7 +1062,7 @@ impl RGB555Screen {
             }
 
             let mut rectangles = Vec::with_capacity(fields[8].len() / 8);
-            for chunk in fields[8].chunks_exact(8) {
+            for chunk in fields[8].as_chunks::<8>().0 {
                 let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
                 let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
                 let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -1111,7 +1115,7 @@ impl RGB555Screen {
             })?;
         }
 
-        for chunk in fields[10].chunks_exact(12) {
+        for chunk in fields[10].as_chunks::<12>().0 {
             let x = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
             let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
             let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
@@ -1193,12 +1197,16 @@ mod tests {
 
         let bmp_bytes = buf.to_bmp();
         assert_eq!(&bmp_bytes[0..2], b"BM");
-        let file_size = u32::from_le_bytes([bmp_bytes[2], bmp_bytes[3], bmp_bytes[4], bmp_bytes[5]]);
+        let file_size =
+            u32::from_le_bytes([bmp_bytes[2], bmp_bytes[3], bmp_bytes[4], bmp_bytes[5]]);
         assert_eq!(file_size as usize, bmp_bytes.len());
-        let pixel_offset = u32::from_le_bytes([bmp_bytes[10], bmp_bytes[11], bmp_bytes[12], bmp_bytes[13]]);
+        let pixel_offset =
+            u32::from_le_bytes([bmp_bytes[10], bmp_bytes[11], bmp_bytes[12], bmp_bytes[13]]);
         assert_eq!(pixel_offset, 54);
-        let bi_width = i32::from_le_bytes([bmp_bytes[18], bmp_bytes[19], bmp_bytes[20], bmp_bytes[21]]);
-        let bi_height = i32::from_le_bytes([bmp_bytes[22], bmp_bytes[23], bmp_bytes[24], bmp_bytes[25]]);
+        let bi_width =
+            i32::from_le_bytes([bmp_bytes[18], bmp_bytes[19], bmp_bytes[20], bmp_bytes[21]]);
+        let bi_height =
+            i32::from_le_bytes([bmp_bytes[22], bmp_bytes[23], bmp_bytes[24], bmp_bytes[25]]);
         let bi_bpp = u16::from_le_bytes([bmp_bytes[28], bmp_bytes[29]]);
         assert_eq!(bi_width, 4);
         assert_eq!(bi_height, 4);
@@ -1213,7 +1221,8 @@ mod tests {
 
         let jpeg_bytes = buf.to_jpeg(80).unwrap();
         assert!(jpeg_bytes.starts_with(b"\xff\xd8"));
-        let decoded_jpeg = image::load_from_memory_with_format(&jpeg_bytes, ImageFormat::Jpeg).unwrap();
+        let decoded_jpeg =
+            image::load_from_memory_with_format(&jpeg_bytes, ImageFormat::Jpeg).unwrap();
         assert_eq!((decoded_jpeg.width(), decoded_jpeg.height()), (4, 4));
     }
 
@@ -1327,7 +1336,7 @@ mod tests {
                 let mut d = decoder;
                 let decomp = d.decompress(&compressed, count * 2).unwrap();
                 let mut buf = RgbBuffer::new(width, height);
-                for (idx, chunk) in decomp.chunks_exact(2).enumerate() {
+                for (idx, chunk) in decomp.as_chunks::<2>().0.iter().enumerate() {
                     let val = u16::from_le_bytes([chunk[0], chunk[1]]);
                     let r5 = ((val >> 10) & 0x1F) as u8;
                     let g5 = ((val >> 5) & 0x1F) as u8;
@@ -1337,7 +1346,11 @@ mod tests {
                     buf.put_pixel(
                         x,
                         y,
-                        ((r5 << 3) | (r5 >> 2), (g5 << 3) | (g5 >> 2), (b5 << 3) | (b5 >> 2)),
+                        (
+                            (r5 << 3) | (r5 >> 2),
+                            (g5 << 3) | (g5 >> 2),
+                            (b5 << 3) | (b5 >> 2),
+                        ),
                     );
                 }
                 let mut png_out = Vec::new();
@@ -1370,7 +1383,7 @@ mod tests {
                 let mut d = decoder;
                 let decomp = d.decompress(&compressed, count * 2).unwrap();
                 let mut buf = RgbBuffer::new(width, height);
-                for (idx, chunk) in decomp.chunks_exact(2).enumerate() {
+                for (idx, chunk) in decomp.as_chunks::<2>().0.iter().enumerate() {
                     let val = u16::from_le_bytes([chunk[0], chunk[1]]);
                     let r5 = ((val >> 10) & 0x1F) as u8;
                     let g5 = ((val >> 5) & 0x1F) as u8;
@@ -1380,7 +1393,11 @@ mod tests {
                     buf.put_pixel(
                         x,
                         y,
-                        ((r5 << 3) | (r5 >> 2), (g5 << 3) | (g5 >> 2), (b5 << 3) | (b5 >> 2)),
+                        (
+                            (r5 << 3) | (r5 >> 2),
+                            (g5 << 3) | (g5 >> 2),
+                            (b5 << 3) | (b5 >> 2),
+                        ),
                     );
                 }
                 let mut png_out = Vec::new();

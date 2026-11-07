@@ -13,7 +13,7 @@ BuildRequires:  pkg-config
 BuildRequires:  libopenssl-devel
 BuildRequires:  libxcb-devel
 BuildRequires:  gtk3-devel
-BuildRequires:  webkit2gtk-4_1-devel
+BuildRequires:  webkitgtk3-devel
 BuildRequires:  libsoup-devel
 
 Requires:       gtk3
