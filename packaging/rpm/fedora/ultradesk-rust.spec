@@ -66,7 +66,7 @@ elif [ $1 -eq 2 ]; then
 fi
 
 %changelog
-* Thu Nov 05 2026 Hieu Doan <hieudoan@ultradesk.io> - 0.2.0-1
+* Thu Nov 05 2026 Hieu Doan <dtrunghieu96@gmail.com> - 0.2.0-1
 - Release UltraDesk (Rust Edition) 0.2.0 with multi-distro packaging
 - Support screen streaming, remote input, audio, clipboard sync, and file transfer
 - Add bilingual VI/EN portal and collapsible session toolbar

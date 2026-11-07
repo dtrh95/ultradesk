@@ -1,7 +1,7 @@
 Source: ultradesk-rust
 Section: net
 Priority: optional
-Maintainer: Hieu Doan <hieudoan@ultradesk.io>
+Maintainer: Hieu Doan <dtrunghieu96@gmail.com>
 Build-Depends: debhelper-compat (= 13),
                cargo,
                rustc,

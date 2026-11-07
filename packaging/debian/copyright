@@ -1,18 +1,18 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: ultradesk-rust
-Upstream-Contact: Hieu Doan <hieudoan@ultradesk.io>
+Upstream-Contact: Hieu Doan <dtrunghieu96@gmail.com>
 Source: https://github.com/ultradesk/ultradesk-rust
 
 Files: *
-Copyright: 2026 Hieu Doan <hieudoan@ultradesk.io>
+Copyright: 2026 Hieu Doan <dtrunghieu96@gmail.com>
 License: MIT
 
 Files: debian/*
-Copyright: 2026 Hieu Doan <hieudoan@ultradesk.io>
+Copyright: 2026 Hieu Doan <dtrunghieu96@gmail.com>
 License: MIT
 
 Files: io.github.ultradesk.UltraDesk.metainfo.xml
-Copyright: 2026 Hieu Doan <hieudoan@ultradesk.io>
+Copyright: 2026 Hieu Doan <dtrunghieu96@gmail.com>
 License: CC0-1.0
 
 License: MIT

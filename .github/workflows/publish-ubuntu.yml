@@ -198,8 +198,8 @@ jobs:
         env:
           LAUNCHPAD_GPG_PRIVATE_KEY: ${{ secrets.LAUNCHPAD_GPG_PRIVATE_KEY || secrets.GPG_PRIVATE_KEY }}
           LAUNCHPAD_PPA: ${{ secrets.LAUNCHPAD_PPA }}
-          DEBFULLNAME: ${{ secrets.DEBFULLNAME || 'UltraDesk Maintainers' }}
-          DEBEMAIL: ${{ secrets.DEBEMAIL || 'maintainers@ultradesk.local' }}
+          DEBFULLNAME: ${{ secrets.DEBFULLNAME || 'Hieu Doan' }}
+          DEBEMAIL: ${{ secrets.DEBEMAIL || 'dtrunghieu96@gmail.com' }}
           SERIES: ${{ matrix.series }}
         run: |
           set -euo pipefail

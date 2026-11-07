@@ -98,4 +98,9 @@ if [ -n "$FRAME_VER" ]; then
   test "$HTTP_CODE_304" = "304"
 fi
 
+PUBKEY_UID="$(gpg --show-keys --with-colons packaging/pubkey.gpg | awk -F: '/^uid/ {print $10; exit}')"
+rg -q 'dtrunghieu96@gmail\.com' <<< "$PUBKEY_UID"
+! rg -q 'fcitx5-lotus' <<< "$PUBKEY_UID"
+! rg -q 'hieudoan@ultradesk\.io|maintainers@ultradesk\.local' packaging/ .github/workflows/publish-ubuntu.yml
+
 echo "VERIFIED: All unit tests, benchmarks, and live HTTP portal checks passed."
