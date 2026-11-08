@@ -1244,6 +1244,52 @@ impl ControlSession {
         Ok(guard.host_session.status())
     }
 
+    pub fn host_capture_image(
+        &self,
+        format: &str,
+        quality: u8,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
+        let hs = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.host_session.clone()
+        };
+        let (w, h, rgb) = hs.capture_rgb888_snapshot()?;
+        let mut out = Vec::new();
+        if format.eq_ignore_ascii_case("jpeg") || format.eq_ignore_ascii_case("jpg") {
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100))
+                .write_image(&rgb, w, h, image::ExtendedColorType::Rgb8)
+                .map_err(|e| format!("failed to encode host JPEG: {}", e))?;
+        } else {
+            image::codecs::png::PngEncoder::new(&mut out)
+                .write_image(&rgb, w, h, image::ExtendedColorType::Rgb8)
+                .map_err(|e| format!("failed to encode host PNG: {}", e))?;
+        }
+        Ok((w, h, out))
+    }
+
+    pub fn host_inject_input(&self, event: InputEvent) -> Result<Vec<u8>, String> {
+        let wire = event.to_wire()?;
+        let hs = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.host_session.clone()
+        };
+        hs.inject_local_wire_input(&wire)?;
+        Ok(wire)
+    }
+
+    pub fn host_send_text(&self, text: &str, caps_lock: bool) -> Result<usize, String> {
+        let packets = encode_unicode_text_packets(text, caps_lock);
+        let hs = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.host_session.clone()
+        };
+        let count = packets.len();
+        for pkt in packets {
+            hs.inject_local_wire_input(&pkt)?;
+        }
+        Ok(count)
+    }
+
     pub fn host_set_master_password(&self, password: Option<&str>) -> Result<HostStatus, String> {
         let hs = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());

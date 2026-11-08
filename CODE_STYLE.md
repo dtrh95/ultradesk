@@ -34,7 +34,7 @@ This document is the single source of truth for the code rules of UltraDesk (`ul
 
 - `src/main.rs` owns CLI argument parsing, startup wiring, and process lifecycle.
 - `src/lib.rs` exports reusable modules for integration tests and benchmarks.
-- Each domain lives in its own focused module (`gui`, `host`, `session`, `server`, `screen`, `protocol`, `e2e`, `input`, `cursor`, `audio`, `clipboard`, `file_transfer`, `direct`, `profile`).
+- Each domain lives in its own focused module (`gui`, `host`, `session`, `server`, `mcp`, `screen`, `protocol`, `e2e`, `input`, `cursor`, `audio`, `clipboard`, `file_transfer`, `direct`, `profile`).
 
 ## 7. Naming
 

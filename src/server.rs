@@ -276,6 +276,7 @@ fn write_http_response(
 ) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
+        202 => "Accepted",
         204 => "No Content",
         304 => "Not Modified",
         400 => "Bad Request",
@@ -1209,6 +1210,36 @@ fn handle_http_client(
                     ),
                 }
             }
+            ("GET", "/mcp" | "/mcp/tools") => {
+                let tools = crate::mcp::list_mcp_tools();
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "server": "ultradesk-mcp",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "protocolVersion": crate::mcp::MCP_PROTOCOL_VERSION,
+                        "tools": tools
+                    }),
+                    keep_alive,
+                )
+            }
+            ("POST", "/mcp") => match crate::mcp::handle_mcp_raw_json(
+                &session,
+                &body,
+                crate::mcp::McpTransportOrigin::Network,
+            ) {
+                Some(resp) => write_json_response(&mut stream, 200, &resp, keep_alive),
+                None => write_http_response(
+                    &mut stream,
+                    202,
+                    "application/json; charset=utf-8",
+                    &[],
+                    &[],
+                    keep_alive,
+                ),
+            },
             _ => write_json_response(
                 &mut stream,
                 404,

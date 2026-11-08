@@ -13,6 +13,7 @@ pub mod file_transfer;
 pub mod gui;
 pub mod host;
 pub mod input;
+pub mod mcp;
 pub mod profile;
 pub mod protocol;
 pub mod screen;
@@ -1458,5 +1459,184 @@ mod tests {
         assert_eq!(legacy_snap.state, "connected");
         assert!(!legacy_snap.e2e_enabled);
         assert_eq!(legacy_snap.e2e_fingerprint, "");
+    }
+
+    #[test]
+    fn test_mcp_jsonrpc_lifecycle_tools_resources_and_websocket() {
+        use crate::mcp::{
+            handle_mcp_raw_json, list_mcp_tools, parse_key_name_to_vk, run_stdio_mcp_loop,
+            websocket_accept_key, McpServer, McpTool, McpTransportOrigin,
+        };
+        use serde_json::{json, Value};
+
+        assert_eq!(
+            websocket_accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+        assert_eq!(parse_key_name_to_vk("Enter").unwrap(), 13);
+        assert_eq!(parse_key_name_to_vk("F5").unwrap(), 116);
+        assert_eq!(parse_key_name_to_vk("a").unwrap(), 65);
+        assert_eq!(list_mcp_tools().len(), McpTool::ALL.len());
+
+        let session = ControlSession::new();
+        {
+            let mut guard = session.inner.lock().unwrap();
+            let layout = crate::screen::DisplayLayout {
+                width: 64,
+                height: 48,
+                virtual_left: 0,
+                virtual_top: 0,
+                monitors: vec![crate::screen::MonitorRect {
+                    left: 0,
+                    top: 0,
+                    right: 64,
+                    bottom: 48,
+                }],
+            };
+            guard.host_session = crate::host::HostSession::new(
+                "123456",
+                None,
+                layout,
+                crate::host::DesktopBackend::headless(64, 48),
+            );
+        }
+
+        let init_req = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#;
+        let init_resp = handle_mcp_raw_json(&session, init_req, McpTransportOrigin::Stdio).unwrap();
+        assert_eq!(init_resp["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(init_resp["result"]["serverInfo"]["name"], "ultradesk-mcp");
+
+        let notif_req = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert!(handle_mcp_raw_json(&session, notif_req, McpTransportOrigin::Stdio).is_none());
+
+        let list_req = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+        let list_resp = handle_mcp_raw_json(&session, list_req, McpTransportOrigin::Stdio).unwrap();
+        let tools_arr = list_resp["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools_arr.len(), 19);
+
+        let shot_req = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "take_screenshot",
+                "arguments": {
+                    "source": "host",
+                    "format": "png"
+                }
+            }
+        }))
+        .unwrap();
+        let shot_resp =
+            handle_mcp_raw_json(&session, &shot_req, McpTransportOrigin::Stdio).unwrap();
+        assert_eq!(shot_resp["result"]["isError"], false);
+        let content = shot_resp["result"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["mimeType"], "image/png");
+        let png_bytes = decode_base64(content[1]["data"].as_str().unwrap()).unwrap();
+        assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let click_req = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "mouse_click",
+                "arguments": {
+                    "x": 20,
+                    "y": 15,
+                    "button": "left",
+                    "action": "double_click",
+                    "target": "host"
+                }
+            }
+        }))
+        .unwrap();
+        let click_resp =
+            handle_mcp_raw_json(&session, &click_req, McpTransportOrigin::Stdio).unwrap();
+        assert_eq!(click_resp["result"]["isError"], false);
+
+        let key_req = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "key_press",
+                "arguments": {
+                    "key": "c",
+                    "ctrl": true,
+                    "target": "host"
+                }
+            }
+        }))
+        .unwrap();
+        let key_resp = handle_mcp_raw_json(&session, &key_req, McpTransportOrigin::Stdio).unwrap();
+        assert_eq!(key_resp["result"]["isError"], false);
+
+        let res_req = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "resources/read",
+            "params": {
+                "uri": "ultradesk://status"
+            }
+        }))
+        .unwrap();
+        let res_resp = handle_mcp_raw_json(&session, &res_req, McpTransportOrigin::Stdio).unwrap();
+        assert_eq!(
+            res_resp["result"]["contents"][0]["uri"],
+            "ultradesk://status"
+        );
+
+        let stdio_in = b"{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"ping\"}\n";
+        let mut stdio_out = Vec::new();
+        run_stdio_mcp_loop(&session, &stdio_in[..], &mut stdio_out).unwrap();
+        let stdio_parsed: Value = serde_json::from_slice(&stdio_out).unwrap();
+        assert_eq!(stdio_parsed["id"], 10);
+        assert_eq!(stdio_parsed["result"], json!({}));
+
+        let (mcp_srv, listener) = McpServer::bind(
+            "127.0.0.1",
+            0,
+            session.clone(),
+            Some("secret-mcp".to_string()),
+        )
+        .unwrap();
+        let port = mcp_srv.port;
+        let shutdown = mcp_srv.shutdown.clone();
+        let handle = mcp_srv.spawn(listener);
+
+        let mut ws = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let upgrade_req = format!(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer secret-mcp\r\n\r\n",
+            port
+        );
+        ws.write_all(upgrade_req.as_bytes()).unwrap();
+        let mut hdr_buf = [0u8; 256];
+        let n = ws.read(&mut hdr_buf).unwrap();
+        let hdr_str = String::from_utf8_lossy(&hdr_buf[..n]);
+        assert!(hdr_str.starts_with("HTTP/1.1 101 Switching Protocols"));
+        assert!(hdr_str.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+
+        let payload = br#"{"jsonrpc":"2.0","id":99,"method":"ping"}"#;
+        let mut frame = vec![0x81, 0x80 | (payload.len() as u8), 0x12, 0x34, 0x56, 0x78];
+        for (i, &b) in payload.iter().enumerate() {
+            frame.push(b ^ frame[2 + (i & 3)]);
+        }
+        ws.write_all(&frame).unwrap();
+        let mut reply_hdr = [0u8; 2];
+        ws.read_exact(&mut reply_hdr).unwrap();
+        assert_eq!(reply_hdr[0], 0x81);
+        let rlen = (reply_hdr[1] & 0x7F) as usize;
+        let mut reply_body = vec![0u8; rlen];
+        ws.read_exact(&mut reply_body).unwrap();
+        let ws_json: Value = serde_json::from_slice(&reply_body).unwrap();
+        assert_eq!(ws_json["id"], 99);
+        assert_eq!(ws_json["result"], json!({}));
+        drop(ws);
+
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = handle.join();
     }
 }

@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use ultradesk_rust::gui::{launch_native_gui, GuiConfig, GuiLaunchOutcome};
+use ultradesk_rust::mcp::{run_stdio_mcp_loop, McpServer, DEFAULT_MCP_PORT};
 use ultradesk_rust::profile::ProfileManager;
 use ultradesk_rust::server::{PortalServer, DEFAULT_APP_ICON_PNG};
 use ultradesk_rust::session::{
@@ -17,6 +18,9 @@ struct CliArgs {
     subcommand: Option<String>,
     host: String,
     port: u16,
+    mcp_enabled: bool,
+    mcp_port: Option<u16>,
+    mcp_token: Option<String>,
     registration_path: Option<PathBuf>,
     partner_path: Option<PathBuf>,
     dictionary_path: Option<PathBuf>,
@@ -35,6 +39,9 @@ impl Default for CliArgs {
             subcommand: None,
             host: "127.0.0.1".to_string(),
             port: 0,
+            mcp_enabled: false,
+            mcp_port: None,
+            mcp_token: None,
             registration_path: None,
             partner_path: None,
             dictionary_path: None,
@@ -54,7 +61,10 @@ fn parse_args() -> CliArgs {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0usize;
     if let Some(first) = args.first() {
-        if matches!(first.as_str(), "host" | "id" | "master-password" | "help") {
+        if matches!(
+            first.as_str(),
+            "host" | "id" | "master-password" | "mcp" | "help"
+        ) {
             cfg.subcommand = Some(first.clone());
             i = 1;
         }
@@ -71,6 +81,19 @@ fn parse_args() -> CliArgs {
             }
             "--port" if i + 1 < args.len() => {
                 cfg.port = args[i + 1].parse().unwrap_or(0);
+                i += 2;
+            }
+            "--mcp" | "--ws" => {
+                cfg.mcp_enabled = true;
+                i += 1;
+            }
+            "--mcp-port" if i + 1 < args.len() => {
+                cfg.mcp_enabled = true;
+                cfg.mcp_port = args[i + 1].parse().ok();
+                i += 2;
+            }
+            "--mcp-token" if i + 1 < args.len() => {
+                cfg.mcp_token = Some(args[i + 1].clone());
                 i += 2;
             }
             "--registration" if i + 1 < args.len() => {
@@ -248,13 +271,22 @@ fn main() {
             println!("Usage:");
             println!("  ultradesk-rust [OPTIONS]                      Launch Dual-Pane Portal (Client + Host)");
             println!("  ultradesk-rust host [--auto-approve] [OPTS]   Start directly in Host screen-sharing mode");
+            println!("  ultradesk-rust mcp [--port <PORT>] [OPTS]     Run Model Context Protocol (MCP) server (stdio or WebSocket/HTTP)");
             println!("  ultradesk-rust id                             Print Host ID, Temp Password, and XDG profile info");
             println!("  ultradesk-rust master-password <PW>|--clear   Set or clear persistent Host master password");
             println!("\nOptions:");
             println!(
-                "  --host <ADDR>          Bind address for Portal HTTP server (default: 127.0.0.1)"
+                "  --host <ADDR>          Bind address for Portal/MCP server (default: 127.0.0.1)"
             );
-            println!("  --port <PORT>          Bind port for Portal HTTP server (default: auto)");
+            println!("  --port <PORT>          Bind port for Portal/MCP server (default: auto)");
+            println!(
+                "  --mcp                  Enable local MCP server on ws://127.0.0.1:{}",
+                DEFAULT_MCP_PORT
+            );
+            println!("  --mcp-port <PORT>      Enable local MCP server on a custom port");
+            println!(
+                "  --mcp-token <TOKEN>    Require bearer/header token on network MCP requests"
+            );
             println!("  --partner-id <ID>      Auto-connect to partner ID on startup");
             println!("  --password <PW>        Partner password for auto-connect");
             println!("  --auto-approve         Auto-approve incoming Host connections");
@@ -340,6 +372,50 @@ fn main() {
             guard.host_session.set_auto_approve(true);
         }
     }
+
+    if args.subcommand.as_deref() == Some("mcp") {
+        let _ = session.host_start();
+        if !args.partner_id.trim().is_empty() {
+            let _ = session.start_connect(&args.partner_id, &args.password);
+        }
+        let network_port = args.mcp_port.or({
+            if args.port > 0 {
+                Some(args.port)
+            } else if args.mcp_enabled {
+                Some(DEFAULT_MCP_PORT)
+            } else {
+                None
+            }
+        });
+        if let Some(p) = network_port {
+            let (mcp_srv, mcp_listener) =
+                match McpServer::bind(&args.host, p, session.clone(), args.mcp_token.clone()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                };
+            eprintln!(
+                "UltraDesk MCP server listening on ws://{} and http://{}/mcp",
+                mcp_srv.bind_addr, mcp_srv.bind_addr
+            );
+            let shutdown = mcp_srv.shutdown.clone();
+            let handle = mcp_srv.spawn(mcp_listener);
+            while !shutdown.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(250));
+            }
+            session.disconnect();
+            let _ = handle.join();
+        } else {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            let _ = run_stdio_mcp_loop(&session, stdin.lock(), stdout.lock());
+            session.disconnect();
+        }
+        return;
+    }
+
     let hs = session.host_start();
     if args.subcommand.as_deref() == Some("host") || !hs.host_id.is_empty() {
         println!(
@@ -350,6 +426,28 @@ fn main() {
 
     if !args.partner_id.trim().is_empty() {
         let _ = session.start_connect(&args.partner_id, &args.password);
+    }
+
+    let mut mcp_bg: Option<(
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread::JoinHandle<()>,
+    )> = None;
+    if args.mcp_enabled || args.mcp_port.is_some() {
+        let port = args.mcp_port.unwrap_or(DEFAULT_MCP_PORT);
+        match McpServer::bind(&args.host, port, session.clone(), args.mcp_token.clone()) {
+            Ok((mcp_srv, mcp_listener)) => {
+                println!(
+                    "UltraDesk MCP server listening on ws://{} and http://{}/mcp",
+                    mcp_srv.bind_addr, mcp_srv.bind_addr
+                );
+                let mcp_shutdown = mcp_srv.shutdown.clone();
+                let handle = mcp_srv.spawn(mcp_listener);
+                mcp_bg = Some((mcp_shutdown, handle));
+            }
+            Err(e) => {
+                eprintln!("Warning: {}", e);
+            }
+        }
     }
 
     let viewer_path = find_asset_file("viewer.html");
@@ -402,8 +500,14 @@ fn main() {
         match launch_native_gui(gui_config, session.clone(), shutdown.clone()) {
             GuiLaunchOutcome::ClosedCleanly => {
                 shutdown.store(true, Ordering::SeqCst);
+                if let Some((ref mcp_stop, _)) = mcp_bg {
+                    mcp_stop.store(true, Ordering::SeqCst);
+                }
                 session.disconnect();
                 let _ = server_handle.join();
+                if let Some((_, h)) = mcp_bg {
+                    let _ = h.join();
+                }
                 return;
             }
             GuiLaunchOutcome::FallbackToBrowser(reason) => {
@@ -427,6 +531,12 @@ fn main() {
         thread::sleep(Duration::from_millis(250));
     }
 
+    if let Some((ref mcp_stop, _)) = mcp_bg {
+        mcp_stop.store(true, Ordering::SeqCst);
+    }
     session.disconnect();
     let _ = server_handle.join();
+    if let Some((_, h)) = mcp_bg {
+        let _ = h.join();
+    }
 }

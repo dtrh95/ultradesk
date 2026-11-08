@@ -4238,6 +4238,43 @@ impl HostSession {
             }
         }
     }
+
+    pub fn capture_rgb888_snapshot(&self) -> Result<(u32, u32, Vec<u8>), String> {
+        let mut s = self.inner.lock().unwrap();
+        Self::refresh_display_layout(&mut s);
+        let w = s.core.layout.width.max(1);
+        let h = s.core.layout.height.max(1);
+        let rect = MonitorRect {
+            left: s.core.layout.virtual_left,
+            top: s.core.layout.virtual_top,
+            right: s.core.layout.virtual_left + w as i32,
+            bottom: s.core.layout.virtual_top + h as i32,
+        };
+        let raw = s.backend.capturer.capture_screen(rect)?;
+        let pixel_count = (w as usize) * (h as usize);
+        if raw.len() < pixel_count * 2 {
+            return Err("captured host frame buffer shorter than expected".to_string());
+        }
+        let mut rgb = Vec::with_capacity(pixel_count * 3);
+        for i in 0..pixel_count {
+            let v = u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]);
+            let r5 = ((v >> 10) & 0x1F) as u8;
+            let g5 = ((v >> 5) & 0x1F) as u8;
+            let b5 = (v & 0x1F) as u8;
+            rgb.push((r5 << 3) | (r5 >> 2));
+            rgb.push((g5 << 3) | (g5 >> 2));
+            rgb.push((b5 << 3) | (b5 >> 2));
+        }
+        Ok((w, h, rgb))
+    }
+
+    pub fn inject_local_wire_input(&self, pkt: &[u8]) -> Result<(), String> {
+        let mut s = self.inner.lock().unwrap();
+        let ox = s.core.layout.virtual_left;
+        let oy = s.core.layout.virtual_top;
+        let translated = offset_host_input_packet(pkt, ox, oy);
+        s.backend.injector.inject_event(&translated)
+    }
 }
 
 #[cfg(test)]

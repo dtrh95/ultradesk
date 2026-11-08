@@ -53,6 +53,7 @@
 - **Connect and share in one window**: View and control a remote partner using their 9-digit ID and password, or share your own screen for remote support.
 - **Native on Linux and macOS**: Runs smoothly on macOS (Apple Silicon and Intel) as well as Linux desktops (Wayland and X11).
 - **Built-in session tools**: Chat in real time, send and receive files, sync clipboards automatically, stream remote desktop audio, and switch between multiple monitors.
+- **Built-in AI MCP server**: Let AI assistants (Claude Desktop, Cursor, Claude Code, VS Code) view screenshots, move the mouse, type text, sync clipboards, and transfer files via the Model Context Protocol (`ultradesk-rust mcp` or `ws://127.0.0.1:9333`).
 - **Safe by default**: Protects sessions with end-to-end encryption, supports an optional unattended password for personal machines, and blocks repeated failed login attempts.
 
 ---
@@ -152,6 +153,35 @@ nix run github:dtrh95/ultradesk#ultradesk-rust-head
 > sudo modprobe uinput
 > sudo setfacl -m u:$USER:rw /dev/uinput
 > ```
+
+---
+
+### AI Assistant Integration (Built-in MCP Server)
+
+UltraDesk includes a native **Model Context Protocol (MCP)** server so AI agents (such as **Claude Desktop**, **Cursor**, **Claude Code**, and **OpenCode**) can take screenshots, click, type Unicode text, manage clipboards, and transfer files on remote or local desktops.
+
+#### Option A: Connect via `stdio` (Claude Desktop, Cursor, Claude Code)
+
+Add `ultradesk` to your MCP configuration (`~/.cursor/mcp.json`, `.mcp.json`, or `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "ultradesk": {
+      "command": "ultradesk-rust",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+#### Option B: Run the local WebSocket & HTTP MCP server (`127.0.0.1:9333`)
+
+Launch UltraDesk with the `--mcp` flag (or run `ultradesk-rust mcp --ws`) to start the local JSON-RPC 2.0 MCP listener on `ws://127.0.0.1:9333` and `http://127.0.0.1:9333/mcp`:
+
+```bash
+ultradesk-rust --mcp --mcp-token your-secret-token
+```
 
 ---
 
