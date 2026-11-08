@@ -1,5 +1,6 @@
-ultradesk-rust (1.0.1-1) unstable; urgency=medium
+ultradesk-rust (1.0.2-1) unstable; urgency=medium
 
+  * Release UltraDesk (Rust Edition) 1.0.2 with built-in Model Context Protocol (MCP) server and community docs
   * Release UltraDesk (Rust Edition) 1.0.1 with macOS support, TCC permission prompts, and DMG packaging
   * Release UltraDesk (Rust Edition) 1.0.0 with E2E encryption, security hardening, and multi-distro packaging
   * Support screen streaming, remote input, audio, clipboard sync, and file transfer

@@ -1,12 +1,24 @@
-## UltraDesk (Rust Edition) v1.0.1
+## UltraDesk (Rust Edition) v1.0.2
 
-Release **v1.0.1** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) adds native **macOS** (`arm64` Apple Silicon and `x86_64` Intel) support, native Cocoa / `WKWebView` GUI integration, automatic macOS TCC permission requests (`Screen Recording` and `Accessibility`), CoreGraphics (`CGEvent`) input injection, and signed `.dmg` / `.app.tar.gz` installers alongside Linux multi-distro packages.
+Release **v1.0.2** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) introduces a built-in **Model Context Protocol (MCP) server** (`ultradesk-rust mcp`, `ws://127.0.0.1:9333`, and `POST /mcp`) for AI assistants (Claude Desktop, Cursor, Claude Code, OpenCode), user-friendly documentation, community contribution guidelines (`CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `CODE_STYLE.md`), and native **macOS** (`arm64` Apple Silicon and `x86_64` Intel) `.dmg` / `.app.tar.gz` installers alongside Linux multi-distro packages.
 
 ---
 
 ### Highlights
 
-#### 1. Dual-Mode Remote Desktop (Viewer & Host)
+#### 1. Built-in AI Model Context Protocol (MCP) Server
+- **Three Native Transports**:
+  - `stdio` JSON-RPC 2.0 via `ultradesk-rust mcp` for zero-configuration integration with Claude Desktop, Cursor, Claude Code, and OpenCode.
+  - Local WebSocket and HTTP server on `127.0.0.1:9333` (`--mcp` or `--mcp-port <PORT>`) with optional `--mcp-token` bearer authentication.
+  - Integrated `POST /mcp` and `GET /mcp/tools` routes on the local `PortalServer`.
+- **19 Remote & Host Desktop Tools**:
+  - Session & display control: `get_session_status`, `connect_remote`, `disconnect_remote`, `list_monitors`, and `select_monitor`.
+  - Visual screenshot capture: `take_screenshot` returning base64 PNG or JPEG `image` content blocks from the connected remote partner or local host desktop.
+  - Pointer & keyboard automation: `mouse_move`, `mouse_click` (`click`, `double_click`, `down`, `up`), `mouse_drag`, `mouse_scroll`, `type_text` (`VK_PACKET` Unicode), and `key_press` (named keys, function keys, and `ctrl`/`alt`/`shift`/`meta` shortcuts).
+  - Session tools & host management: `get_clipboard`, `set_clipboard`, `send_chat`, `list_files`, `send_file`, `manage_file_transfer`, and `manage_host`.
+- **4 MCP Resources**: `ultradesk://status`, `ultradesk://host/status`, `ultradesk://clipboard`, and `ultradesk://screen/current.png`.
+
+#### 2. Dual-Mode Remote Desktop (Viewer & Host)
 - **Viewer (Controller) Mode**:
   - Relay and direct LAN P2P session establishment (`Command 3` registration, `Command 8` route lookup, and automatic LAN peer discovery on UDP/TCP `5938`).
   - Fast RGB555 + Zstd dictionary-compressed tile decoding, JPEG/BMP frame decoding, and in-place dirty-rectangle blitting with LRU tile caching (`8bit.dat`).
