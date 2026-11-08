@@ -10,3 +10,12 @@ updates:
     schedule:
       interval: 'weekly'
     target-branch: 'main'
+    groups:
+      rustcrypto:
+        patterns:
+          - 'aes'
+          - 'cbc'
+          - 'cipher'
+          - 'des'
+          - 'md-5'
+          - 'sha2'

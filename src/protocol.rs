@@ -1,7 +1,7 @@
 use aes::Aes256;
 use cbc::{Decryptor, Encryptor};
 use cipher::block_padding::Pkcs7;
-use cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use des::TdesEde3;
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
@@ -594,7 +594,7 @@ pub fn encrypt_registration_bytes(payload: &[u8], password: &str) -> Vec<u8> {
     key.copy_from_slice(&key_vec);
     iv.copy_from_slice(&iv_vec);
     let encryptor = Encryptor::<TdesEde3>::new((&key).into(), (&iv).into());
-    encryptor.encrypt_padded_vec_mut::<Pkcs7>(payload)
+    encryptor.encrypt_padded_vec::<Pkcs7>(payload)
 }
 
 pub fn decrypt_registration_bytes(ciphertext: &[u8], password: &str) -> Result<Vec<u8>, String> {
@@ -606,7 +606,7 @@ pub fn decrypt_registration_bytes(ciphertext: &[u8], password: &str) -> Result<V
     iv.copy_from_slice(&iv_vec);
     let decryptor = Decryptor::<TdesEde3>::new((&key).into(), (&iv).into());
     decryptor
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .decrypt_padded_vec::<Pkcs7>(ciphertext)
         .map_err(|e| format!("3DES decrypt failed: {}", e))
 }
 
@@ -954,7 +954,7 @@ pub fn encrypt_p2p_aes_body(
 ) -> Result<Vec<u8>, String> {
     let key = derive_p2p_aes_key(password)?;
     let encryptor = Encryptor::<Aes256>::new((&key).into(), iv.into());
-    let cipher = encryptor.encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+    let cipher = encryptor.encrypt_padded_vec::<Pkcs7>(plaintext);
     let mut out = Vec::with_capacity(16 + cipher.len());
     out.extend_from_slice(iv);
     out.extend_from_slice(&cipher);
@@ -970,7 +970,7 @@ pub fn decrypt_p2p_aes_body(body: &[u8], password: &str) -> Result<Vec<u8>, Stri
     iv.copy_from_slice(&body[..16]);
     let decryptor = Decryptor::<Aes256>::new((&key).into(), (&iv).into());
     decryptor
-        .decrypt_padded_vec_mut::<Pkcs7>(&body[16..])
+        .decrypt_padded_vec::<Pkcs7>(&body[16..])
         .map_err(|e| format!("P2P AES decrypt failed: {}", e))
 }
 
