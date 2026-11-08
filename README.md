@@ -1,18 +1,21 @@
 # ultradesk-rust
 
-`ultradesk-rust` is a Linux-native remote desktop client and host written in Rust. You can connect to a remote computer or share your local desktop from a single window. The application renders its dual-pane UI (`viewer.html`) inside a native Tauri desktop window powered by tao, wry, and muda, falling back to an external browser if webview initialization fails. Under the hood, it captures screens on Wayland and X11, injects kernel uinput and X11 XTEST events, streams 64 kbps ITU-T G.722 audio, synchronizes clipboards, and transfers files in chunks.
+`ultradesk-rust` is a native remote desktop client and host for Linux and macOS written in Rust. You can connect to a remote computer or share your local desktop from a single window. The application renders its dual-pane UI (`viewer.html`) inside a native desktop window powered by `tao`, `wry`, and `muda` (using GTK3/WebKit2GTK on Linux and Cocoa/`WKWebView` on macOS), falling back to an external browser if webview initialization fails. Under the hood, it captures screens on Wayland, X11, and macOS, injects kernel `uinput`, X11 `XTEST`, and macOS `CoreGraphics` (`CGEvent`) input events, negotiates end-to-end encryption (`UDE2E1`), streams 64 kbps ITU-T G.722 audio, synchronizes clipboards, and transfers files in chunks.
 
 ## Features
 
 A single binary handles both client and host sessions. You can connect to a remote partner using their 9-digit partner ID and password, or let a remote operator control your machine. Unattended access uses a persistent master password of 8 to 64 characters alongside a temporary session password. To prevent brute-force attacks, the host locks out incoming requests after 5 failed login attempts.
 
-Screen capture adapts to your display server. On Wayland compositors such as niri, sway, Hyprland, and generic wlroots environments, the host captures frames through `grim` and queries monitor geometry with `wlr-randr`. On X11 sessions, it uses `MIT-SHM` shared memory with `XGetImage` fallback and `RandR` monitor enumeration. For input injection, the engine writes pointer movements, button clicks, wheel scrolls, and raw key events to `/dev/uinput` on Wayland or uses `XTEST` on X11. It also delivers international text and Vietnamese Telex sequences through `VK_PACKET` UTF-16LE keystrokes.
+Screen capture and input injection adapt to your operating system and display server:
+- **Linux Wayland** (`niri`, `sway`, `Hyprland`, and `wlroots` compositors): Captures frames through `grim`, queries monitor geometry with `niri msg -j outputs` or `wlr-randr`, and injects pointer and keyboard events via `/dev/uinput`.
+- **Linux X11**: Uses `MIT-SHM` shared memory with `XGetImage` fallback, enumerates monitors via `RandR`, and injects input through `XTEST`.
+- **macOS (`arm64` Apple Silicon & `x86_64` Intel)**: Captures the screen via `/usr/sbin/screencapture`, automatically prompts for **Screen Recording** (`CGRequestScreenCaptureAccess`) and **Accessibility** (`AXIsProcessTrustedWithOptions`) permissions, and injects mouse movements, clicks, scroll wheel, virtual keys, and Unicode `VK_PACKET` text via `CoreGraphics` (`CGEventPost`).
 
 The rendering pipeline decodes 11-field screen packets with a pre-allocated 65,536-entry RGB555 lookup table. A prepared Zstandard dictionary decodes legacy 16-bit tiles without re-parsing dictionary headers on every packet, while scroll-copy rects and bottom-up JPEG atlases reduce bandwidth on fast-moving content. Multi-monitor setups let you stream or view all displays together, focus on a single display, or select any subset of screens.
 
-Session tools run alongside the video stream. You can exchange real-time chat messages, transfer files in chunks, and stream 48 kHz stereo audio decoded through an ITU-T G.722 64 kbps ADPCM codec. Clipboard synchronization monitors both local and remote changes through `wl-clipboard`, `xclip`, `xsel`, or GTK, preventing echo loops through deduplication. The interface offers eight color palettes, switching automatically between light and dark modes based on system time or OS color scheme preferences.
+Session tools run alongside the video stream. You can exchange real-time chat messages, transfer files in chunks, and stream 48 kHz stereo audio decoded through an ITU-T G.722 64 kbps ADPCM codec. Clipboard synchronization monitors both local and remote changes through `pbcopy`/`pbpaste` on macOS and `wl-clipboard`, `xclip`, `xsel`, or GTK on Linux, preventing echo loops through deduplication. The interface offers eight color palettes, switching automatically between light and dark modes based on system time or OS color scheme preferences.
 
-## Install on Linux distributions
+## Install on Linux and macOS
 
 ### 1. Debian (`bookworm`, `trixie`, `forky`, `sid`)
 
@@ -128,21 +131,58 @@ sudo tar --zstd -xvf ultradesk-rust-v1.0.1-x86_64-archlinux.tar.zst -C /
 
 ### 6. macOS (`arm64` Apple Silicon and `x86_64` Intel)
 
-Download the `.dmg` installer for your Mac architecture from GitHub Releases:
+#### Option A: Install via `.dmg` disk image from GitHub Releases
+1. Download the `.dmg` matching your Mac architecture from the [Releases](https://github.com/dtrh95/ultradesk/releases) page:
+   - **Apple Silicon (`M1` / `M2` / `M3` / `M4`)**: `ultradesk-rust-v1.0.1-arm64-macos.dmg`
+   - **Intel Mac (`x86_64`)**: `ultradesk-rust-v1.0.1-x86_64-macos.dmg`
+2. Open the `.dmg` file and drag **UltraDesk.app** into the **Applications** folder, or install directly from Terminal:
 
 ```bash
 ARCH=$(uname -m)
 curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-v1.0.1-${ARCH}-macos.dmg"
 hdiutil attach "ultradesk-rust-v1.0.1-${ARCH}-macos.dmg"
 cp -R "/Volumes/UltraDesk 1.0.1 (${ARCH})/UltraDesk.app" /Applications/
+hdiutil detach "/Volumes/UltraDesk 1.0.1 (${ARCH})"
 xattr -dr com.apple.quarantine /Applications/UltraDesk.app
+open /Applications/UltraDesk.app
 ```
 
-When starting Host screen sharing on macOS, UltraDesk automatically prompts for **Screen Recording** and **Accessibility** permissions in **System Settings -> Privacy & Security**.
+#### Option B: Extract prebuilt `.app.tar.gz` bundle
+```bash
+ARCH=$(uname -m)
+curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-v1.0.1-${ARCH}-macos.app.tar.gz"
+sudo tar -xzf "ultradesk-rust-v1.0.1-${ARCH}-macos.app.tar.gz" -C /Applications
+xattr -dr com.apple.quarantine /Applications/UltraDesk.app
+open /Applications/UltraDesk.app
+```
+
+#### Option C: Build `UltraDesk.app` and `.dmg` locally from source on macOS
+Install Xcode Command Line Tools (`xcode-select --install`), a Rust toolchain (`rustup`), and Node.js 22:
+
+```bash
+ARCH=$(uname -m)
+TARGET=$(rustc -vV | sed -n 's/host: //p')
+cd web && npm ci && npm run build && cd ..
+cargo build --release --target "${TARGET}"
+./packaging/macos/package-macos.sh "${TARGET}" "${ARCH}" "v1.0.1"
+```
+
+#### Granting macOS system permissions (Screen Recording & Accessibility)
+When you start Host screen sharing on macOS, `UltraDesk.app` automatically checks and prompts for two system permissions required by macOS TCC:
+1. **Screen Recording** (`System Settings -> Privacy & Security -> Screen & System Audio Recording`): Required so remote partners can view your screen.
+2. **Accessibility** (`System Settings -> Privacy & Security -> Accessibility`): Required so remote partners can move your mouse cursor and type on your keyboard via `CoreGraphics` (`CGEvent`).
+
+If you upgrade `UltraDesk.app` and macOS still uses a cached permission entry from an older ad-hoc signature, reset the TCC entries for `io.github.ultradesk.UltraDesk` and relaunch the app:
+
+```bash
+tccutil reset ScreenCapture io.github.ultradesk.UltraDesk
+tccutil reset Accessibility io.github.ultradesk.UltraDesk
+open /Applications/UltraDesk.app
+```
 
 ---
 
-### 6. NixOS and Nix Flakes
+### 7. NixOS and Nix Flakes
 
 Run `ultradesk-rust` directly using Nix Flakes:
 
@@ -166,7 +206,7 @@ To enable `ultradesk-rust` declaratively in a NixOS configuration, import `nixos
 
 ---
 
-### 7. Build from source (Any Linux distribution)
+### 8. Build from source (Any Linux distribution)
 
 Install a Rust toolchain (`cargo` and `rustc`), `pkg-config`, `openssl`, `libxcb`, `zstd`, `gtk3`, `webkit2gtk-4.1`, and `libsoup-3.0`.
 
@@ -186,11 +226,13 @@ make install PREFIX="$HOME/.local"
 
 ## Configure display and input backends
 
-When the host worker starts, `select_desktop_backend` in `src/host.rs` probes your session to pick a capture and input engine. On Wayland desktops, `WaylandGrimUinputBackend` captures display buffers using `grim -t ppm -s 1 -` and enumerates connected outputs through `niri msg -j outputs`, `wlr-randr`, or `xrandr`. It injects mouse movements and keyboard events directly into the kernel via `/dev/uinput`.
+When the host worker starts, `DesktopBackend::auto_detect` in `src/host.rs` probes your session to pick a capture and input engine:
+- **macOS (`MacOsScreencaptureBackend`)**: Calls `ensure_macos_host_permissions(true)` to verify or request Screen Recording and Accessibility access, captures screen frames via `/usr/sbin/screencapture -x -t png`, and injects mouse, scroll wheel, virtual-key, and Unicode `VK_PACKET` events directly through `CoreGraphics.framework` (`CGEventPost`).
+- **Linux Wayland (`WaylandGrimUinputBackend`)**: Captures display buffers using `grim -t ppm -s 1 -` and enumerates connected outputs through `niri msg -j outputs`, `wlr-randr`, or `xrandr`. It injects mouse movements and keyboard events directly into the kernel via `/dev/uinput`.
+- **Linux X11 and Xwayland (`X11ShmXtestBackend`)**: Captures frames through `XShmGetImage` with an `XGetImage` fallback, queries monitor layouts via `XRRGetMonitors` (RandR 1.5), and injects input through `XTestFakeMotionEvent`, `XTestFakeButtonEvent`, and `XTestFakeKeyEvent`.
+- **Headless fallback (`HeadlessBackend`)**: If no graphical display server is reachable, such as in automated CI environments or headless servers, `HeadlessBackend` generates synthetic test patterns and records input events in memory.
 
-On X11 and Xwayland sessions, `X11ShmXtestBackend` captures frames through `XShmGetImage` with an `XGetImage` fallback, queries monitor layouts via `XRRGetMonitors` (RandR 1.5), and injects input through `XTestFakeMotionEvent`, `XTestFakeButtonEvent`, and `XTestFakeKeyEvent`. If neither display server is reachable, such as in automated CI environments or headless servers, `HeadlessBackend` generates test patterns and accepts input as no-ops.
-
-Injecting input through `/dev/uinput` requires write permissions for your user account. Load the kernel module and grant your user access with access control lists:
+On Linux Wayland, injecting input through `/dev/uinput` requires write permissions for your user account. Load the kernel module and grant your user access with access control lists:
 
 ```bash
 sudo modprobe uinput
@@ -298,37 +340,39 @@ You can also combine arbitrary outputs into a monitor subset. In `viewer.html`, 
 
 ## Repository layout
 
-- `src/main.rs` parses CLI subcommands (`host`, `id`, `master-password`, and `help`), loads XDG profiles, starts `HostSession` and `PortalServer`, and launches the native Tauri desktop window or browser fallback.
-- `src/gui.rs` manages the native Tauri desktop window runtime using `tao` and `wry`, integrates native menubars via `muda`, drives clipboard synchronization, and coordinates browser fallback.
+- `src/main.rs` parses CLI subcommands (`host`, `id`, `master-password`, and `help`), loads XDG profiles, starts `HostSession` and `PortalServer`, and launches the native desktop window or browser fallback.
+- `src/gui.rs` manages the native desktop window runtime using `tao` and `wry` (GTK3/WebKit2GTK on Linux and Cocoa/`WKWebView` on macOS), integrates native menubars via `muda`, drives clipboard synchronization, and coordinates browser fallback.
 - `src/lib.rs` re-exports library modules and runs the integration test suite.
 - `src/protocol.rs` executes 3DES registration cryptography, P2P AES-256-CBC framing, target route parsing, and multipart byte-array field serialization.
+- `src/e2e.rs` implements `UDE2E1` end-to-end encryption using ephemeral X25519 key exchange and dual-key directional ChaCha20-Poly1305 AEAD.
 - `src/screen.rs` houses `RGB555Screen`, `DisplayLayout`, `MonitorSelection`, 11-field screen update decoding, scroll-copy, LRU tile caching, bottom-up JPEG atlases, and Zstandard RGB555 decompression.
-- `src/host.rs` runs `HostCore` and `HostSession`, manages Wayland and X11 capturers and injectors, handles multi-monitor cropping and coordinate translation, and enforces `LoginThrottle`.
+- `src/host.rs` runs `HostCore` and `HostSession`, manages Wayland, X11, and macOS capturers and injectors, handles macOS TCC permission requests (`Screen Recording` and `Accessibility`), performs multi-monitor cropping and coordinate translation, and enforces `LoginThrottle`.
 - `src/session.rs` coordinates client registration, relay transport, keepalives, clipboard polling, and unified `SessionState` synchronization across client and host modes.
 - `src/server.rs` runs `PortalServer`, serving `viewer.html`, embedded assets, and JSON or binary HTTP endpoints.
 - `src/input.rs` encodes mouse movement, buttons, wheel scrolling, key events (`WM_KEYDOWN` and `WM_KEYUP`), and `VK_PACKET` Unicode packets, while decoding incoming host input commands.
 - `src/cursor.rs` tracks remote cursor shape updates (`PACKET_CURSOR_CHANGE`, `PACKET_CURSOR_IMAGE`, and `PACKET_CURSOR_POS`), caches PNG cursor bitmaps by hash, and requests missing shapes.
 - `src/audio.rs` decodes and encodes ITU-T G.722 64 kbps two-band QMF ADPCM packets (`42`, `43`, `50`, and `51`), producing 48 kHz stereo WAV buffers.
-- `src/clipboard.rs` translates clipboard packets (`5` and `33`) across 1-byte and 2-byte `Int16LE` tags, Zstandard UTF-16LE streams, and pipe-delimited strings, bridging to `wl-copy`, `wl-paste`, `xclip`, `xsel`, and GTK.
+- `src/clipboard.rs` translates clipboard packets (`5` and `33`) across 1-byte and 2-byte `Int16LE` tags, Zstandard UTF-16LE streams, and pipe-delimited strings, bridging to `pbcopy` and `pbpaste` on macOS and `wl-copy`, `wl-paste`, `xclip`, `xsel`, and GTK on Linux.
 - `src/file_transfer.rs` handles chunked file transfers and bidirectional UTF-16LE chat across packet kinds `12`, `13`, `14`, `15`, `16`, and `21`.
 - `src/direct.rs` exchanges LAN direct TCP candidates and probes peer connectivity (`DirectHandshakeMachine`).
-- `src/profile.rs` persists XDG configuration files under `~/.config/ultradesk-rust` (`host-profile.json`, `client-profile.json`, and `saved_credentials.json`).
+- `src/profile.rs` persists configuration files under `~/.config/ultradesk-rust` (`host-profile`, `profile`, `master-password`, and `credentials.json`).
+- `packaging/macos/` contains `Info.plist`, `entitlements.plist`, and `package-macos.sh` to assemble `UltraDesk.app` and `.dmg` installers for macOS (`arm64` and `x86_64`).
 - `viewer.html` delivers the bilingual (Vietnamese and English) single-page application with a docked menu toolbar, theme switching, and session tools.
 
 ## Run tests and benchmarks
 
-Run the 47 release unit and integration tests and the verification script (`scripts/verify_upgrade.sh`):
+Run the 66 release unit and security regression tests and the verification script (`scripts/verify_upgrade.sh`):
 
 ```bash
 cargo test --release
 bash scripts/verify_upgrade.sh
 ```
 
-The test suite exercises 3DES and AES-256-CBC cryptography, 11-field screen decoding, multi-monitor subset cropping, Wayland `grim` PPM parsing, X11 `ZPixmap` conversion, G.722 audio encoding and decoding, bidirectional `Int16LE` chat and clipboard synchronization, chunked file transfer, and live loopback host-to-viewer relay handshakes.
+The test suite exercises `UDE2E1` X25519 + ChaCha20-Poly1305 end-to-end encryption, 3DES and AES-256-CBC cryptography, 11-field screen decoding, multi-monitor subset cropping, Wayland `grim` PPM parsing, macOS PNG-to-RGB555 conversion and keycode mapping, X11 `ZPixmap` conversion, G.722 audio encoding and decoding, bidirectional `Int16LE` chat and clipboard synchronization, chunked file transfer confinement, and live loopback host-to-viewer relay handshakes.
 
 ## Automated release pipelines
 
-GitHub Actions workflows in `.github/workflows/` handle continuous integration and package distribution. On every push and pull request, `build.yml` and `nix.yml` run the release test suite and evaluate Nix flake checks. When tagging a release, `build-and-release.yml` produces binary packages for Debian, Fedora, openSUSE, Arch Linux, and NixOS, publishing signed repositories for APT, DNF, and Zypper on GitHub Pages alongside release assets.
+GitHub Actions workflows in `.github/workflows/` handle continuous integration and package distribution. On every push and pull request, `build.yml` and `nix.yml` run the release test suite and evaluate Nix flake checks. When `dtrh95` pushes a release tag (`v*`), `build-and-release.yml` verifies the tag pusher, builds binary packages for Debian, Ubuntu, Fedora, openSUSE, Arch Linux, and macOS (`arm64` and `x86_64` `.dmg` and `.app.tar.gz`), publishes release assets to GitHub Releases, and deploys signed APT, DNF, and Zypper repositories to Cloudflare Pages (`https://ultradesk-rust.pages.dev`).
 
 Dedicated publishing workflows target individual distribution ecosystems. For Debian, `publish-debian.yml` targets bookworm, trixie, forky, and sid. For Ubuntu, `publish-ubuntu.yml` packages for jammy, noble, questing, and resolute, uploading signed source packages to Launchpad PPA. For NixOS, `publish-nixos.yml` and `update-nix-hash.yaml` build the flake closure, push binary substitutes to Cachix, export portable `.nar.xz` archives, and submit a pull request updating the package hash in `nix/packages/ultradesk-rust/default.nix`.
 
