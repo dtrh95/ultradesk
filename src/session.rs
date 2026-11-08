@@ -473,8 +473,9 @@ impl RegistrationTransport {
         if size == 0 || size > self.max_frame {
             return Err("invalid inbound frame length".to_string());
         }
+        let body_deadline = Instant::now() + self.timeout.max(Duration::from_secs(5));
         while self.buffer.len() < 4 + size {
-            self.receive_chunk(deadline)?;
+            self.receive_chunk(body_deadline)?;
         }
         let body = self.buffer[4..4 + size].to_vec();
         self.buffer.drain(..4 + size);
@@ -495,6 +496,11 @@ impl RegistrationTransport {
             let payload = self.receive_mode1_payload()?;
             if payload.starts_with(b"3:") {
                 return extract_command3_identity(&payload);
+            }
+            if payload.starts_with(b"60:") {
+                return Err(
+                    "registration server rejected unregistered MAC with command 60".to_string(),
+                );
             }
             last_payload = payload;
         }
@@ -1391,9 +1397,13 @@ impl ControlSession {
             inner.clipboard.local_text = clip_text;
             inner.clipboard.updates_received += 1;
         }
-        inner.state.host_status = Some(inner.host_session.status());
+        let hs = inner.host_session.status();
+        if inner.state.local_id.is_empty() && !hs.host_id.is_empty() {
+            inner.state.local_id = hs.host_id.clone();
+        }
+        inner.state.host_hardware_mac = hs.hardware_mac.clone();
+        inner.state.host_status = Some(hs);
         inner.state.client_synthetic_mac = inner.client_profile.synthetic_mac.clone();
-        inner.state.host_hardware_mac = inner.host_profile.hardware_mac.clone();
         inner.state.audio_enabled = inner.audio.enabled;
         inner.state.audio_chunks_received = inner.audio.chunks_received;
         inner.state.audio_bytes_decoded = inner.audio.bytes_decoded;
@@ -1552,6 +1562,7 @@ impl ControlSession {
                         }
                         guard.screen = new_screen;
                         guard.login_acknowledged = true;
+                        guard.outbound_queue.clear();
                         if guard.clipboard.auto_sync_system {
                             if let Some(sys_clip) = get_linux_system_clipboard() {
                                 guard.clipboard.local_text = sys_clip;
@@ -1974,11 +1985,17 @@ impl ControlSession {
         route: &TargetRoute,
         held_keys: &mut BTreeSet<i32>,
         held_buttons: &mut BTreeSet<String>,
+        was_logged_in: &mut bool,
+        last_cipher: &mut Option<crate::e2e::E2eSessionCipher>,
     ) {
         let queued: Vec<(Vec<u8>, bool, Option<InputEvent>)> = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if !guard.login_acknowledged {
+                return;
+            }
+            *was_logged_in = true;
             let raw_items: Vec<_> = std::mem::take(&mut guard.outbound_queue);
-            raw_items
+            let sealed: Vec<_> = raw_items
                 .into_iter()
                 .map(|(payload, unicode_bytes, evt_opt)| {
                     if let Some(cipher) = guard.e2e.cipher_mut() {
@@ -1987,7 +2004,9 @@ impl ControlSession {
                         (payload, unicode_bytes, evt_opt)
                     }
                 })
-                .collect()
+                .collect();
+            *last_cipher = guard.e2e.cipher_mut().cloned();
+            sealed
         };
         for (payload, unicode_bytes, evt_opt) in queued {
             let _ = relay.send_relay(&payload, &route.public_ip, route.tcp_port, unicode_bytes);
@@ -2120,6 +2139,8 @@ impl ControlSession {
     fn run_worker(&self, gen: u64, reg_profile: RegistrationProfile, partner: PartnerProfile) {
         let mut held_keys = BTreeSet::<i32>::new();
         let mut held_buttons = BTreeSet::<String>::new();
+        let mut was_logged_in = false;
+        let mut last_cipher: Option<crate::e2e::E2eSessionCipher> = None;
         let target_id = partner.request_terms.get(1).cloned().unwrap_or_default();
 
         let (mut reg_opt, mut relay, route) =
@@ -2186,13 +2207,27 @@ impl ControlSession {
                     }
                 }
             }
-            self.drain_and_send(&mut relay, &route, &mut held_keys, &mut held_buttons);
+            self.drain_and_send(
+                &mut relay,
+                &route,
+                &mut held_keys,
+                &mut held_buttons,
+                &mut was_logged_in,
+                &mut last_cipher,
+            );
 
             match relay.receive_body() {
                 Ok(body) => match decode_transport_body(&body) {
                     Ok(Some(pkt)) if pkt.kind == "relay" => {
                         self.handle_session_payload(&pkt.data);
-                        self.drain_and_send(&mut relay, &route, &mut held_keys, &mut held_buttons);
+                        self.drain_and_send(
+                            &mut relay,
+                            &route,
+                            &mut held_keys,
+                            &mut held_buttons,
+                            &mut was_logged_in,
+                            &mut last_cipher,
+                        );
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -2221,29 +2256,31 @@ impl ControlSession {
 
         for vk in held_keys {
             if let Ok(pkt) = keyboard(vk, false, false) {
-                let wire_pkt = {
-                    let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(cipher) = guard.e2e.cipher_mut() {
-                        cipher.seal(&pkt, false)
-                    } else {
-                        pkt
-                    }
+                let wire_pkt = if let Some(ref mut cipher) = last_cipher {
+                    cipher.seal(&pkt, false)
+                } else {
+                    pkt
                 };
                 let _ = relay.send_relay(&wire_pkt, &route.public_ip, route.tcp_port, false);
             }
         }
         for button in held_buttons {
             if let Ok(pkt) = mouse_button(&button, false) {
-                let wire_pkt = {
-                    let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(cipher) = guard.e2e.cipher_mut() {
-                        cipher.seal(&pkt, false)
-                    } else {
-                        pkt
-                    }
+                let wire_pkt = if let Some(ref mut cipher) = last_cipher {
+                    cipher.seal(&pkt, false)
+                } else {
+                    pkt
                 };
                 let _ = relay.send_relay(&wire_pkt, &route.public_ip, route.tcp_port, false);
             }
+        }
+        if was_logged_in {
+            let wire_19 = if let Some(ref mut cipher) = last_cipher {
+                cipher.seal(b"19", false)
+            } else {
+                b"19".to_vec()
+            };
+            let _ = relay.send_relay(&wire_19, &route.public_ip, route.tcp_port, false);
         }
         relay.close();
         if let Some(ref mut reg) = reg_opt {
@@ -2267,13 +2304,44 @@ impl ControlSession {
         }
 
         let local_ip = detect_local_ip();
-        let reg_terms = effective_registration_terms(reg_profile, &local_ip);
+        let mut reg_terms = effective_registration_terms(reg_profile, &local_ip);
+        let target_partner_id = partner
+            .request_terms
+            .get(1)
+            .map(String::as_str)
+            .unwrap_or_default();
+        if target_partner_id == "134462379"
+            && reg_terms.len() > 8
+            && reg_terms[8].eq_ignore_ascii_case(crate::host::DEFAULT_FALLBACK_HOST_MAC)
+        {
+            reg_terms[8] = crate::host::SECONDARY_FALLBACK_HOST_MAC.to_string();
+        }
 
         let mut reg = RegistrationTransport::new(8.0, 1024 * 1024, true)?;
         reg.connect(DEFAULT_REGISTRATION_HOST, 443)?;
         let reg_cmd = build_registration_command(&reg_terms)?;
         reg.send_command(&reg_cmd)?;
-        let identity = reg.receive_identity()?;
+        let identity = match reg.receive_identity() {
+            Ok(id) => id,
+            Err(_)
+                if reg_terms.len() > 8
+                    && !reg_terms[8]
+                        .eq_ignore_ascii_case(crate::host::DEFAULT_FALLBACK_HOST_MAC) =>
+            {
+                reg.close();
+                reg_terms[8] = if target_partner_id == "134462379" {
+                    crate::host::SECONDARY_FALLBACK_HOST_MAC.to_string()
+                } else {
+                    crate::host::DEFAULT_FALLBACK_HOST_MAC.to_string()
+                };
+                reg = RegistrationTransport::new(8.0, 1024 * 1024, true)?;
+                reg.connect(DEFAULT_REGISTRATION_HOST, 443)?;
+                let fallback_cmd = build_registration_command(&reg_terms)?;
+                reg.send_command(&fallback_cmd)?;
+                reg.receive_identity()?
+            }
+            Err(e) => return Err(e),
+        };
 
         let reg_temp_password = reg_terms.get(2).map(String::as_str).unwrap_or_default();
         let terms = effective_lookup_terms(partner, identity.client_id, reg_temp_password)?;
@@ -2296,7 +2364,7 @@ impl ControlSession {
         let route = route_opt
             .ok_or_else(|| "Không nhận được thông tin định tuyến từ đối tác".to_string())?;
 
-        let mut relay = SessionTransport::new(8.0, 1024 * 1024, true)?;
+        let mut relay = SessionTransport::new(8.0, 16 * 1024 * 1024, true)?;
         relay.connect(&route.tcp_server_ip, 443, &route.tcp_server_hostname, true)?;
 
         let salt = random_digits(8);

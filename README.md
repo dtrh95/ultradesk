@@ -67,8 +67,8 @@ You can install prebuilt packages from the [GitHub Releases](https://github.com/
 #### Install with `.dmg` (Recommended)
 
 1. Download the `.dmg` installer for your Mac from [GitHub Releases](https://github.com/dtrh95/ultradesk/releases):
-   - **Apple Silicon (`arm64`)**: `ultradesk-rust-v1.0.2-arm64-macos.dmg`
-   - **Intel Mac (`x86_64`)**: `ultradesk-rust-v1.0.2-x86_64-macos.dmg`
+   - **Apple Silicon (`arm64`)**: `ultradesk-rust-v1.0.3-arm64-macos.dmg`
+   - **Intel Mac (`x86_64`)**: `ultradesk-rust-v1.0.3-x86_64-macos.dmg`
 2. Open the downloaded `.dmg` file and drag **UltraDesk.app** into your **Applications** folder.
 3. On first launch, if macOS displays an unverified developer prompt, run the following command in **Terminal** to clear the quarantine flag and open the app:
 
@@ -98,8 +98,8 @@ sudo apt install -y ultradesk-rust
 
 ```bash
 CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-bookworm}}")
-curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust_1.0.2-1_amd64_${CODENAME}.deb"
-sudo apt install -y "./ultradesk-rust_1.0.2-1_amd64_${CODENAME}.deb"
+curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust_1.0.3-1_amd64_${CODENAME}.deb"
+sudo apt install -y "./ultradesk-rust_1.0.3-1_amd64_${CODENAME}.deb"
 ```
 
 ---
@@ -108,7 +108,7 @@ sudo apt install -y "./ultradesk-rust_1.0.2-1_amd64_${CODENAME}.deb"
 
 ```bash
 RELEASEVER=$(rpm -E %fedora)
-sudo dnf install -y "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-1.0.2-1.fc${RELEASEVER}.x86_64.${RELEASEVER}.rpm"
+sudo dnf install -y "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-1.0.3-1.fc${RELEASEVER}.x86_64.${RELEASEVER}.rpm"
 ```
 
 ---
@@ -116,7 +116,7 @@ sudo dnf install -y "https://github.com/dtrh95/ultradesk/releases/latest/downloa
 ### 4. openSUSE Tumbleweed and Leap
 
 ```bash
-sudo zypper install -y "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-1.0.2-1.x86_64.tumbleweed.rpm"
+sudo zypper install -y "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-1.0.3-1.x86_64.tumbleweed.rpm"
 ```
 
 ---
@@ -124,9 +124,9 @@ sudo zypper install -y "https://github.com/dtrh95/ultradesk/releases/latest/down
 ### 5. Arch Linux, Manjaro, and EndeavourOS
 
 ```bash
-curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-v1.0.2-x86_64-archlinux.tar.zst"
+curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-v1.0.3-x86_64-archlinux.tar.zst"
 sudo pacman -S --needed --noconfirm openssl libxcb zstd gtk3 webkit2gtk-4.1 libsoup3
-sudo tar --zstd -xvf ultradesk-rust-v1.0.2-x86_64-archlinux.tar.zst -C /
+sudo tar --zstd -xvf ultradesk-rust-v1.0.3-x86_64-archlinux.tar.zst -C /
 ```
 
 ---
@@ -212,7 +212,7 @@ On macOS, you can package a standalone `UltraDesk.app` and `.dmg` installer:
 ARCH=$(uname -m)
 TARGET=$(rustc -vV | sed -n 's/host: //p')
 cargo build --release --target "${TARGET}"
-./packaging/macos/package-macos.sh "${TARGET}" "${ARCH}" "v1.0.2"
+./packaging/macos/package-macos.sh "${TARGET}" "${ARCH}" "v1.0.3"
 ```
 
 ---

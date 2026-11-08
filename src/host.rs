@@ -25,8 +25,23 @@ use x11rb::wrapper::ConnectionExt as _;
 pub const FIRST_FRAME_NUMBER: i32 = i32::MIN + 2;
 pub const HOST_VERSION: &[u8] = b"6.6.133";
 pub const DEFAULT_LAN_PORT: u16 = 5938;
+pub const DEFAULT_FALLBACK_HOST_MAC: &str = "BC241128BDE1";
+pub const SECONDARY_FALLBACK_HOST_MAC: &str = "8C3B4A4E2604";
 pub const MAX_FAILURES_BEFORE_LOCKOUT: u32 = 5;
 pub const LOCKOUT_DURATION: Duration = Duration::from_secs(5 * 60);
+
+pub fn candidate_registration_macs(primary_mac: &str) -> Vec<String> {
+    let mut macs = Vec::with_capacity(3);
+    if !primary_mac.is_empty() {
+        macs.push(primary_mac.to_string());
+    }
+    for fallback in [DEFAULT_FALLBACK_HOST_MAC, SECONDARY_FALLBACK_HOST_MAC] {
+        if !macs.iter().any(|m| m.eq_ignore_ascii_case(fallback)) {
+            macs.push(fallback.to_string());
+        }
+    }
+    macs
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRegistrationReply {
@@ -488,12 +503,36 @@ pub fn encode_host_clipboard(text: &str) -> Vec<u8> {
     }
 }
 
+const MAX_SAFE_RELAY_FRAME_PAYLOAD: usize = 950_000;
+
+fn mask_rgb555_lsb(raw: &[u8], mask: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    for chunk in raw.as_chunks::<2>().0 {
+        let px = u16::from_le_bytes([chunk[0], chunk[1]]) & mask;
+        out.extend_from_slice(&px.to_le_bytes());
+    }
+    if raw.len() % 2 == 1 {
+        out.push(*raw.last().unwrap());
+    }
+    out
+}
+
 pub fn encode_host_frame(
     rect: (u32, u32, u32, u32),
     rgb555_top_down: &[u8],
     seq: i32,
 ) -> Result<Vec<u8>, String> {
-    let compressed = compress_rgb555_standard(rgb555_top_down, 1)?;
+    let mut compressed = compress_rgb555_standard(rgb555_top_down, 1)?;
+    if compressed.len() > MAX_SAFE_RELAY_FRAME_PAYLOAD {
+        compressed = compress_rgb555_standard(rgb555_top_down, 9)?;
+        for mask in [0x7BDEu16, 0x739Cu16, 0x6318u16] {
+            if compressed.len() <= MAX_SAFE_RELAY_FRAME_PAYLOAD {
+                break;
+            }
+            let quantized = mask_rgb555_lsb(rgb555_top_down, mask);
+            compressed = compress_rgb555_standard(&quantized, 9)?;
+        }
+    }
     let mut rect_bytes = Vec::with_capacity(8);
     rect_bytes.extend_from_slice(&(rect.0 as u16).to_le_bytes());
     rect_bytes.extend_from_slice(&(rect.1 as u16).to_le_bytes());
@@ -830,6 +869,20 @@ impl HostCore {
 
         let decrypted_buf: Vec<u8>;
         let payload: &[u8] = if let Some(cipher) = self.e2e.cipher_mut() {
+            if self.phase == HostPhase::Starting
+                && cipher.rx_seqnum == 0
+                && !crate::e2e::is_e2e_frame(payload)
+            {
+                if peer_command_tag(payload) == b"19" {
+                    self.phase = HostPhase::None;
+                    self.active_viewer = None;
+                    self.waiting_ack = false;
+                    self.e2e = crate::e2e::E2eNegotiationState::Disabled;
+                    actions.push(HostAction::ReleaseAllInput);
+                    actions.push(HostAction::SessionEnded("Viewer disconnected".to_string()));
+                }
+                return actions;
+            }
             let Ok((raw, unicode_flag)) = cipher.open(payload) else {
                 return self.end_session("E2E decryption or authentication failed");
             };
@@ -2379,9 +2432,15 @@ impl MacOsCapturer {
         if !cfg!(target_os = "macos") {
             return Err("not a macOS host".to_string());
         }
+        if !std::path::Path::new("/usr/sbin/screencapture").exists() {
+            return Err("screencapture binary not found".to_string());
+        }
         let _ = ensure_macos_host_permissions(true);
-        let (w, h, _) = Self::capture_png_rgb555()?;
-        *shared_size.lock().unwrap() = (w, h);
+        if let Ok((w, h, _)) = Self::capture_png_rgb555() {
+            if w > 0 && h > 0 {
+                *shared_size.lock().unwrap() = (w, h);
+            }
+        }
         Ok(Self { shared_size })
     }
 
@@ -3215,28 +3274,42 @@ pub fn query_live_host_id_at(
     } else {
         &user_clean
     };
-    let cmd = build_host_registration_command(
-        device_id,
-        temp_password,
-        &local_ip,
-        &computer_b64,
-        hardware_mac,
-        master_password_proof,
-        user_name,
-    )?;
-    let mut reg = RegistrationTransport::new(5.0, 1024 * 1024, true)?;
-    reg.connect_with_tls(reg_host, reg_port, use_tls)?;
-    reg.send_command(&cmd)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let payload = reg.receive_mode1_payload()?;
-        if payload.starts_with(b"3:") {
-            let reply = parse_host_registration_reply(&payload)?;
-            reg.close();
-            return Ok(reply.id);
+    let candidates = candidate_registration_macs(hardware_mac);
+    for active_mac in &candidates {
+        let cmd = build_host_registration_command(
+            device_id,
+            temp_password,
+            &local_ip,
+            &computer_b64,
+            active_mac,
+            master_password_proof,
+            user_name,
+        )?;
+        let mut reg = RegistrationTransport::new(5.0, 1024 * 1024, true)?;
+        reg.connect_with_tls(reg_host, reg_port, use_tls)?;
+        reg.send_command(&cmd)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut try_next_mac = false;
+        while Instant::now() < deadline {
+            match reg.receive_mode1_payload() {
+                Ok(payload) if payload.starts_with(b"3:") => {
+                    let reply = parse_host_registration_reply(&payload)?;
+                    reg.close();
+                    return Ok(reply.id);
+                }
+                Ok(payload) if payload.starts_with(b"60:") => {
+                    try_next_mac = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        reg.close();
+        if !try_next_mac {
+            break;
         }
     }
-    reg.close();
     Err("registration server did not return command 3 reply".to_string())
 }
 
@@ -3737,22 +3810,29 @@ impl HostSession {
         } else {
             &user_clean
         };
-        let Ok(reg_cmd) = build_host_registration_command(
-            &device_id,
-            &temp_pw,
-            &local_ip,
-            &computer_b64,
-            &mac,
-            master_proof.as_deref(),
-            user_name,
-        ) else {
-            if let Some(tx) = ready_tx.take() {
-                let _ = tx.send(());
-            }
-            return;
-        };
+        let candidates = candidate_registration_macs(&mac);
+        let mut mac_idx = 0usize;
 
         while self.is_worker_active(gen) {
+            let active_mac = candidates
+                .get(mac_idx)
+                .map(String::as_str)
+                .unwrap_or(DEFAULT_FALLBACK_HOST_MAC);
+            let Ok(reg_cmd) = build_host_registration_command(
+                &device_id,
+                &temp_pw,
+                &local_ip,
+                &computer_b64,
+                active_mac,
+                master_proof.as_deref(),
+                user_name,
+            ) else {
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(());
+                }
+                return;
+            };
+
             let Ok(mut reg) = RegistrationTransport::new(15.0, 16 * 1024 * 1024, true) else {
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(());
@@ -3774,6 +3854,7 @@ impl HostSession {
             };
 
             let mut reg_reply: Option<HostRegistrationReply> = None;
+            let mut unregistered_mac = false;
             let reg_deadline = Instant::now() + Duration::from_secs(15);
             while Instant::now() < reg_deadline && self.is_worker_active(gen) {
                 match reg.receive_mode1_payload() {
@@ -3783,15 +3864,23 @@ impl HostSession {
                             break;
                         }
                     }
+                    Ok(payload) if payload.starts_with(b"60:") => {
+                        unregistered_mac = true;
+                        break;
+                    }
                     Ok(_) => {}
                     Err(_) => break,
                 }
             }
             let Some(reply) = reg_reply else {
+                reg.close();
+                if unregistered_mac && mac_idx + 1 < candidates.len() {
+                    mac_idx += 1;
+                    continue;
+                }
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(());
                 }
-                reg.close();
                 if !use_tls {
                     return;
                 }
@@ -3803,6 +3892,7 @@ impl HostSession {
                 let mut s = self.inner.lock().unwrap();
                 if s.running && s.generation == gen {
                     s.host_id = reply.id.clone();
+                    s.hardware_mac = active_mac.to_string();
                 }
             }
             if let Some(tx) = ready_tx.take() {
@@ -3816,6 +3906,7 @@ impl HostSession {
                 Option<(u16, String)>,
             )> = None;
             let mut viewer_route: Option<(String, u16)> = None;
+            let mut last_relay_rx = Instant::now();
             let mut last_keepalive = Instant::now();
             let mut next_capture_at = Instant::now();
 
@@ -3861,11 +3952,22 @@ impl HostSession {
                                     continue;
                                 }
                             }
-                            let has_active_viewer = {
-                                let s = self.inner.lock().unwrap();
-                                s.core.phase != HostPhase::None
+                            let can_replace_relay = {
+                                let mut s = self.inner.lock().unwrap();
+                                if s.core.phase == HostPhase::None {
+                                    true
+                                } else if !s.lan_viewer_active
+                                    && last_relay_rx.elapsed() >= Duration::from_secs(2)
+                                {
+                                    let actions = s.core.end_session("Relay viewer timed out");
+                                    Self::record_actions(&mut s, &actions);
+                                    s.outbound_peer_packets.clear();
+                                    true
+                                } else {
+                                    false
+                                }
                             };
-                            if !has_active_viewer {
+                            if can_replace_relay {
                                 let relay_port = if use_tls { 443 } else { reg_port };
                                 if let Ok(mut new_relay) =
                                     SessionTransport::new(5.0, 16 * 1024 * 1024, true)
@@ -3883,6 +3985,7 @@ impl HostSession {
                                         new_relay.set_timeout(0.02);
                                         active_relay = Some((new_relay, notif, None));
                                         viewer_route = None;
+                                        last_relay_rx = Instant::now();
                                     }
                                 }
                             }
@@ -3909,10 +4012,13 @@ impl HostSession {
                                     std::net::Ipv4Addr::from(pkt.address_value).to_string();
                                 let candidate_route = (peer_ip, pkt.port);
                                 if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
+                                    let is_login = decoded.starts_with(b"login:");
                                     let allow_packet = viewer_route.as_ref()
                                         == Some(&candidate_route)
-                                        || (viewer_route.is_none()
-                                            && decoded.starts_with(b"login:"));
+                                        || (is_login
+                                            && (viewer_route.is_none()
+                                                || last_relay_rx.elapsed()
+                                                    >= Duration::from_secs(2)));
                                     if allow_packet {
                                         let actions = self
                                             .handle_peer_payload_from_peer(
@@ -3920,16 +4026,41 @@ impl HostSession {
                                                 &decoded,
                                             )
                                             .unwrap_or_default();
-                                        if viewer_route.is_none()
-                                            && actions.iter().any(|a| {
-                                                matches!(
-                                                    a,
-                                                    HostAction::PromptApproval(_)
-                                                        | HostAction::SessionStarted(_)
-                                                )
-                                            })
-                                        {
+                                        let started = actions.iter().any(|a| {
+                                            matches!(
+                                                a,
+                                                HostAction::PromptApproval(_)
+                                                    | HostAction::SessionStarted(_)
+                                            )
+                                        });
+                                        let ended = actions
+                                            .iter()
+                                            .any(|a| matches!(a, HostAction::SessionEnded(_)));
+                                        if started {
                                             viewer_route = Some(candidate_route);
+                                            last_relay_rx = Instant::now();
+                                        } else if ended
+                                            && viewer_route.as_ref() == Some(&candidate_route)
+                                        {
+                                            let outbound: Vec<Vec<u8>> = {
+                                                let mut s = self.inner.lock().unwrap();
+                                                if s.lan_viewer_active {
+                                                    Vec::new()
+                                                } else {
+                                                    std::mem::take(&mut s.outbound_peer_packets)
+                                                }
+                                            };
+                                            for out_pkt in outbound {
+                                                let _ = relay.send_relay(
+                                                    &out_pkt,
+                                                    &candidate_route.0,
+                                                    candidate_route.1,
+                                                    false,
+                                                );
+                                            }
+                                            viewer_route = None;
+                                        } else if viewer_route.as_ref() == Some(&candidate_route) {
+                                            last_relay_rx = Instant::now();
                                         } else if viewer_route.is_none() {
                                             let rejected: Vec<Vec<u8>> = {
                                                 let mut s = self.inner.lock().unwrap();
@@ -4958,6 +5089,10 @@ mod tests {
         let (auto_ctrl_plain, _) = viewer_e2e_2.cipher_mut().unwrap().open(&auto_ctrl).unwrap();
         assert_eq!(auto_ctrl_plain, encode_host_control_permission(true));
 
+        let early_plaintext_acts = auto_core.handle_packet(b"8|||512|||0|||10|||20", now);
+        assert!(early_plaintext_acts.is_empty());
+        assert_eq!(auto_core.phase, HostPhase::Starting);
+
         let sealed_17 = viewer_e2e_2.cipher_mut().unwrap().seal(b"17", false);
         let start_acts = auto_core.handle_packet(&sealed_17, now);
         assert_eq!(auto_core.phase, HostPhase::Streaming);
@@ -5042,5 +5177,98 @@ mod tests {
         assert_eq!(vk_to_macos_keycode(0x1b), Some(0x35));
         assert_eq!(vk_to_macos_keycode(0x5b), Some(0x37));
         let _ = ensure_macos_host_permissions(false);
+    }
+
+    #[test]
+    fn test_host_registration_command60_fallback_mac() {
+        use crate::protocol::{
+            decrypt_registration_bytes, encode_typed_transport_frame, FrameStream,
+            REGISTRATION_PASSWORD,
+        };
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let temp_pw = "87654321";
+
+        let server_handle = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut reg_stream, _) = listener.accept().unwrap();
+                reg_stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                reg_stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+                reg_stream.flush().unwrap();
+                let mut reg_rx = FrameStream::new(true);
+                let mut buf = [0u8; 4096];
+
+                let reg_cmd = loop {
+                    let n = reg_stream.read(&mut buf).unwrap();
+                    assert!(n > 0);
+                    let frames = reg_rx.feed(&buf[..n]);
+                    if let Some(frame) = frames.into_iter().next() {
+                        if let Ok(Some(body)) = decode_transport_body(&frame) {
+                            if body.kind == "direct" && body.data.first() == Some(&0) {
+                                let plain = decrypt_registration_bytes(
+                                    &body.data[1..],
+                                    REGISTRATION_PASSWORD,
+                                )
+                                .unwrap();
+                                break String::from_utf8(plain).unwrap();
+                            }
+                        }
+                    }
+                };
+                let parts: Vec<&str> = reg_cmd.split(':').collect();
+                assert_eq!(parts[0], "3");
+                if attempt == 0 {
+                    assert_eq!(parts[8], "021122334455");
+                    let ch = encode_typed_transport_frame(b"60:challenge_token:", 1);
+                    reg_stream.write_all(&ch).unwrap();
+                    reg_stream.flush().unwrap();
+                } else {
+                    assert_eq!(parts[8], DEFAULT_FALLBACK_HOST_MAC);
+                    let reply = format!(
+                        "3:{}:134462379:203.0.113.7::0:127.0.0.1:-1:01/01/0001::",
+                        port
+                    );
+                    let reply_wire = encode_typed_transport_frame(reply.as_bytes(), 1);
+                    reg_stream.write_all(&reply_wire).unwrap();
+                    reg_stream.flush().unwrap();
+                }
+            }
+        });
+
+        let layout = DisplayLayout {
+            width: 8,
+            height: 8,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 8,
+                bottom: 8,
+            }],
+        };
+        let backend = DesktopBackend::headless(8, 8);
+        let session = HostSession::with_profile(
+            "FEDCBA9876543210FEDCBA9876543210",
+            "",
+            "021122334455",
+            temp_pw,
+            None,
+            "MacHost",
+            layout,
+            backend,
+        );
+        let st = session.start_with_endpoint("127.0.0.1", port, false);
+        assert!(st.running);
+        assert_eq!(st.host_id, "134462379");
+        assert_eq!(st.hardware_mac, DEFAULT_FALLBACK_HOST_MAC);
+
+        server_handle.join().unwrap();
+        let _ = session.stop();
     }
 }

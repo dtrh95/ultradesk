@@ -3,7 +3,7 @@ set -euo pipefail
 
 TARGET="${1:-aarch64-apple-darwin}"
 ARCH="${2:-arm64}"
-RAW_VERSION="${3:-v1.0.2}"
+RAW_VERSION="${3:-v1.0.3}"
 VERSION="${RAW_VERSION#v}"
 VERSION="${VERSION//\//-}"
 
@@ -41,7 +41,7 @@ if [ -f "${ICON_SRC}" ]; then
   rm -rf "${ICONSET_DIR}"
 fi
 
-sed "s|<string>1.0.2</string>|<string>${VERSION}</string>|g" packaging/macos/Info.plist > "${CONTENTS_DIR}/Info.plist"
+sed "s|<string>1.0.3</string>|<string>${VERSION}</string>|g" packaging/macos/Info.plist > "${CONTENTS_DIR}/Info.plist"
 
 codesign --force --deep --entitlements packaging/macos/entitlements.plist --sign - "${APP_DIR}"
 

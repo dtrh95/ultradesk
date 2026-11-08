@@ -273,11 +273,13 @@ pub fn discover_hardware_mac(_local_ip: Option<Ipv4Addr>) -> Option<String> {
         }
     }
 
-    for args in [&["en0"][..], &["en1"][..], &[][..]] {
-        if let Ok(out) = std::process::Command::new("ifconfig").args(args).output() {
-            if out.status.success() {
-                if let Some(mac) = parse_ifconfig_mac(&String::from_utf8_lossy(&out.stdout)) {
-                    return Some(mac);
+    for prog in ["ifconfig", "/sbin/ifconfig"] {
+        for args in [&["en0"][..], &["en1"][..], &[][..]] {
+            if let Ok(out) = std::process::Command::new(prog).args(args).output() {
+                if out.status.success() {
+                    if let Some(mac) = parse_ifconfig_mac(&String::from_utf8_lossy(&out.stdout)) {
+                        return Some(mac);
+                    }
                 }
             }
         }

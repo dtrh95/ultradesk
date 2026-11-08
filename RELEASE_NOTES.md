@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.2
+## UltraDesk (Rust Edition) v1.0.3
 
-Release **v1.0.2** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) introduces a built-in **Model Context Protocol (MCP) server** (`ultradesk-rust mcp`, `ws://127.0.0.1:9333`, and `POST /mcp`) for AI assistants (Claude Desktop, Cursor, Claude Code, OpenCode), user-friendly documentation, community contribution guidelines (`CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `CODE_STYLE.md`), and native **macOS** (`arm64` Apple Silicon and `x86_64` Intel) `.dmg` / `.app.tar.gz` installers alongside Linux multi-distro packages.
+Release **v1.0.3** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) resolves macOS Host ID assignment (`"---"` fallback handling when the registration server challenges unregistered MACs with `Command 60`), fixes `O_NONBLOCK` socket inheritance on macOS (`HTTP 431`), compresses dual-monitor/4K keyframes within relay frame limits, prevents pre-handshake plaintext input race disconnects during E2E session startup, and includes the built-in **Model Context Protocol (MCP) server** (`ultradesk-rust mcp`, `ws://127.0.0.1:9333`, and `POST /mcp`).
 
 ---
 
