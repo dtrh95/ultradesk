@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.3
+## UltraDesk (Rust Edition) v1.0.4
 
-Release **v1.0.3** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) resolves macOS Host ID assignment (`"---"` fallback handling when the registration server challenges unregistered MACs with `Command 60`), fixes `O_NONBLOCK` socket inheritance on macOS (`HTTP 431`), compresses dual-monitor/4K keyframes within relay frame limits, prevents pre-handshake plaintext input race disconnects during E2E session startup, and includes the built-in **Model Context Protocol (MCP) server** (`ultradesk-rust mcp`, `ws://127.0.0.1:9333`, and `POST /mcp`).
+Release **v1.0.4** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) upgrades core cryptography, compression, and X11 protocol dependencies (`aes 0.9.4`, `cbc 0.2.1`, `cipher 0.5.2`, `des 0.9.0`, `md-5 0.11.0`, `sha2 0.11.1`, `x11rb 0.14.0`, and `zstd 0.14.3`), updates CI/CD actions (`actions/setup-node@v7`, `cloudflare/wrangler-action@v4`, `cachix/cachix-action@v17`), fixes Ubuntu Launchpad PPA source package generation, and highlights direct bidirectional compatibility with **UltraViewer on Windows**.
 
 ---
 
