@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version without v prefix (for example 0.2.0)'
+        description: 'Release version without v prefix (for example 1.0.0)'
         required: false
       publish_ppa:
         description: 'Also upload Debian source package to Ubuntu Launchpad PPA'
@@ -162,9 +162,7 @@ jobs:
             fi
           done
           cp packaging/pubkey.gpg apt-repo/pubkey.gpg
-          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          REPO_NAME="${{ github.event.repository.name }}"
-          BASE_URL="https://${OWNER_LC}.github.io/${REPO_NAME}"
+          BASE_URL="https://ultradesk-rust.pages.dev"
 
           cat > apt-repo/install-ubuntu.sh << EOF
           #!/bin/sh
@@ -172,7 +170,7 @@ jobs:
           CODENAME=\$(. /etc/os-release && echo "\${VERSION_CODENAME:-noble}")
           sudo install -d -m 0755 /etc/apt/keyrings
           curl -fsSL "${BASE_URL}/pubkey.gpg" | sudo tee /etc/apt/keyrings/ultradesk-rust.asc >/dev/null
-          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] ${BASE_URL}/apt/ubuntu/\${CODENAME} \${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] ${BASE_URL}/apt/\${CODENAME} \${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
           sudo apt-get update
           sudo apt-get install -y ultradesk-rust
           EOF

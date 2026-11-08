@@ -29,8 +29,8 @@ sudo apt install -y "./ultradesk-rust_1.0.0-1_amd64_${CODENAME}.deb"
 ```bash
 CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-bookworm}")
 sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://dtrh95.github.io/ultradesk/pubkey.gpg | sudo tee /etc/apt/keyrings/ultradesk-rust.asc >/dev/null
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] https://dtrh95.github.io/ultradesk/apt/debian/${CODENAME} ${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
+curl -fsSL https://ultradesk-rust.pages.dev/pubkey.gpg | sudo tee /etc/apt/keyrings/ultradesk-rust.asc >/dev/null
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] https://ultradesk-rust.pages.dev/apt/${CODENAME} ${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
 sudo apt update
 sudo apt install -y ultradesk-rust
 ```
@@ -57,8 +57,8 @@ sudo apt install -y "./ultradesk-rust_1.0.0-1_amd64_${CODENAME}.deb"
 ```bash
 CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-noble}}")
 sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://dtrh95.github.io/ultradesk/pubkey.gpg | sudo tee /etc/apt/keyrings/ultradesk-rust.asc >/dev/null
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] https://dtrh95.github.io/ultradesk/apt/ubuntu/${CODENAME} ${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
+curl -fsSL https://ultradesk-rust.pages.dev/pubkey.gpg | sudo tee /etc/apt/keyrings/ultradesk-rust.asc >/dev/null
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] https://ultradesk-rust.pages.dev/apt/${CODENAME} ${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
 sudo apt update
 sudo apt install -y ultradesk-rust
 ```
