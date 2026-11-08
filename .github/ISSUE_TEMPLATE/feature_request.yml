@@ -1,0 +1,57 @@
+name: Feature Request
+description: Suggest a new feature or improvement for UltraDesk
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a new feature! Please fill in the details below.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Current problem or limitation
+      description: Describe the problem you are facing or the capability that is currently missing
+      placeholder: I find it difficult when... / Currently UltraDesk does not support...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or behavior you would like to see
+      placeholder: I would like UltraDesk to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you tried any workarounds or alternative solutions?
+      placeholder: I tried using... but it did not work well because...
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Describe the concrete scenario where this feature helps
+      placeholder: |
+        For example:
+        - When providing remote technical support to a macOS or Linux user...
+        - When managing an unattended home workstation across multiple monitors...
+        - When transferring files during a remote session...
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Reference links, mockups, or screenshots of similar features
+      placeholder: Add any links or screenshots here
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        *Note: Not every feature request can be implemented immediately. Requests are prioritized based on user impact, security, and cross-platform maintainability.*

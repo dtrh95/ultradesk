@@ -1,0 +1,115 @@
+name: Bug Report
+description: Report a bug to help us improve UltraDesk
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a bug! Please fill out the information below so we can reproduce and fix it quickly.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: A clear and concise description of the issue you encountered
+      placeholder: When connecting to a remote host / sharing my screen...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps to trigger the issue
+      placeholder: |
+        1. Open UltraDesk...
+        2. Enter Partner ID or start Host mode...
+        3. Click...
+        4. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+      placeholder: The remote screen should render smoothly and accept mouse/keyboard input...
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened instead?
+      placeholder: The window showed an error message / input events were not delivered...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: UltraDesk version
+      description: Which version of UltraDesk are you running?
+      placeholder: 'e.g. 1.0.1'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      description: How did you install UltraDesk?
+      options:
+        - GitHub Releases (.deb / .rpm / .dmg / .tar.zst)
+        - Cloudflare Pages APT/DNF/Zypper Repository
+        - macOS (.dmg installer or .app.tar.gz)
+        - Arch Linux (makepkg / PKGBUILD)
+        - NixOS / Nix Flakes
+        - Built from source
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os_distro
+    attributes:
+      label: Operating System / Distribution
+      description: Which operating system and version are you using?
+      placeholder: 'e.g. macOS 15.3 (Apple Silicon), Ubuntu 24.04, Arch Linux, Fedora 43...'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: desktop_env
+    attributes:
+      label: Desktop Environment / Display Server
+      description: Which display server or desktop environment are you using?
+      options:
+        - macOS (Aqua / Cocoa)
+        - KDE Plasma (Wayland / X11)
+        - GNOME (Wayland / X11)
+        - Hyprland
+        - Niri
+        - Sway
+        - i3 / X11 Window Manager
+        - XFCE
+        - Other (specify below)
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal or system logs
+      description: |
+        Run `ultradesk-rust` from a terminal and paste any relevant log output here.
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, network setup, multi-monitor layout, or any other helpful details
+      placeholder: Attach screenshots or extra notes here
