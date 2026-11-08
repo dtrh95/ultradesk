@@ -78,4 +78,8 @@ install:
 	fi
 
 clean:
-	cargo clean
+	@if command -v cargo >/dev/null 2>&1; then \
+		cargo clean; \
+	else \
+		rm -rf target; \
+	fi

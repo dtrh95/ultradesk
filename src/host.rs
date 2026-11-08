@@ -1489,7 +1489,7 @@ pub struct X11Capturer {
 
 impl X11Capturer {
     pub fn connect() -> Result<Self, String> {
-        if !std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) {
+        if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
             return Err("DISPLAY not set".to_string());
         }
         let (conn, screen_num) =
@@ -1711,7 +1711,7 @@ pub struct X11Injector {
 
 impl X11Injector {
     pub fn connect() -> Result<Self, String> {
-        if !std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) {
+        if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
             return Err("DISPLAY not set".to_string());
         }
         let (conn, screen_num) =
@@ -2288,8 +2288,8 @@ struct UinputAbsSetup {
 
 #[repr(C)]
 struct RawLinuxInputEvent {
-    tv_sec: libc::time_t,
-    tv_usec: libc::suseconds_t,
+    tv_sec: libc::c_long,
+    tv_usec: libc::c_long,
     type_: u16,
     code: u16,
     value: i32,

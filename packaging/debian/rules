@@ -12,6 +12,9 @@ ensure_rust_toolchain = \
 %:
 	dh $@
 
+override_dh_auto_clean:
+	rm -rf target
+
 override_dh_auto_build:
 	$(ensure_rust_toolchain)
 	$(MAKE) build

@@ -115,5 +115,9 @@ rg -q 'ca-certificates' packaging/debian/control
 rg -q 'curl' packaging/debian/control
 ! rg -q '^\s*(cargo|rustc),' packaging/debian/control
 rg -q 'sh\.rustup\.rs' packaging/debian/rules
+rg -q 'override_dh_auto_clean' packaging/debian/rules
+rg -q 'command -v cargo' Makefile
+! rg -q 'libc::(time_t|suseconds_t)' src/
+! rg -q '!.*\.is_some_and\(' src/
 
 echo "VERIFIED: All unit tests, benchmarks, and live HTTP portal checks passed."
