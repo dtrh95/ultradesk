@@ -1,4 +1,4 @@
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use aes::Aes256;
 use sha2::{Digest, Sha256};
 use std::fmt;
