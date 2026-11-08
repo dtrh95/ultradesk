@@ -60,6 +60,8 @@ jobs:
 
       - name: Create APT Repo
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y reprepro gnupg2
@@ -68,7 +70,7 @@ jobs:
           chmod 700 ~/.gnupg
           echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
           echo "pinentry-mode loopback"  > ~/.gnupg/gpg.conf
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
 
           FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep '^fpr' | head -1 | cut -d: -f10)
           echo "${FINGERPRINT}:6:" | gpg --import-ownertrust
@@ -166,12 +168,14 @@ jobs:
 
       - name: Sign RPM packages and Create Repo
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y createrepo-c gnupg2 rpm
 
           sudo chmod -R 777 output/
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
 
           mkdir -p ~/.gnupg
           chmod 700 ~/.gnupg
@@ -283,12 +287,14 @@ jobs:
 
       - name: Sign RPM packages and Create Repo
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y createrepo-c gnupg2 rpm
 
           sudo chmod -R 777 output/
-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          echo "${GPG_PRIVATE_KEY}" | gpg --batch --import
 
           mkdir -p ~/.gnupg
           chmod 700 ~/.gnupg
@@ -375,8 +381,10 @@ jobs:
               -exec strip --strip-all {} + 2>/dev/null || true
 
       - name: Package as tar.zst
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${REF_NAME}"
           VERSION="${VERSION//\//-}"
           tar -c -I 'zstd -19 -T0' -f "ultradesk-rust-${VERSION}-x86_64-archlinux.tar.zst" -C arch-dist .
 

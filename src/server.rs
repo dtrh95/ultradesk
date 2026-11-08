@@ -180,11 +180,16 @@ struct PreferencesRequest {
     toolbar_collapsed: Option<bool>,
 }
 
+pub const MAX_HTTP_LINE_BYTES: usize = 8 * 1024;
+pub const MAX_HTTP_HEADERS: usize = 64;
+pub const MAX_HTTP_HEADER_BLOCK_BYTES: usize = 16 * 1024;
+
 pub struct PortalServer {
     pub bind_addr: String,
     pub port: u16,
     pub session: ControlSession,
     pub shutdown: Arc<AtomicBool>,
+    pub viewer_token: String,
     viewer_path: Option<PathBuf>,
 }
 
@@ -202,12 +207,14 @@ impl PortalServer {
             .map(|a| a.to_string())
             .unwrap_or_else(|_| format!("{}:{}", host, port));
         let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+        let viewer_token = crate::profile::generate_ephemeral_device_id().to_ascii_lowercase();
         Ok((
             Self {
                 bind_addr: local_addr,
                 port: bound_port,
                 session,
                 shutdown: Arc::new(AtomicBool::new(false)),
+                viewer_token,
                 viewer_path,
             },
             listener,
@@ -223,8 +230,16 @@ impl PortalServer {
                         let _ = stream.set_nodelay(true);
                         let session = self.session.clone();
                         let viewer_path = self.viewer_path.clone();
+                        let viewer_token = self.viewer_token.clone();
+                        let bind_addr = self.bind_addr.clone();
                         thread::spawn(move || {
-                            let _ = handle_http_client(stream, session, viewer_path);
+                            let _ = handle_http_client(
+                                stream,
+                                session,
+                                viewer_path,
+                                &viewer_token,
+                                &bind_addr,
+                            );
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -264,7 +279,12 @@ fn write_http_response(
         204 => "No Content",
         304 => "Not Modified",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         _ => "OK",
     };
@@ -305,10 +325,67 @@ fn write_json_response(
     )
 }
 
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    max_len: usize,
+) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let n = reader
+        .take((max_len + 1) as u64)
+        .read_until(b'\n', &mut buf)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.len() > max_len && !buf.ends_with(b"\n") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "HTTP line exceeds limit",
+        ));
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
+fn is_allowed_origin(origin: &str, bind_addr: &str) -> bool {
+    let trimmed = origin.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let rest = match trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+    {
+        Some(r) => r,
+        None => return false,
+    };
+    let host_port = rest.split('/').next().unwrap_or("");
+    if host_port.eq_ignore_ascii_case(bind_addr) {
+        return true;
+    }
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost") || host == "::1"
+}
+
+fn extract_cookie_token(cookie_header: &str) -> Option<&str> {
+    for part in cookie_header.split(';') {
+        if let Some((k, v)) = part.trim().split_once('=') {
+            if k.trim() == "ultradesk_token" {
+                return Some(v.trim());
+            }
+        }
+    }
+    None
+}
+
 fn handle_http_client(
     mut stream: TcpStream,
     session: ControlSession,
     viewer_path: Option<PathBuf>,
+    viewer_token: &str,
+    bind_addr: &str,
 ) -> std::io::Result<()> {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -316,14 +393,19 @@ fn handle_http_client(
 
     let mut reader = BufReader::new(stream.try_clone()?);
     loop {
-        let mut request_line = String::new();
-        let bytes_read = match reader.read_line(&mut request_line) {
-            Ok(n) => n,
-            Err(_) => break,
+        let request_line = match read_bounded_line(&mut reader, MAX_HTTP_LINE_BYTES) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(_) => {
+                let _ = write_json_response(
+                    &mut stream,
+                    431,
+                    &json!({ "ok": false, "error": "Request line too large" }),
+                    false,
+                );
+                break;
+            }
         };
-        if bytes_read == 0 {
-            break;
-        }
         let parts: Vec<&str> = request_line.split_whitespace().collect();
         if parts.len() < 2 {
             break;
@@ -343,32 +425,69 @@ fn handle_http_client(
 
         let mut content_length = 0usize;
         let mut connection_header: Option<String> = None;
+        let mut content_type: Option<String> = None;
+        let mut origin_header: Option<String> = None;
+        let mut sec_fetch_site: Option<String> = None;
+        let mut x_viewer_token: Option<String> = None;
+        let mut cookie_token: Option<String> = None;
         let mut header_read_err = false;
+        let mut header_too_large = false;
+        let mut header_count = 0usize;
+        let mut total_header_bytes = request_line.len();
         loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
+            match read_bounded_line(&mut reader, MAX_HTTP_LINE_BYTES) {
+                Ok(None) => {
                     header_read_err = true;
                     break;
                 }
-                Ok(_) => {
+                Ok(Some(line)) => {
                     if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    header_count += 1;
+                    total_header_bytes = total_header_bytes.saturating_add(line.len());
+                    if header_count > MAX_HTTP_HEADERS
+                        || total_header_bytes > MAX_HTTP_HEADER_BLOCK_BYTES
+                    {
+                        header_too_large = true;
                         break;
                     }
                     if let Some((name, val)) = line.split_once(':') {
                         let name_trim = name.trim();
+                        let val_trim = val.trim();
                         if name_trim.eq_ignore_ascii_case("content-length") {
-                            content_length = val.trim().parse::<usize>().unwrap_or(0);
+                            content_length = val_trim.parse::<usize>().unwrap_or(0);
                         } else if name_trim.eq_ignore_ascii_case("connection") {
-                            connection_header = Some(val.trim().to_lowercase());
+                            connection_header = Some(val_trim.to_lowercase());
+                        } else if name_trim.eq_ignore_ascii_case("content-type") {
+                            content_type = Some(val_trim.to_lowercase());
+                        } else if name_trim.eq_ignore_ascii_case("origin") {
+                            origin_header = Some(val_trim.to_string());
+                        } else if name_trim.eq_ignore_ascii_case("sec-fetch-site") {
+                            sec_fetch_site = Some(val_trim.to_lowercase());
+                        } else if name_trim.eq_ignore_ascii_case("x-viewer-token") {
+                            x_viewer_token = Some(val_trim.to_string());
+                        } else if name_trim.eq_ignore_ascii_case("cookie") {
+                            if let Some(tok) = extract_cookie_token(val_trim) {
+                                cookie_token = Some(tok.to_string());
+                            }
                         }
                     }
                 }
                 Err(_) => {
-                    header_read_err = true;
+                    header_too_large = true;
                     break;
                 }
             }
+        }
+        if header_too_large {
+            let _ = write_json_response(
+                &mut stream,
+                431,
+                &json!({ "ok": false, "error": "Request header fields too large" }),
+                false,
+            );
+            break;
         }
         if header_read_err {
             break;
@@ -381,22 +500,104 @@ fn handle_http_client(
             _ => !is_http_10,
         };
 
-        let mut body = vec![0u8; content_length.min(32 * 1024 * 1024)];
+        if content_length > 32 * 1024 * 1024 {
+            let _ = write_json_response(
+                &mut stream,
+                413,
+                &json!({ "ok": false, "error": "Payload too large" }),
+                false,
+            );
+            break;
+        }
+        let mut body = vec![0u8; content_length];
         if !body.is_empty() && reader.read_exact(&mut body).is_err() {
             break;
         }
 
+        let is_public_asset = matches!(
+            (method, path),
+            (
+                "GET",
+                "/" | "/index.html"
+                    | "/viewer.html"
+                    | "/favicon.ico"
+                    | "/ultradesk-rust.png"
+                    | "/ultraviewer-linux.png"
+            )
+        );
+        if let Some(ref sfs) = sec_fetch_site {
+            if !is_public_asset && sfs != "same-origin" && sfs != "none" {
+                let _ = write_json_response(
+                    &mut stream,
+                    403,
+                    &json!({ "ok": false, "error": "Cross-site request blocked" }),
+                    false,
+                );
+                break;
+            }
+        }
+        if let Some(ref orig) = origin_header {
+            if !is_allowed_origin(orig, bind_addr) {
+                let _ = write_json_response(
+                    &mut stream,
+                    403,
+                    &json!({ "ok": false, "error": "Origin not allowed" }),
+                    false,
+                );
+                break;
+            }
+        }
+        if !is_public_asset {
+            let token_ok = x_viewer_token
+                .as_deref()
+                .is_some_and(|t| crate::host::ct_eq(t, viewer_token))
+                || cookie_token
+                    .as_deref()
+                    .is_some_and(|t| crate::host::ct_eq(t, viewer_token));
+            if !token_ok {
+                let _ = write_json_response(
+                    &mut stream,
+                    401,
+                    &json!({ "ok": false, "error": "Unauthorized viewer token" }),
+                    false,
+                );
+                break;
+            }
+        }
+        if method == "POST" {
+            let is_json = content_type
+                .as_deref()
+                .is_some_and(|ct| ct.starts_with("application/json"));
+            if !is_json {
+                let _ = write_json_response(
+                    &mut stream,
+                    415,
+                    &json!({ "ok": false, "error": "Content-Type must be application/json" }),
+                    keep_alive,
+                );
+                if !keep_alive {
+                    break;
+                }
+                continue;
+            }
+        }
+
         let res = match (method, path) {
             ("GET", "/" | "/index.html" | "/viewer.html") => {
-                let html = viewer_path
+                let raw_html = viewer_path
                     .as_ref()
-                    .and_then(|p| fs::read(p).ok())
-                    .unwrap_or_else(|| DEFAULT_VIEWER_HTML.as_bytes().to_vec());
+                    .and_then(|p| fs::read_to_string(p).ok())
+                    .unwrap_or_else(|| DEFAULT_VIEWER_HTML.to_string());
+                let html = raw_html.replace("__TOKEN__", viewer_token).into_bytes();
+                let cookie_hdr = format!(
+                    "ultradesk_token={}; HttpOnly; SameSite=Strict; Path=/",
+                    viewer_token
+                );
                 write_http_response(
                     &mut stream,
                     200,
                     "text/html; charset=utf-8",
-                    &[],
+                    &[("Set-Cookie", &cookie_hdr)],
                     &html,
                     keep_alive,
                 )
@@ -784,7 +985,10 @@ fn handle_http_client(
             ("POST", "/files/send") => {
                 let req: FileSendRequest = serde_json::from_slice(&body).unwrap_or_default();
                 let result = if !req.file_path.trim().is_empty() {
-                    session.offer_file_from_path(Path::new(req.file_path.trim()))
+                    Err(
+                        "Direct filesystem paths are not allowed over HTTP; use data_base64"
+                            .to_string(),
+                    )
                 } else {
                     match decode_base64(&req.data_base64) {
                         Ok(bytes) => {

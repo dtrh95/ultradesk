@@ -42,17 +42,27 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Prepare debian directory
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          MATRIX_CODENAME: ${{ matrix.codename }}
         run: |
           cp -r packaging/debian debian
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            VER="${{ github.event.inputs.version }}"
-          elif [ -n "${{ github.event.release.tag_name }}" ]; then
-            VER="${{ github.event.release.tag_name }}"
+          if [ -n "${INPUT_VERSION}" ]; then
+            VER="${INPUT_VERSION}"
+          elif [ -n "${RELEASE_TAG}" ]; then
+            VER="${RELEASE_TAG}"
             VER="${VER#v}"
           else
             VER=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           fi
-          sed -i "1s|(0\.2\.0-1)|(${VER}-1~${{ matrix.codename }}1)|" debian/changelog
+          case "${VER}" in
+            *[!0-9A-Za-z._+-]*|"")
+              echo "Invalid version string: ${VER}" >&2
+              exit 1
+              ;;
+          esac
+          sed -i "1s|(0\.2\.0-1)|(${VER}-1~${MATRIX_CODENAME}1)|" debian/changelog
 
       - name: Build Debian DEB package
         uses: jtdor/build-deb-action@v1

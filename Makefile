@@ -16,7 +16,7 @@ build:
 	@if [ ! -f viewer.html ] && command -v npm >/dev/null 2>&1; then \
 		$(MAKE) build-web; \
 	fi
-	cargo build --release --locked || cargo build --release
+	cargo build --release --locked
 
 check:
 	cargo test --release

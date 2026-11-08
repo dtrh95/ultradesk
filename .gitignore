@@ -4,3 +4,11 @@
 /web/node_modules/
 /web/dist/
 /web/.angular/
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+*-private.json
+decisions.tsv
+.audit/

@@ -186,6 +186,9 @@ pub fn compute_master_password_proof(password: &str) -> String {
 }
 
 pub fn verify_master_password_proof(candidate_hash: &str, stored_proof: &str) -> bool {
+    if stored_proof.len() != 32 || !stored_proof.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
     candidate_hash.eq_ignore_ascii_case(stored_proof)
         || compute_master_password_proof(candidate_hash).eq_ignore_ascii_case(stored_proof)
 }
@@ -428,25 +431,81 @@ fn load_or_generate_stored(path: &Path) -> Result<StoredProfile, String> {
     })
 }
 
-fn make_private_dir(dir: &Path) -> Result<(), String> {
+pub fn make_private_dir(dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(format!(
+                "Refusing non-directory or symlink config path {}",
+                dir.display()
+            ));
+        }
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err(format!(
+                "Refusing config directory {} owned by uid {} (expected {})",
+                dir.display(),
+                meta.uid(),
+                euid
+            ));
+        }
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-fn write_private(path: &Path, content: &str) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content).map_err(|e| e.to_string())?;
+pub fn write_private_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        make_private_dir(parent)?;
+    }
+    let nonce = crate::protocol::md5_hex_lower(&random_bytes(8));
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), &nonce[..8]));
+    let _ = fs::remove_file(&tmp);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        f.write_all(content).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
     }
-    fs::rename(&tmp, path).map_err(|e| e.to_string())
+    #[cfg(not(unix))]
+    {
+        fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
+fn write_private(path: &Path, content: &str) -> Result<(), String> {
+    write_private_bytes(path, content.as_bytes())
+}
+
+pub fn fallback_private_config_dir() -> PathBuf {
+    #[cfg(unix)]
+    let uid = unsafe { libc::geteuid() };
+    #[cfg(not(unix))]
+    let uid = std::process::id();
+    std::env::temp_dir().join(format!("ultradesk-rust-{}", uid))
+}
+
+pub fn generate_ephemeral_device_id() -> String {
+    generate_device_id()
+}
+
+pub fn generate_ephemeral_temp_password() -> String {
+    random_digit_string(8)
 }
 
 fn random_bytes(n: usize) -> Vec<u8> {

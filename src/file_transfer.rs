@@ -15,6 +15,8 @@ pub const PACKET_FILE_CANCEL: u8 = 16;
 pub const PACKET_FILE_ACK: u8 = 21;
 
 pub const DEFAULT_FILE_CHUNK_SIZE: usize = 16_384;
+pub const MAX_FILE_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_ACTIVE_TRANSFERS: usize = 64;
 
 pub fn is_utf16_string_packet(payload: &[u8]) -> bool {
     if payload.len() < 6 || !payload.len().is_multiple_of(2) {
@@ -450,6 +452,41 @@ pub fn sanitize_file_name(name: &str) -> String {
     }
 }
 
+fn write_unique_download(dir: &Path, clean_name: &str, data: &[u8]) -> Option<PathBuf> {
+    use std::io::Write;
+    let stem = Path::new(clean_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("file");
+    let ext = Path::new(clean_name).extension().and_then(|s| s.to_str());
+    for attempt in 0..256u32 {
+        let candidate_name = if attempt == 0 {
+            clean_name.to_string()
+        } else if let Some(e) = ext {
+            format!("{} ({}).{}", stem, attempt, e)
+        } else {
+            format!("{} ({})", stem, attempt)
+        };
+        let target = dir.join(candidate_name);
+        if fs::symlink_metadata(&target).is_ok() {
+            continue;
+        }
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            if f.write_all(data).is_ok() {
+                return Some(target);
+            }
+            let _ = fs::remove_file(&target);
+            return None;
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct FileTransferManager {
     pub transfers: BTreeMap<String, FileTransferEntry>,
@@ -476,7 +513,7 @@ impl FileTransferManager {
             transfers: BTreeMap::new(),
             chat_messages: Vec::new(),
             download_dir,
-            auto_accept: true,
+            auto_accept: false,
             chunk_size: DEFAULT_FILE_CHUNK_SIZE,
             modern_protocol: true,
             next_id: 1,
@@ -488,6 +525,9 @@ impl FileTransferManager {
         file_name: &str,
         data: Vec<u8>,
     ) -> Result<(String, Vec<u8>), String> {
+        if (data.len() as u64) > MAX_FILE_TRANSFER_BYTES {
+            return Err("File size exceeds maximum transfer limit".to_string());
+        }
         let file_id = format!("uvf_{}", self.next_id);
         self.next_id += 1;
         let clean_name = sanitize_file_name(file_name);
@@ -511,6 +551,14 @@ impl FileTransferManager {
     }
 
     pub fn offer_file_from_path(&mut self, path: &Path) -> Result<(String, Vec<u8>), String> {
+        let sym_meta = fs::symlink_metadata(path)
+            .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+        if sym_meta.file_type().is_symlink() || !sym_meta.is_file() {
+            return Err("Refusing to offer symlink or non-regular file".to_string());
+        }
+        if sym_meta.len() > MAX_FILE_TRANSFER_BYTES {
+            return Err("File size exceeds maximum transfer limit".to_string());
+        }
         let data =
             fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
         let name = path
@@ -636,6 +684,14 @@ impl FileTransferManager {
                 file_name,
                 file_size,
             } => {
+                if *file_size > MAX_FILE_TRANSFER_BYTES {
+                    return Err("Offered file size exceeds limit".to_string());
+                }
+                if self.transfers.len() >= MAX_ACTIVE_TRANSFERS
+                    && !self.transfers.contains_key(file_id)
+                {
+                    return Err("Too many active file transfers".to_string());
+                }
                 let clean_name = sanitize_file_name(file_name);
                 let mut status = TransferStatus::Offered;
                 if self.auto_accept {
@@ -653,7 +709,9 @@ impl FileTransferManager {
                         status,
                         saved_path: None,
                         remote_target_id: None,
-                        buffer: Vec::with_capacity((*file_size as usize).min(16 * 1024 * 1024)),
+                        buffer: Vec::with_capacity(
+                            (*file_size as usize).min(DEFAULT_FILE_CHUNK_SIZE),
+                        ),
                     },
                 );
             }
@@ -692,12 +750,21 @@ impl FileTransferManager {
             } => {
                 if let Some(key) = self.resolve_transfer_key(file_id) {
                     if let Some(entry) = self.transfers.get_mut(&key) {
-                        let off = *offset as usize;
-                        let needed = off + data.len();
-                        if entry.buffer.len() < needed {
-                            entry.buffer.resize(needed, 0);
+                        if entry.direction != TransferDirection::Receive
+                            || entry.status != TransferStatus::Transferring
+                        {
+                            return Err("Unexpected file chunk for unaccepted transfer".to_string());
                         }
-                        entry.buffer[off..needed].copy_from_slice(data);
+                        if *offset != entry.buffer.len() as u64 {
+                            return Err("Out-of-order file chunk offset".to_string());
+                        }
+                        let needed_u64 = offset
+                            .checked_add(data.len() as u64)
+                            .ok_or_else(|| "File chunk offset overflow".to_string())?;
+                        if needed_u64 > entry.file_size || needed_u64 > MAX_FILE_TRANSFER_BYTES {
+                            return Err("File chunk exceeds declared file size".to_string());
+                        }
+                        entry.buffer.extend_from_slice(data);
                         entry.transferred_bytes = entry.buffer.len() as u64;
                         entry.status = TransferStatus::Transferring;
 
@@ -706,9 +773,12 @@ impl FileTransferManager {
                         if entry.transferred_bytes >= entry.file_size {
                             entry.status = TransferStatus::Completed;
                             let _ = fs::create_dir_all(&self.download_dir);
-                            let target = self.download_dir.join(&entry.file_name);
-                            if fs::write(&target, &entry.buffer).is_ok() {
-                                entry.saved_path = Some(target.to_string_lossy().to_string());
+                            if let Some(saved) = write_unique_download(
+                                &self.download_dir,
+                                &entry.file_name,
+                                &entry.buffer,
+                            ) {
+                                entry.saved_path = Some(saved.to_string_lossy().to_string());
                             }
                         }
                     }

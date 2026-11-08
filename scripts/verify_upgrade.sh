@@ -20,18 +20,20 @@ test -x "$BIN"
 TMP_HOME="$(mktemp -d)"
 trap 'kill $SERVER_PID 2>/dev/null || true; rm -rf "$TMP_HOME"' EXIT
 
-XDG_CONFIG_HOME="$TMP_HOME" "$BIN" --no-gui --port "$PORT" >/tmp/uv_verify_server.log 2>&1 &
+COOKIE_JAR="$TMP_HOME/cookies.txt"
+XDG_CONFIG_HOME="$TMP_HOME" "$BIN" --no-gui --port "$PORT" >"$TMP_HOME/uv_verify_server.log" 2>&1 &
 SERVER_PID=$!
 
 for _ in $(seq 1 30); do
-  if curl -fsS "http://127.0.0.1:${PORT}/status" >/dev/null 2>&1; then
+  if curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" "http://127.0.0.1:${PORT}/" >/dev/null 2>&1 \
+    && curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:${PORT}/status" >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
 done
 
 echo "=== [4/4] Verifying live HTTP Portal & Host/Client endpoints ==="
-VIEWER_HTML="$(curl -fsS "http://127.0.0.1:${PORT}/")"
+VIEWER_HTML="$(curl -fsS -c "$COOKIE_JAR" -b "$COOKIE_JAR" "http://127.0.0.1:${PORT}/")"
 rg -q '<html lang="en">' <<< "$VIEWER_HTML"
 rg -q 'id="connectModal"' <<< "$VIEWER_HTML"
 rg -q 'id="toolsPopover"' <<< "$VIEWER_HTML"
@@ -58,47 +60,47 @@ rg -q '\.m-tab-ind' <<< "$VIEWER_HTML"
 ! rg -q "'Inter'" <<< "$VIEWER_HTML"
 ! rg -q '\(\|\|\|31\|\|\|\)' <<< "$VIEWER_HTML"
 
-STATUS_JSON="$(curl -fsS "http://127.0.0.1:${PORT}/status")"
+STATUS_JSON="$(curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:${PORT}/status")"
 rg -q '"host_status"' <<< "$STATUS_JSON"
 rg -q '"frame_version"' <<< "$STATUS_JSON"
 
-HOST_STATUS="$(curl -fsS "http://127.0.0.1:${PORT}/host/status")"
+HOST_STATUS="$(curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:${PORT}/host/status")"
 rg -q '"host_id"' <<< "$HOST_STATUS"
 rg -q '"hardware_mac"' <<< "$HOST_STATUS"
 
-MP_RESP="$(curl -fsS -X POST "http://127.0.0.1:${PORT}/host/master-password" \
+MP_RESP="$(curl -fsS -b "$COOKIE_JAR" -X POST "http://127.0.0.1:${PORT}/host/master-password" \
   -H "Content-Type: application/json" \
   -d '{"password":"StrongMasterPass123"}')"
 rg -q '"has_master_password":true' <<< "$MP_RESP"
 
-MON_RESP="$(curl -fsS -X POST "http://127.0.0.1:${PORT}/monitor" \
+MON_RESP="$(curl -fsS -b "$COOKIE_JAR" -X POST "http://127.0.0.1:${PORT}/monitor" \
   -H "Content-Type: application/json" \
   -d '{"monitor":0}')"
 rg -q '"ok":true' <<< "$MON_RESP"
 
-PREF_RESP="$(curl -fsS -X POST "http://127.0.0.1:${PORT}/preferences" \
+PREF_RESP="$(curl -fsS -b "$COOKIE_JAR" -X POST "http://127.0.0.1:${PORT}/preferences" \
   -H "Content-Type: application/json" \
   -d '{"theme":"onedark","language":"en"}')"
 rg -q '"ok":true' <<< "$PREF_RESP"
 
-STATUS_AFTER_PREF="$(curl -fsS "http://127.0.0.1:${PORT}/status")"
+STATUS_AFTER_PREF="$(curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:${PORT}/status")"
 rg -q '"saved_theme":"onedark"' <<< "$STATUS_AFTER_PREF"
 rg -q '"saved_language":"en"' <<< "$STATUS_AFTER_PREF"
 
 test -f "$TMP_HOME/ultradesk-rust/credentials.json"
 rg -q '"theme": "onedark"' "$TMP_HOME/ultradesk-rust/credentials.json"
 
-HTTP_CODE_JPG="$(curl -s -o /tmp/uv_frame.jpg -w "%{http_code}" "http://127.0.0.1:${PORT}/frame.jpg?q=80")"
+HTTP_CODE_JPG="$(curl -s -b "$COOKIE_JAR" -o "$TMP_HOME/uv_frame.jpg" -w "%{http_code}" "http://127.0.0.1:${PORT}/frame.jpg?q=80")"
 test "$HTTP_CODE_JPG" = "200"
-test -s /tmp/uv_frame.jpg
+test -s "$TMP_HOME/uv_frame.jpg"
 
-HTTP_CODE_BMP="$(curl -s -o /tmp/uv_frame.bmp -w "%{http_code}" "http://127.0.0.1:${PORT}/frame.bmp")"
+HTTP_CODE_BMP="$(curl -s -b "$COOKIE_JAR" -o "$TMP_HOME/uv_frame.bmp" -w "%{http_code}" "http://127.0.0.1:${PORT}/frame.bmp")"
 test "$HTTP_CODE_BMP" = "200"
-test -s /tmp/uv_frame.bmp
+test -s "$TMP_HOME/uv_frame.bmp"
 
-FRAME_VER="$(curl -fsS "http://127.0.0.1:${PORT}/status" | sed -n 's/.*"frame_version":\([0-9]*\).*/\1/p')"
+FRAME_VER="$(curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:${PORT}/status" | sed -n 's/.*"frame_version":\([0-9]*\).*/\1/p')"
 if [ -n "$FRAME_VER" ]; then
-  HTTP_CODE_304="$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/frame.jpg?v=${FRAME_VER}&q=80")"
+  HTTP_CODE_304="$(curl -s -b "$COOKIE_JAR" -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/frame.jpg?v=${FRAME_VER}&q=80")"
   test "$HTTP_CODE_304" = "304"
 fi
 

@@ -238,6 +238,15 @@ pub fn derive_dual_keys(base: &[u8]) -> ([u8; 32], [u8; 32]) {
     (h2v, v2h)
 }
 
+pub fn derive_e2e_temp_secret(nonce: &str, password: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ultradesk-e2e-temp-secret-v1:");
+    hasher.update(nonce.as_bytes());
+    hasher.update(b":");
+    hasher.update(password.as_bytes());
+    hex_encode(&hasher.finalize())
+}
+
 pub fn create_viewer_offer(
     nonce: &str,
     password_proof: &str,
@@ -247,6 +256,15 @@ pub fn create_viewer_offer(
     create_viewer_offer_with_secret(secret_scalar, nonce, password_proof, custom_password_proof)
 }
 
+pub fn create_viewer_offer_for_password(
+    nonce: &str,
+    password: &str,
+    custom_password_proof: &str,
+) -> (String, E2eNegotiationState) {
+    let derived = derive_e2e_temp_secret(nonce, password);
+    create_viewer_offer(nonce, &derived, custom_password_proof)
+}
+
 pub fn create_viewer_offer_with_secret(
     secret_scalar: [u8; 32],
     nonce: &str,
@@ -254,7 +272,11 @@ pub fn create_viewer_offer_with_secret(
     custom_password_proof: &str,
 ) -> (String, E2eNegotiationState) {
     let public_key = x25519_basepoint(&secret_scalar);
-    let wire = format!("{}{}", E2E_HANDSHAKE_PREFIX, hex_encode(&public_key));
+    let wire = if password_proof.len() == 64 {
+        format!("{}{}|s2", E2E_HANDSHAKE_PREFIX, hex_encode(&public_key))
+    } else {
+        format!("{}{}", E2E_HANDSHAKE_PREFIX, hex_encode(&public_key))
+    };
     let state = E2eNegotiationState::Offered {
         offer: E2eOfferPayload::ViewerPending {
             secret_scalar,
@@ -265,6 +287,10 @@ pub fn create_viewer_offer_with_secret(
         },
     };
     (wire, state)
+}
+
+pub fn offer_uses_derived_temp_secret(offer_field: &str) -> bool {
+    offer_field.trim().ends_with("|s2")
 }
 
 pub fn extract_viewer_offer_public_key(offer_field: &str) -> Option<[u8; 32]> {
@@ -316,6 +342,17 @@ pub fn finalize_viewer_handshake(
     state: &E2eNegotiationState,
     field3: &[u8],
 ) -> Result<E2eNegotiationState, String> {
+    let require_e2e = std::env::var("ULTRADESK_REQUIRE_E2E")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    finalize_viewer_handshake_with_policy(state, field3, require_e2e)
+}
+
+pub fn finalize_viewer_handshake_with_policy(
+    state: &E2eNegotiationState,
+    field3: &[u8],
+    require_e2e: bool,
+) -> Result<E2eNegotiationState, String> {
     let E2eNegotiationState::Offered {
         offer:
             E2eOfferPayload::ViewerPending {
@@ -332,6 +369,9 @@ pub fn finalize_viewer_handshake(
 
     let trimmed = field3.trim_ascii();
     if trimmed.is_empty() || !trimmed.starts_with(E2E_HANDSHAKE_PREFIX.as_bytes()) {
+        if require_e2e {
+            return Err("Host did not provide required E2E handshake answer".to_string());
+        }
         return Ok(E2eNegotiationState::Disabled);
     }
 

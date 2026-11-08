@@ -43,18 +43,28 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Prepare debian directory for Ubuntu ${{ matrix.codename }}
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          MATRIX_CODENAME: ${{ matrix.codename }}
         run: |
           cp -r packaging/debian debian
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            VER="${{ github.event.inputs.version }}"
-          elif [ -n "${{ github.event.release.tag_name }}" ]; then
-            VER="${{ github.event.release.tag_name }}"
+          if [ -n "${INPUT_VERSION}" ]; then
+            VER="${INPUT_VERSION}"
+          elif [ -n "${RELEASE_TAG}" ]; then
+            VER="${RELEASE_TAG}"
             VER="${VER#v}"
           else
             VER=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           fi
-          sed -i "1s|(0\.2\.0-1)|(${VER}-1~ubuntu-${{ matrix.codename }}1)|" debian/changelog
-          sed -i "1s|unstable|${{ matrix.codename }}|" debian/changelog
+          case "${VER}" in
+            *[!0-9A-Za-z._+-]*|"")
+              echo "Invalid version string: ${VER}" >&2
+              exit 1
+              ;;
+          esac
+          sed -i "1s|(0\.2\.0-1)|(${VER}-1~ubuntu-${MATRIX_CODENAME}1)|" debian/changelog
+          sed -i "1s|unstable|${MATRIX_CODENAME}|" debian/changelog
 
       - name: Build Ubuntu DEB package
         uses: jtdor/build-deb-action@v1
@@ -201,6 +211,8 @@ jobs:
           DEBFULLNAME: ${{ secrets.DEBFULLNAME || 'Hieu Doan' }}
           DEBEMAIL: ${{ secrets.DEBEMAIL || 'dtrunghieu96@gmail.com' }}
           SERIES: ${{ matrix.series }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           if [ -z "${LAUNCHPAD_PPA}" ] || [ -z "${LAUNCHPAD_GPG_PRIVATE_KEY}" ]; then
@@ -218,14 +230,20 @@ jobs:
           echo "${LAUNCHPAD_GPG_PRIVATE_KEY}" | gpg --batch --import
           KEYID=$(gpg --list-secret-keys --with-colons | grep '^sec' | head -1 | cut -d: -f5)
 
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            VER="${{ github.event.inputs.version }}"
-          elif [ -n "${{ github.event.release.tag_name }}" ]; then
-            VER="${{ github.event.release.tag_name }}"
+          if [ -n "${INPUT_VERSION}" ]; then
+            VER="${INPUT_VERSION}"
+          elif [ -n "${RELEASE_TAG}" ]; then
+            VER="${RELEASE_TAG}"
             VER="${VER#v}"
           else
             VER=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           fi
+          case "${VER}" in
+            *[!0-9A-Za-z._+-]*|"")
+              echo "Invalid version string: ${VER}" >&2
+              exit 1
+              ;;
+          esac
 
           tar --exclude='.git' --exclude='debian' --exclude='target' \
             -czf "../ultradesk-rust_${VER}.orig.tar.gz" .

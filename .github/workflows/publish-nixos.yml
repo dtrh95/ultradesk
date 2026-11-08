@@ -101,18 +101,29 @@ jobs:
 
       - name: Update Nix derivation version and hash
         id: nix-update
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+          if [ -n "${INPUT_VERSION}" ]; then
+            VERSION="${INPUT_VERSION}"
             VERSION="${VERSION#v}"
           else
-            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${RELEASE_TAG}"
             VERSION="${VERSION#v}"
           fi
+          case "${VERSION}" in
+            *[!0-9A-Za-z._+-]*|"")
+              echo "Invalid version string: ${VERSION}" >&2
+              exit 1
+              ;;
+          esac
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          OWNER="${{ github.repository_owner }}"
-          REPO="${{ github.event.repository.name }}"
+          OWNER="${REPO_OWNER}"
+          REPO="${REPO_NAME}"
           sed -i \
             -e "s|owner = \".*\";|owner = \"${OWNER}\";|" \
             -e "s|repo = \".*\";|repo = \"${REPO}\";|" \
@@ -156,9 +167,10 @@ jobs:
         env:
           NUR_REPO: ${{ secrets.NUR_REPO }}
           NUR_REPO_TOKEN: ${{ secrets.NUR_REPO_TOKEN }}
+          UPDATE_VERSION: ${{ steps.nix-update.outputs.version }}
         run: |
           curl -fsSL -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${NUR_REPO_TOKEN}" \
             "https://api.github.com/repos/${NUR_REPO}/dispatches" \
-            -d "{\"event_type\":\"update-ultradesk-rust\",\"client_payload\":{\"version\":\"${{ steps.nix-update.outputs.version }}\"}}"
+            -d "{\"event_type\":\"update-ultradesk-rust\",\"client_payload\":{\"version\":\"${UPDATE_VERSION}\"}}"

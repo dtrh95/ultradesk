@@ -125,7 +125,7 @@ fn decode_cursor_resource(file: &CursorFile) -> Result<RgbaCursor, String> {
 fn decode_dib_resource(file: &CursorFile) -> Result<RgbaCursor, String> {
     let (width, height) = (file.width, file.height);
     let b = &file.resource;
-    if b.len() < 16 || !(long(b, 0) == 12 || long(b, 16) == 0) {
+    if b.len() < 12 {
         return Err("Invalid DIB header in cursor resource".to_string());
     }
     let header = long(b, 0) as usize;
@@ -133,8 +133,11 @@ fn decode_dib_resource(file: &CursorFile) -> Result<RgbaCursor, String> {
         return Err("Unsupported DIB header size".to_string());
     }
     let core = header == 12;
+    if !core && (b.len() < 40 || long(b, 16) != 0) {
+        return Err("Invalid DIB header in cursor resource".to_string());
+    }
     let bits = word(b, if core { 10 } else { 14 }) as usize;
-    if ![1, 4, 8, 16, 24, 32].contains(&bits) || (!core && b.len() < 40) {
+    if ![1, 4, 8, 16, 24, 32].contains(&bits) {
         return Err("Unsupported DIB bits per pixel".to_string());
     }
     let top_down = !core && (long(b, 8) as i32) < 0;

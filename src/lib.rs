@@ -1039,11 +1039,41 @@ mod tests {
         let _ = handle.join();
     }
 
-    fn http_get(addr: &str, path: &str) -> String {
+    fn fetch_test_portal_token(addr: &str) -> String {
         let mut s = TcpStream::connect(addr).unwrap();
         let req = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, addr
+            "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            addr
+        );
+        s.write_all(req.as_bytes()).unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        for line in text.lines() {
+            if let Some(rest) = line
+                .strip_prefix("Set-Cookie: ")
+                .or_else(|| line.strip_prefix("set-cookie: "))
+            {
+                for part in rest.split(';') {
+                    if let Some(tok) = part.trim().strip_prefix("ultradesk_token=") {
+                        return tok.to_string();
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
+    fn http_get(addr: &str, path: &str) -> String {
+        let token = if path == "/" {
+            String::new()
+        } else {
+            fetch_test_portal_token(addr)
+        };
+        let mut s = TcpStream::connect(addr).unwrap();
+        let req = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nX-Viewer-Token: {}\r\nConnection: close\r\n\r\n",
+            path, addr, token
         );
         s.write_all(req.as_bytes()).unwrap();
         let mut out = Vec::new();
@@ -1052,11 +1082,13 @@ mod tests {
     }
 
     fn http_post(addr: &str, path: &str, json_body: &str) -> String {
+        let token = fetch_test_portal_token(addr);
         let mut s = TcpStream::connect(addr).unwrap();
         let req = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "POST {} HTTP/1.1\r\nHost: {}\r\nX-Viewer-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             path,
             addr,
+            token,
             json_body.len(),
             json_body
         );
@@ -1337,7 +1369,7 @@ mod tests {
         assert_eq!(lookup_terms[6], "134462379");
         assert_eq!(
             lookup_terms[7],
-            crate::protocol::md5_hex_lower(b"13446237924055254")
+            crate::protocol::md5_hex_lower(b"13446237900000000")
         );
         assert_eq!(lookup_terms[12], "0");
         assert_eq!(lookup_terms[14], "1");

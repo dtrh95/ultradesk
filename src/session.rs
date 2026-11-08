@@ -347,8 +347,13 @@ impl RegistrationTransport {
 
         self.channel = if use_tls {
             let connector = build_tls_connector(self.original_certificate_policy)?;
+            let tls_domain = if allow_insecure_tls(self.original_certificate_policy) {
+                TLS_TARGET_HOST
+            } else {
+                host
+            };
             let tls = connector
-                .connect(TLS_TARGET_HOST, raw)
+                .connect(tls_domain, raw)
                 .map_err(|e| format!("TLS handshake failed: {}", e))?;
             Some(TransportChannel::Tls(tls))
         } else {
@@ -522,8 +527,15 @@ impl SessionTransport {
 
         self.inner.channel = if use_ssl {
             let connector = build_tls_connector(self.inner.original_certificate_policy)?;
+            let tls_domain = if allow_insecure_tls(self.inner.original_certificate_policy) {
+                TLS_TARGET_HOST
+            } else if !http_hostname.is_empty() {
+                http_hostname
+            } else {
+                host
+            };
             let tls = connector
-                .connect(TLS_TARGET_HOST, raw)
+                .connect(tls_domain, raw)
                 .map_err(|e| format!("session TLS handshake failed: {}", e))?;
             Some(TransportChannel::Tls(tls))
         } else {
@@ -621,9 +633,16 @@ fn resolve_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("no address resolved for {}", target))
 }
 
+fn allow_insecure_tls(original_certificate_policy: bool) -> bool {
+    original_certificate_policy
+        && std::env::var("ULTRADESK_INSECURE_TLS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
 fn build_tls_connector(original_certificate_policy: bool) -> Result<TlsConnector, String> {
     let mut builder = TlsConnector::builder();
-    if original_certificate_policy {
+    if allow_insecure_tls(original_certificate_policy) {
         builder.danger_accept_invalid_certs(true);
         builder.danger_accept_invalid_hostnames(true);
     }
@@ -691,18 +710,17 @@ impl Default for SavedCredentials {
 pub fn credentials_file_path() -> PathBuf {
     let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(x) => PathBuf::from(x),
-        None => match std::env::var_os("HOME") {
+        None => match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
             Some(h) => PathBuf::from(h).join(".config"),
-            None => return std::env::temp_dir().join("ultradesk-credentials.json"),
+            None => return crate::profile::fallback_private_config_dir().join("credentials.json"),
         },
     };
     let new_path = base.join("ultradesk-rust").join("credentials.json");
     let legacy_path = base.join("ultraviewer-linux").join("credentials.json");
     if !new_path.exists() && legacy_path.exists() {
-        if let Some(parent) = new_path.parent() {
-            let _ = fs::create_dir_all(parent);
+        if let Ok(bytes) = fs::read(&legacy_path) {
+            let _ = crate::profile::write_private_bytes(&new_path, &bytes);
         }
-        let _ = fs::copy(&legacy_path, &new_path);
     }
     new_path
 }
@@ -740,12 +758,10 @@ pub fn load_saved_credentials() -> SavedCredentials {
 
 pub fn save_credentials(creds: &SavedCredentials) -> Result<(), String> {
     let path = credentials_file_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
     let json = serde_json::to_vec_pretty(creds)
         .map_err(|e| format!("Failed to serialize credentials: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write credentials: {}", e))
+    crate::profile::write_private_bytes(&path, &json)
+        .map_err(|e| format!("Failed to write credentials: {}", e))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -934,37 +950,65 @@ impl ControlSession {
     }
 
     pub fn with_profiles(
-        registration_profile: RegistrationProfile,
+        mut registration_profile: RegistrationProfile,
         default_partner: PartnerProfile,
         dictionary: Vec<u8>,
     ) -> Self {
         let decoder = ZstdDictionaryDecoder::new(dictionary.clone(), 64 * 1024 * 1024);
         let screen = RGB555Screen::new((1024, 768), decoder, 1000, 32);
         let profile_manager = ProfileManager::from_xdg().unwrap_or_else(|_| {
-            ProfileManager::from_custom_dir(std::env::temp_dir().join("ultradesk-rust"))
+            ProfileManager::from_custom_dir(crate::profile::fallback_private_config_dir())
         });
-        let client_profile =
-            profile_manager
-                .load_or_create_client()
-                .unwrap_or_else(|_| ClientProfile {
-                    device_id: "0123456789ABCDEF0123456789ABCDEF".to_string(),
-                    temp_password: "12345678".to_string(),
-                    display_name: "UltraDesk".to_string(),
-                    synthetic_mac: "0223456789AB".to_string(),
-                    local_ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
-                    path: std::env::temp_dir().join("profile"),
-                });
-        let host_profile = profile_manager
-            .load_or_create_host()
-            .unwrap_or_else(|_| HostProfile {
-                device_id: "FEDCBA9876543210FEDCBA9876543210".to_string(),
-                temp_password: "87654321".to_string(),
+        let client_profile = profile_manager.load_or_create_client().unwrap_or_else(|_| {
+            let dev_id = crate::profile::generate_ephemeral_device_id();
+            let syn_mac = crate::profile::synthesize_client_mac(&dev_id);
+            ClientProfile {
+                device_id: dev_id,
+                temp_password: crate::profile::generate_ephemeral_temp_password(),
                 display_name: "UltraDesk".to_string(),
-                hardware_mac: "001122334455".to_string(),
+                synthetic_mac: syn_mac,
                 local_ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
-                master_password_proof: None,
-                path: std::env::temp_dir().join("host-profile"),
-            });
+                path: crate::profile::fallback_private_config_dir().join("profile"),
+            }
+        });
+        let host_profile = profile_manager.load_or_create_host().unwrap_or_else(|_| {
+            let dev_id = crate::profile::generate_ephemeral_device_id();
+            let hw_mac = crate::profile::synthesize_client_mac(&dev_id);
+            let mp_file = profile_manager
+                .config_dir()
+                .join(crate::profile::MASTER_PASSWORD_FILE);
+            let fallback_mp = match profile_manager.master_password_proof() {
+                Ok(proof) => proof,
+                Err(_) if mp_file.exists() => Some("!locked-invalid-master-password!".to_string()),
+                Err(_) => None,
+            };
+            HostProfile {
+                device_id: dev_id,
+                temp_password: crate::profile::generate_ephemeral_temp_password(),
+                display_name: "UltraDesk".to_string(),
+                hardware_mac: hw_mac,
+                local_ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
+                master_password_proof: fallback_mp,
+                path: crate::profile::fallback_private_config_dir().join("host-profile"),
+            }
+        });
+        if registration_profile.terms.len() > 8 {
+            if registration_profile.terms[1].is_empty()
+                || registration_profile.terms[1] == "00000000000000000000000000000000"
+            {
+                registration_profile.terms[1] = client_profile.device_id.clone();
+            }
+            if registration_profile.terms[2].is_empty()
+                || registration_profile.terms[2] == "00000000"
+            {
+                registration_profile.terms[2] = client_profile.temp_password.clone();
+            }
+            if registration_profile.terms[8].is_empty()
+                || registration_profile.terms[8] == "020000000000"
+            {
+                registration_profile.terms[8] = client_profile.synthetic_mac.clone();
+            }
+        }
         let host_session = HostSession::with_profile(
             &host_profile.device_id,
             "",
@@ -1201,6 +1245,11 @@ impl ControlSession {
     pub fn downloaded_file_bytes(&self, file_id: &str) -> Option<(String, Vec<u8>)> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let entry = guard.files.transfers.get(file_id)?;
+        if entry.direction == crate::file_transfer::TransferDirection::Send
+            && entry.saved_path.is_some()
+        {
+            return None;
+        }
         Some((entry.file_name.clone(), entry.buffer.clone()))
     }
 
@@ -1459,7 +1508,7 @@ impl ControlSession {
                     } else {
                         0
                     };
-                    if block_size > 0 {
+                    if (16..=256).contains(&block_size) {
                         guard.screen.block_size = block_size;
                     }
                     return;
@@ -1800,6 +1849,14 @@ impl ControlSession {
             if !password.trim().is_empty() {
                 p.password = password.trim().to_string();
             }
+            if guard.state.partner_id.trim().is_empty() || p.password.trim().is_empty() {
+                let err = "Partner ID and password are required".to_string();
+                guard.state.state = "disconnected".to_string();
+                guard.state.error = Some(err.clone());
+                guard.state.last_message = err.clone();
+                Self::sync_state_fields(&mut guard);
+                return Err(err);
+            }
             guard.latest_png.clear();
             guard.frames_applied = 0;
             guard.rectangles_applied = 0;
@@ -1910,7 +1967,7 @@ impl ControlSession {
         lan_port: u16,
         partner: &PartnerProfile,
     ) -> Result<(SessionTransport, TargetRoute), String> {
-        let mut transport = SessionTransport::new(5.0, 16 * 1024 * 1024, true)?;
+        let mut transport = SessionTransport::new(5.0, 16 * 1024 * 1024, false)?;
         transport.connect(lan_ip, lan_port, "", false)?;
         let local_id = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1922,8 +1979,11 @@ impl ControlSession {
         };
         let salt = random_digits(8);
         let auth = login_password_fields(&partner.password, partner.password_type, Some(&salt))?;
-        let (e2e_wire, e2e_state) =
-            crate::e2e::create_viewer_offer(&auth.salt, &auth.primary, &auth.secondary);
+        let (e2e_wire, e2e_state) = crate::e2e::create_viewer_offer_for_password(
+            &auth.salt,
+            &partner.password,
+            &auth.secondary,
+        );
         let fields = vec![
             "".to_string(),
             "".to_string(),
@@ -2137,7 +2197,7 @@ impl ControlSession {
         let local_ip = detect_local_ip();
         let reg_terms = effective_registration_terms(reg_profile, &local_ip);
 
-        let mut reg = RegistrationTransport::new(8.0, 1024 * 1024, true)?;
+        let mut reg = RegistrationTransport::new(8.0, 1024 * 1024, false)?;
         reg.connect(DEFAULT_REGISTRATION_HOST, 443)?;
         let reg_cmd = build_registration_command(&reg_terms)?;
         reg.send_command(&reg_cmd)?;
@@ -2164,13 +2224,16 @@ impl ControlSession {
         let route = route_opt
             .ok_or_else(|| "Không nhận được thông tin định tuyến từ đối tác".to_string())?;
 
-        let mut relay = SessionTransport::new(8.0, 1024 * 1024, true)?;
+        let mut relay = SessionTransport::new(8.0, 1024 * 1024, false)?;
         relay.connect(&route.tcp_server_ip, 443, &route.tcp_server_hostname, true)?;
 
         let salt = random_digits(8);
         let auth = login_password_fields(&partner.password, partner.password_type, Some(&salt))?;
-        let (e2e_wire, e2e_state) =
-            crate::e2e::create_viewer_offer(&auth.salt, &auth.primary, &auth.secondary);
+        let (e2e_wire, e2e_state) = crate::e2e::create_viewer_offer_for_password(
+            &auth.salt,
+            &partner.password,
+            &auth.secondary,
+        );
         let token_or_offer = match route.partner_secret_token.as_deref() {
             Some(tok) if !tok.is_empty() => format!("{}|{}", tok, e2e_wire),
             _ => e2e_wire,

@@ -129,6 +129,9 @@ fn parse_args() -> CliArgs {
 }
 
 fn find_asset_file(file_name: &str) -> Option<PathBuf> {
+    if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+        return None;
+    }
     let user_config_asset = env::var("XDG_CONFIG_HOME")
         .ok()
         .filter(|v| !v.is_empty())
@@ -140,22 +143,31 @@ fn find_asset_file(file_name: &str) -> Option<PathBuf> {
         })
         .map(|base| base.join("ultradesk-rust").join(file_name))
         .unwrap_or_default();
+    let exe_dir_asset = env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| {
+            let parent = p.parent()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let meta = fs::metadata(parent).ok()?;
+                let euid = unsafe { libc::geteuid() };
+                if (meta.mode() & 0o002) != 0 || (meta.uid() != 0 && meta.uid() != euid) {
+                    return None;
+                }
+            }
+            Some(parent.join(file_name))
+        })
+        .unwrap_or_default();
     let candidates = [
-        PathBuf::from(file_name),
-        env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join(file_name)))
-            .unwrap_or_default(),
-        env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("../..").join(file_name)))
-            .unwrap_or_default(),
         PathBuf::from("/usr/share/ultradesk-rust").join(file_name),
+        exe_dir_asset,
         user_config_asset,
     ];
     candidates
         .into_iter()
-        .find(|p| !p.as_os_str().is_empty() && p.exists())
+        .find(|p| !p.as_os_str().is_empty() && p.is_file())
 }
 
 fn open_url_in_browser(url: &str) -> bool {
@@ -205,7 +217,7 @@ fn main() {
             return;
         }
         let pm = ProfileManager::from_xdg().unwrap_or_else(|_| {
-            ProfileManager::from_custom_dir(env::temp_dir().join("ultradesk-rust"))
+            ProfileManager::from_custom_dir(ultradesk_rust::profile::fallback_private_config_dir())
         });
         if sub == "id" {
             let host_prof = pm

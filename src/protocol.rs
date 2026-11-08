@@ -277,12 +277,16 @@ pub fn import_cache(data: &[u8]) -> Result<BTreeMap<i32, CachedItem>, String> {
     Ok(result)
 }
 
+pub const MAX_ATLAS_TILES: usize = 16_384;
+pub const MAX_FRAME_STREAM_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
+
 pub fn atlas_layout(
     rectangles: &[(i32, i32, i32, i32)],
     block_size: i32,
     atlas_height: i32,
 ) -> Result<Vec<(i32, i32, i32, i32, i32, i32)>, String> {
-    if block_size <= 0 || atlas_height <= 0 {
+    if !(1..=256).contains(&block_size) || atlas_height <= 0 {
         return Err("invalid atlas geometry".to_string());
     }
     let mut atlas_y = 0i32;
@@ -297,26 +301,27 @@ pub fn atlas_layout(
             let tile_width = block_size.min(width - dx);
             let mut dy = 0i32;
             while dy < height {
+                if out.len() >= MAX_ATLAS_TILES {
+                    return Err("atlas tile count exceeds limit".to_string());
+                }
                 let tile_height = block_size.min(height - dy);
                 if tile_height > atlas_height {
                     return Err("tile cannot fit atlas height".to_string());
                 }
-                if atlas_y + tile_height > atlas_height {
+                if atlas_y.checked_add(tile_height).ok_or("atlas y overflow")? > atlas_height {
                     atlas_y = 0;
-                    column += 1;
+                    column = column.checked_add(1).ok_or("atlas column overflow")?;
                 }
-                out.push((
-                    x + dx,
-                    y + dy,
-                    tile_width,
-                    tile_height,
-                    column * block_size,
-                    atlas_y,
-                ));
+                let tile_x = x.checked_add(dx).ok_or("atlas tile x overflow")?;
+                let tile_y = y.checked_add(dy).ok_or("atlas tile y overflow")?;
+                let atlas_x = column
+                    .checked_mul(block_size)
+                    .ok_or("atlas column x overflow")?;
+                out.push((tile_x, tile_y, tile_width, tile_height, atlas_x, atlas_y));
                 atlas_y += tile_height;
-                dy += block_size;
+                dy = dy.saturating_add(block_size);
             }
-            dx += block_size;
+            dx = dx.saturating_add(block_size);
         }
     }
     Ok(out)
@@ -364,11 +369,34 @@ pub fn tile_sample_score(
     Ok((total - equal, total))
 }
 
+pub fn is_valid_host_header_value(host: &str) -> bool {
+    let trimmed = host.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 253
+        && trimmed
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b':'))
+}
+
 pub fn http_service_preface(host: &str, post: bool) -> Vec<u8> {
     let verb = if post { "POST" } else { "GET" };
+    let first_line = host
+        .split(|c: char| c.is_control() || c.is_whitespace())
+        .next()
+        .unwrap_or("");
+    let clean_host: String = first_line
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+        .take(253)
+        .collect();
+    let effective_host = if clean_host.is_empty() {
+        DEFAULT_REGISTRATION_HOST
+    } else {
+        clean_host.as_str()
+    };
     format!(
         "{} /UVService/ HTTP/1.1\r\nUser-Agent: Mozilla/4.0 (compatible; MSIE5.01; Windows NT)\r\nContent-Type: application/octet-stream\r\nConnection: Keep-Alive\r\nContent-length: 8589934590\r\nHost: {}\r\n\r\n",
-        verb, host
+        verb, effective_host
     )
     .into_bytes()
 }
@@ -388,12 +416,23 @@ impl FrameStream {
     }
 
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        if self.buffer.len().saturating_add(chunk.len()) > MAX_FRAME_STREAM_BYTES + 4 {
+            self.buffer.clear();
+            return Vec::new();
+        }
         self.buffer.extend_from_slice(chunk);
         if self.expect_http_header {
             if let Some(pos) = self.buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                if pos > MAX_HTTP_HEADER_BYTES {
+                    self.buffer.clear();
+                    return Vec::new();
+                }
                 self.buffer.drain(..pos + 4);
                 self.expect_http_header = false;
             } else {
+                if self.buffer.len() > MAX_HTTP_HEADER_BYTES {
+                    self.buffer.clear();
+                }
                 return Vec::new();
             }
         }
@@ -405,6 +444,10 @@ impl FrameStream {
                 self.buffer[2],
                 self.buffer[3],
             ]) as usize;
+            if length > MAX_FRAME_STREAM_BYTES {
+                self.buffer.clear();
+                break;
+            }
             if self.buffer.len() < length + 4 {
                 break;
             }
@@ -649,8 +692,22 @@ pub fn decode_target_route(payload: &[u8]) -> Result<TargetRoute, String> {
     let tcp_server_hostname = if fields[14].trim().is_empty() {
         "functions3.ultraviewer.net".to_string()
     } else {
-        fields[14].clone()
+        let candidate = fields[14].trim();
+        if !is_valid_host_header_value(candidate) {
+            return Err("invalid tcp_server_hostname in route response".to_string());
+        }
+        candidate.to_string()
     };
+    let tcp_server_ip_addr = fields[11]
+        .trim()
+        .parse::<std::net::Ipv4Addr>()
+        .map_err(|_| "invalid tcp_server_ip in route response".to_string())?;
+    if tcp_server_ip_addr.is_unspecified()
+        || tcp_server_ip_addr.is_broadcast()
+        || tcp_server_ip_addr.is_multicast()
+    {
+        return Err("unroutable tcp_server_ip in route response".to_string());
+    }
     let partner_secret_token = fields
         .get(20)
         .filter(|s| !s.is_empty() && *s != "0")

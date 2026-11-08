@@ -139,13 +139,18 @@ pub fn parse_relay_notification_with_defaults(
     }
     if parts[0] == "11" && parts.len() >= 4 {
         let relay_ip = parts[1].trim().to_string();
-        if relay_ip.is_empty() {
+        let ip_addr = relay_ip.parse::<std::net::Ipv4Addr>().ok()?;
+        if ip_addr.is_unspecified() || ip_addr.is_broadcast() || ip_addr.is_multicast() {
             return None;
         }
         let relay_host = if parts[3].trim().is_empty() {
             DEFAULT_REGISTRATION_HOST.to_string()
         } else {
-            parts[3].trim().to_string()
+            let candidate = parts[3].trim();
+            if !crate::protocol::is_valid_host_header_value(candidate) {
+                return None;
+            }
+            candidate.to_string()
         };
         return Some(RelayNotification {
             tag: None,
@@ -179,11 +184,17 @@ pub fn parse_relay_notification_with_defaults(
         let hosts: Vec<&str> = host_source.split(';').collect();
         for (idx, ip_candidate) in ips.iter().enumerate() {
             let ip_trimmed = ip_candidate.trim();
-            if ip_trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
+            if let Ok(ip_addr) = ip_trimmed.parse::<std::net::Ipv4Addr>() {
+                if ip_addr.is_unspecified() || ip_addr.is_broadcast() || ip_addr.is_multicast() {
+                    continue;
+                }
                 let host_raw = hosts.get(idx).copied().unwrap_or("").trim();
                 let relay_host = if host_raw.is_empty() {
                     DEFAULT_REGISTRATION_HOST.to_string()
                 } else {
+                    if !crate::protocol::is_valid_host_header_value(host_raw) {
+                        continue;
+                    }
                     host_raw.to_string()
                 };
                 return Some(RelayNotification {
@@ -666,6 +677,7 @@ pub struct HostCore {
     pub layout: DisplayLayout,
     pub qos: VideoQos,
     pub e2e: crate::e2e::E2eNegotiationState,
+    pub used_nonces: std::collections::VecDeque<String>,
 }
 
 impl HostCore {
@@ -688,6 +700,7 @@ impl HostCore {
             layout,
             qos: VideoQos::default(),
             e2e: crate::e2e::E2eNegotiationState::Disabled,
+            used_nonces: std::collections::VecDeque::new(),
         }
     }
 
@@ -714,7 +727,6 @@ impl HostCore {
     pub fn handle_packet(&mut self, payload: &[u8], now: Instant) -> Vec<HostAction> {
         let mut actions = Vec::new();
         if payload.starts_with(b"login:") {
-            self.e2e = crate::e2e::E2eNegotiationState::Disabled;
             if self.throttle.is_locked(now) {
                 actions.push(HostAction::SendPeer(encode_host_auth_failed()));
                 return actions;
@@ -725,6 +737,12 @@ impl HostCore {
                 actions.push(HostAction::SendPeer(encode_host_auth_failed()));
                 return actions;
             };
+
+            if self.used_nonces.iter().any(|n| n == &login.nonce) {
+                self.throttle.record_failure(now);
+                actions.push(HostAction::SendPeer(encode_host_auth_failed()));
+                return actions;
+            }
 
             let (valid, is_master) = verify_login_credentials(
                 &login,
@@ -743,8 +761,22 @@ impl HostCore {
                 return actions;
             }
 
+            if self.used_nonces.len() >= 256 {
+                self.used_nonces.pop_front();
+            }
+            self.used_nonces.push_back(login.nonce.clone());
+
+            let matched_proof_owned: String;
             let matched_proof = if is_master && !login.custom_password_proof.is_empty() {
                 &login.custom_password_proof
+            } else if login
+                .e2e_offer
+                .as_deref()
+                .is_some_and(crate::e2e::offer_uses_derived_temp_secret)
+            {
+                matched_proof_owned =
+                    crate::e2e::derive_e2e_temp_secret(&login.nonce, &self.temp_password);
+                &matched_proof_owned
             } else if !login.password_proof.is_empty() {
                 &login.password_proof
             } else {
@@ -754,29 +786,8 @@ impl HostCore {
                 crate::e2e::accept_viewer_offer_on_host(offer_str, &login.nonce, matched_proof)
             });
 
-            if self.phase == HostPhase::Streaming && self.active_viewer.is_some() {
-                self.active_viewer = Some(login.clone());
-                self.phase = HostPhase::Starting;
-                self.control_allowed = login.wants_control;
-                self.next_frame_seq = FIRST_FRAME_NUMBER;
-                self.waiting_ack = false;
-                let (answer_bytes, next_e2e) = match negotiated {
-                    Some((ans, cipher)) => {
-                        (ans, crate::e2e::E2eNegotiationState::Established(cipher))
-                    }
-                    None => (Vec::new(), crate::e2e::E2eNegotiationState::Disabled),
-                };
+            if self.phase == HostPhase::Streaming {
                 actions.push(HostAction::ReleaseAllInput);
-                actions.push(HostAction::SendPeer(encode_host_screen_init_with_e2e(
-                    &self.layout,
-                    &answer_bytes,
-                )));
-                self.e2e = next_e2e;
-                let ctrl_pkt =
-                    self.seal_peer_packet(&encode_host_control_permission(self.control_allowed));
-                actions.push(HostAction::SendPeer(ctrl_pkt));
-                actions.push(HostAction::SessionStarted(login));
-                return actions;
             }
 
             if self.auto_approve || (is_master && self.auto_approve_master) {
@@ -882,7 +893,10 @@ impl HostCore {
                     return actions;
                 }
             }
-            if tag == b"5" || tag == b"33" {
+            if (tag == b"5" || tag == b"33")
+                && self.phase == HostPhase::Streaming
+                && self.control_allowed
+            {
                 if let Some(clip) = crate::clipboard::decode_clipboard_packet(payload) {
                     actions.push(HostAction::ClipboardReceived(clip.text));
                     return actions;
@@ -2683,6 +2697,7 @@ struct HostSessionInner {
     capture_needed: bool,
     force_keyframe: bool,
     last_frame: Vec<u8>,
+    peer_throttles: std::collections::HashMap<String, LoginThrottle>,
 }
 
 pub fn query_live_host_id(
@@ -2738,7 +2753,7 @@ pub fn query_live_host_id_at(
         master_password_proof,
         user_name,
     )?;
-    let mut reg = RegistrationTransport::new(5.0, 1024 * 1024, true)?;
+    let mut reg = RegistrationTransport::new(5.0, 1024 * 1024, false)?;
     reg.connect_with_tls(reg_host, reg_port, use_tls)?;
     reg.send_command(&cmd)?;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2808,8 +2823,7 @@ impl HostSession {
         backend: DesktopBackend,
     ) -> Self {
         let initial_monitors = layout.monitors.clone();
-        let mut core = HostCore::new(temp_password, master_password_proof, layout);
-        core.auto_approve = true;
+        let core = HostCore::new(temp_password, master_password_proof, layout);
         let mut inner = HostSessionInner {
             running: false,
             generation: 0,
@@ -2841,6 +2855,7 @@ impl HostSession {
             capture_needed: false,
             force_keyframe: true,
             last_frame: Vec::new(),
+            peer_throttles: std::collections::HashMap::new(),
         };
         Self::refresh_display_layout(&mut inner);
         Self {
@@ -3090,17 +3105,53 @@ impl HostSession {
                                             if let Some(decoded) =
                                                 decode_peer_payload(&pkt.data, pkt.flag)
                                             {
-                                                let _ = self.handle_peer_payload(&decoded);
-                                                let is_auth = {
-                                                    let mut s = self.inner.lock().unwrap();
-                                                    let active = s.core.phase != HostPhase::None;
-                                                    if active {
-                                                        s.lan_viewer_active = true;
-                                                    }
-                                                    active
+                                                let can_process = if authenticated {
+                                                    true
+                                                } else {
+                                                    let s = self.inner.lock().unwrap();
+                                                    !s.lan_viewer_active
+                                                        && s.core.phase == HostPhase::None
+                                                        && decoded.starts_with(b"login:")
                                                 };
-                                                if is_auth {
-                                                    authenticated = true;
+                                                if can_process {
+                                                    let actions = self
+                                                        .handle_peer_payload_from_peer(
+                                                            &peer_ip, &decoded,
+                                                        )
+                                                        .unwrap_or_default();
+                                                    if !authenticated
+                                                        && actions.iter().any(|a| {
+                                                            matches!(
+                                                                a,
+                                                                HostAction::PromptApproval(_)
+                                                                    | HostAction::SessionStarted(_)
+                                                            )
+                                                        })
+                                                    {
+                                                        authenticated = true;
+                                                        let mut s = self.inner.lock().unwrap();
+                                                        s.lan_viewer_active = true;
+                                                    } else if !authenticated {
+                                                        let rejected: Vec<Vec<u8>> = {
+                                                            let mut s = self.inner.lock().unwrap();
+                                                            if !s.lan_viewer_active
+                                                                && s.core.phase == HostPhase::None
+                                                            {
+                                                                std::mem::take(
+                                                                    &mut s.outbound_peer_packets,
+                                                                )
+                                                            } else {
+                                                                Vec::new()
+                                                            }
+                                                        };
+                                                        for pkt in rejected {
+                                                            if let Ok(frame) = encode_relay_frame(
+                                                                &pkt, &peer_ip, peer_port, 0,
+                                                            ) {
+                                                                let _ = stream.write_all(&frame);
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -3142,7 +3193,7 @@ impl HostSession {
 
                         let outbound: Vec<Vec<u8>> = {
                             let mut s = self.inner.lock().unwrap();
-                            if authenticated || !s.outbound_peer_packets.is_empty() {
+                            if authenticated {
                                 std::mem::take(&mut s.outbound_peer_packets)
                             } else {
                                 Vec::new()
@@ -3231,7 +3282,7 @@ impl HostSession {
         };
 
         while self.is_worker_active(gen) {
-            let Ok(mut reg) = RegistrationTransport::new(15.0, 16 * 1024 * 1024, true) else {
+            let Ok(mut reg) = RegistrationTransport::new(15.0, 16 * 1024 * 1024, false) else {
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(());
                 }
@@ -3346,7 +3397,7 @@ impl HostSession {
                             if !has_active_viewer {
                                 let relay_port = if use_tls { 443 } else { reg_port };
                                 if let Ok(mut new_relay) =
-                                    SessionTransport::new(5.0, 16 * 1024 * 1024, true)
+                                    SessionTransport::new(5.0, 16 * 1024 * 1024, false)
                                 {
                                     if new_relay
                                         .connect(
@@ -3385,9 +3436,50 @@ impl HostSession {
                             Ok(Some(pkt)) if pkt.kind == "relay" => {
                                 let peer_ip =
                                     std::net::Ipv4Addr::from(pkt.address_value).to_string();
-                                viewer_route = Some((peer_ip, pkt.port));
+                                let candidate_route = (peer_ip, pkt.port);
                                 if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
-                                    let _ = self.handle_peer_payload(&decoded);
+                                    let allow_packet = viewer_route.as_ref()
+                                        == Some(&candidate_route)
+                                        || (viewer_route.is_none()
+                                            && decoded.starts_with(b"login:"));
+                                    if allow_packet {
+                                        let actions = self
+                                            .handle_peer_payload_from_peer(
+                                                &candidate_route.0,
+                                                &decoded,
+                                            )
+                                            .unwrap_or_default();
+                                        if viewer_route.is_none()
+                                            && actions.iter().any(|a| {
+                                                matches!(
+                                                    a,
+                                                    HostAction::PromptApproval(_)
+                                                        | HostAction::SessionStarted(_)
+                                                )
+                                            })
+                                        {
+                                            viewer_route = Some(candidate_route);
+                                        } else if viewer_route.is_none() {
+                                            let rejected: Vec<Vec<u8>> = {
+                                                let mut s = self.inner.lock().unwrap();
+                                                if !s.lan_viewer_active
+                                                    && s.core.phase == HostPhase::None
+                                                {
+                                                    std::mem::take(&mut s.outbound_peer_packets)
+                                                } else {
+                                                    Vec::new()
+                                                }
+                                            };
+                                            for out_pkt in rejected {
+                                                let _ = relay.send_relay(
+                                                    &out_pkt,
+                                                    &candidate_route.0,
+                                                    candidate_route.1,
+                                                    false,
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             _ => {}
@@ -3591,6 +3683,34 @@ impl HostSession {
         let mut s = self.inner.lock().unwrap();
         if bytes.starts_with(b"login:") {
             Self::refresh_display_layout(&mut s);
+        }
+        let actions = s.core.handle_packet(bytes, Instant::now());
+        Self::record_actions(&mut s, &actions);
+        Ok(actions)
+    }
+
+    pub fn handle_peer_payload_from_peer(
+        &self,
+        peer_key: &str,
+        bytes: &[u8],
+    ) -> Result<Vec<HostAction>, String> {
+        let mut s = self.inner.lock().unwrap();
+        if bytes.starts_with(b"login:") {
+            Self::refresh_display_layout(&mut s);
+            if s.peer_throttles.len() >= 256 && !s.peer_throttles.contains_key(peer_key) {
+                s.peer_throttles.clear();
+            }
+            let peer_throttle = s
+                .peer_throttles
+                .entry(peer_key.to_string())
+                .or_default()
+                .clone();
+            let saved_global = std::mem::replace(&mut s.core.throttle, peer_throttle);
+            let actions = s.core.handle_packet(bytes, Instant::now());
+            let updated_peer = std::mem::replace(&mut s.core.throttle, saved_global);
+            s.peer_throttles.insert(peer_key.to_string(), updated_peer);
+            Self::record_actions(&mut s, &actions);
+            return Ok(actions);
         }
         let actions = s.core.handle_packet(bytes, Instant::now());
         Self::record_actions(&mut s, &actions);
@@ -4180,6 +4300,7 @@ mod tests {
         assert_eq!(st_m1.selected_monitor, Some(1));
         assert_eq!(st_m1.selected_monitors, vec![1]);
 
+        session.set_auto_approve(true);
         let login = sample_login_payload("81617177", "2", 0);
         session.handle_peer_payload(&login).unwrap();
         let actions_chat = session.handle_peer_payload(b"12|||hello cc").unwrap();

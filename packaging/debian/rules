@@ -1,10 +1,11 @@
 #!/usr/bin/make -f
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
-export CARGO_HOME = /tmp/ultradesk-cargo
-export RUSTUP_HOME = /tmp/ultradesk-rustup
-export PATH := /tmp/ultradesk-cargo/bin:$(PATH)
+export CARGO_HOME = $(CURDIR)/debian/.cargo
+export RUSTUP_HOME = $(CURDIR)/debian/.rustup
+export PATH := $(CARGO_HOME)/bin:$(PATH)
 
 ensure_rust_toolchain = \
+	mkdir -p -m 0700 "$(CARGO_HOME)" "$(RUSTUP_HOME)"; \
 	if ! command -v rustc >/dev/null 2>&1 || [ "$$(rustc -V | sed -E 's/rustc [0-9]+\.([0-9]+)\..*/\1/')" -lt 90 ]; then \
 		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path; \
 	fi
@@ -13,7 +14,7 @@ ensure_rust_toolchain = \
 	dh $@
 
 override_dh_auto_clean:
-	rm -rf target
+	rm -rf target "$(CARGO_HOME)" "$(RUSTUP_HOME)"
 
 override_dh_auto_build:
 	$(ensure_rust_toolchain)
