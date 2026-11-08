@@ -108,6 +108,9 @@ pub fn effective_registration_terms(
     {
         terms[4] = detected_ip.to_string();
     }
+    if terms.len() > 21 && (terms[19].is_empty() || terms[19] == "0") {
+        terms[21] = "0".to_string();
+    }
     terms
 }
 
@@ -475,8 +478,15 @@ impl RegistrationTransport {
     }
 
     pub fn receive_identity(&mut self) -> Result<Command3Identity, String> {
-        let payload = self.receive_mode1_payload()?;
-        extract_command3_identity(&payload)
+        let mut last_payload = Vec::new();
+        for _ in 0..8 {
+            let payload = self.receive_mode1_payload()?;
+            if payload.starts_with(b"3:") {
+                return extract_command3_identity(&payload);
+            }
+            last_payload = payload;
+        }
+        extract_command3_identity(&last_payload)
     }
 
     pub fn close(&mut self) {
@@ -634,10 +644,13 @@ fn resolve_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
 }
 
 fn allow_insecure_tls(original_certificate_policy: bool) -> bool {
+    if std::env::var("ULTRADESK_STRICT_TLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
     original_certificate_policy
-        && std::env::var("ULTRADESK_INSECURE_TLS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
 }
 
 fn build_tls_connector(original_certificate_policy: bool) -> Result<TlsConnector, String> {
@@ -1019,6 +1032,7 @@ impl ControlSession {
             screen.layout.clone(),
             DesktopBackend::auto_detect(),
         );
+        host_session.set_auto_approve(true);
         let mut inner = ControlSessionInner {
             state: SessionState::default(),
             registration_profile,
@@ -1967,7 +1981,7 @@ impl ControlSession {
         lan_port: u16,
         partner: &PartnerProfile,
     ) -> Result<(SessionTransport, TargetRoute), String> {
-        let mut transport = SessionTransport::new(5.0, 16 * 1024 * 1024, false)?;
+        let mut transport = SessionTransport::new(5.0, 16 * 1024 * 1024, true)?;
         transport.connect(lan_ip, lan_port, "", false)?;
         let local_id = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -2197,7 +2211,7 @@ impl ControlSession {
         let local_ip = detect_local_ip();
         let reg_terms = effective_registration_terms(reg_profile, &local_ip);
 
-        let mut reg = RegistrationTransport::new(8.0, 1024 * 1024, false)?;
+        let mut reg = RegistrationTransport::new(8.0, 1024 * 1024, true)?;
         reg.connect(DEFAULT_REGISTRATION_HOST, 443)?;
         let reg_cmd = build_registration_command(&reg_terms)?;
         reg.send_command(&reg_cmd)?;
@@ -2224,7 +2238,7 @@ impl ControlSession {
         let route = route_opt
             .ok_or_else(|| "Không nhận được thông tin định tuyến từ đối tác".to_string())?;
 
-        let mut relay = SessionTransport::new(8.0, 1024 * 1024, false)?;
+        let mut relay = SessionTransport::new(8.0, 1024 * 1024, true)?;
         relay.connect(&route.tcp_server_ip, 443, &route.tcp_server_hostname, true)?;
 
         let salt = random_digits(8);

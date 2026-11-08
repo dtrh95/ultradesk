@@ -2753,7 +2753,7 @@ pub fn query_live_host_id_at(
         master_password_proof,
         user_name,
     )?;
-    let mut reg = RegistrationTransport::new(5.0, 1024 * 1024, false)?;
+    let mut reg = RegistrationTransport::new(5.0, 1024 * 1024, true)?;
     reg.connect_with_tls(reg_host, reg_port, use_tls)?;
     reg.send_command(&cmd)?;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -3282,7 +3282,7 @@ impl HostSession {
         };
 
         while self.is_worker_active(gen) {
-            let Ok(mut reg) = RegistrationTransport::new(15.0, 16 * 1024 * 1024, false) else {
+            let Ok(mut reg) = RegistrationTransport::new(15.0, 16 * 1024 * 1024, true) else {
                 if let Some(tx) = ready_tx.take() {
                     let _ = tx.send(());
                 }
@@ -3397,7 +3397,7 @@ impl HostSession {
                             if !has_active_viewer {
                                 let relay_port = if use_tls { 443 } else { reg_port };
                                 if let Ok(mut new_relay) =
-                                    SessionTransport::new(5.0, 16 * 1024 * 1024, false)
+                                    SessionTransport::new(5.0, 16 * 1024 * 1024, true)
                                 {
                                     if new_relay
                                         .connect(

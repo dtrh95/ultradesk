@@ -160,8 +160,27 @@ fn find_asset_file(file_name: &str) -> Option<PathBuf> {
             Some(parent.join(file_name))
         })
         .unwrap_or_default();
+    let exe_share_asset = env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| {
+            let prefix = p.parent()?.parent()?;
+            let share_dir = prefix.join("share").join("ultradesk-rust");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let meta = fs::metadata(&share_dir).ok()?;
+                let euid = unsafe { libc::geteuid() };
+                if (meta.mode() & 0o002) != 0 || (meta.uid() != 0 && meta.uid() != euid) {
+                    return None;
+                }
+            }
+            Some(share_dir.join(file_name))
+        })
+        .unwrap_or_default();
     let candidates = [
         PathBuf::from("/usr/share/ultradesk-rust").join(file_name),
+        exe_share_asset,
         exe_dir_asset,
         user_config_asset,
     ];
