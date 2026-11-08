@@ -18,7 +18,7 @@ default = ["gui"]
 gui = ["dep:tao", "dep:wry", "dep:muda", "dep:gtk"]
 
 [dependencies]
-aes = "0.8"
+aes = "0.9"
 cbc = { version = "0.1", features = ["alloc"] }
 cipher = { version = "0.4", features = ["alloc", "block-padding"] }
 des = "0.8"
