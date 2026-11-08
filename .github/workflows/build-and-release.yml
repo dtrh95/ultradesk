@@ -23,7 +23,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${ACTOR}" != "dtrh95" ] || [ "${TRIGGERING_ACTOR}" != "dtrh95" ]; then
+          if [ "${ACTOR}" != "dtrh95" ] || { [ "${TRIGGERING_ACTOR}" != "dtrh95" ] && [ "${TRIGGERING_ACTOR}" != "github-actions[bot]" ]; }; then
             echo "::error::Unauthorized tag push (${REF_NAME}) by ${ACTOR} (triggering_actor: ${TRIGGERING_ACTOR}). Only dtrh95 may push tags."
             git ls-remote --exit-code "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${REF_NAME}" >/dev/null 2>&1 && \
               git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ":refs/tags/${REF_NAME}" || true
@@ -33,7 +33,7 @@ jobs:
   build-deb:
     name: DEB [${{ matrix.codename }}]
     needs: [verify-tag-pusher]
-    if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95' && startsWith(github.ref, 'refs/tags/v')
+    if: github.actor == 'dtrh95' && (github.triggering_actor == 'dtrh95' || github.triggering_actor == 'github-actions[bot]') && startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
@@ -133,7 +133,7 @@ jobs:
   build-rpm-fedora:
     name: RPM [fedora-${{ matrix.releasever }}]
     needs: [verify-tag-pusher]
-    if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95' && startsWith(github.ref, 'refs/tags/v')
+    if: github.actor == 'dtrh95' && (github.triggering_actor == 'dtrh95' || github.triggering_actor == 'github-actions[bot]') && startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
@@ -161,10 +161,18 @@ jobs:
             set -euo pipefail
             find / -name '*openh264*' -type f -delete 2>/dev/null || true
             dnf clean all
-            dnf install -y rpm-build rpmdevtools dnf-plugins-core
+            for attempt in 1 2 3; do
+              dnf install --setopt=retries=10 --setopt=timeout=60 -y rpm-build rpmdevtools dnf-plugins-core && break
+              if [ "$attempt" -eq 3 ]; then exit 1; fi
+              sleep 5
+            done
             rpmdev-setuptree
             cp /work/packaging/rpm/fedora/ultradesk-rust.spec ~/rpmbuild/SPECS/
-            dnf builddep --setopt=install_weak_deps=False -y ~/rpmbuild/SPECS/ultradesk-rust.spec
+            for attempt in 1 2 3; do
+              dnf builddep --setopt=install_weak_deps=False --setopt=retries=10 --setopt=timeout=60 -y ~/rpmbuild/SPECS/ultradesk-rust.spec && break
+              if [ "$attempt" -eq 3 ]; then exit 1; fi
+              sleep 5
+            done
             mkdir -p ~/rpmbuild/SOURCES
             cd /work
             VERSION=$(grep '^Version:' packaging/rpm/fedora/ultradesk-rust.spec | awk '{print $2}')
@@ -251,7 +259,7 @@ jobs:
   build-rpm-opensuse:
     name: RPM [opensuse-${{ matrix.releasever }}]
     needs: [verify-tag-pusher]
-    if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95' && startsWith(github.ref, 'refs/tags/v')
+    if: github.actor == 'dtrh95' && (github.triggering_actor == 'dtrh95' || github.triggering_actor == 'github-actions[bot]') && startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
@@ -366,7 +374,7 @@ jobs:
   build-arch:
     name: Arch Linux (zstd)
     needs: [verify-tag-pusher]
-    if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95' && startsWith(github.ref, 'refs/tags/v')
+    if: github.actor == 'dtrh95' && (github.triggering_actor == 'dtrh95' || github.triggering_actor == 'github-actions[bot]') && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
     steps:
@@ -408,7 +416,7 @@ jobs:
   build-macos:
     name: macOS [${{ matrix.arch }}]
     needs: [verify-tag-pusher]
-    if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95' && startsWith(github.ref, 'refs/tags/v')
+    if: github.actor == 'dtrh95' && (github.triggering_actor == 'dtrh95' || github.triggering_actor == 'github-actions[bot]') && startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
@@ -464,7 +472,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95'
+    if: github.actor == 'dtrh95' && (github.triggering_actor == 'dtrh95' || github.triggering_actor == 'github-actions[bot]') && startsWith(github.ref, 'refs/tags/v')
     needs: [build-deb, build-rpm-fedora, build-rpm-opensuse, build-arch, build-macos]
     runs-on: ubuntu-latest
     permissions:
@@ -510,7 +518,7 @@ jobs:
 
   deploy:
     name: Deploy to Cloudflare Pages
-    if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95'
+    if: github.actor == 'dtrh95' && (github.triggering_actor == 'dtrh95' || github.triggering_actor == 'github-actions[bot]') && startsWith(github.ref, 'refs/tags/v')
     needs: [release]
     runs-on: ubuntu-latest
     permissions:

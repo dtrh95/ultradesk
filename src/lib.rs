@@ -1701,6 +1701,7 @@ mod tests {
         let mut bad_client = TcpStream::connect(("127.0.0.1", pport)).unwrap();
         let oversized_line = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(9000));
         let _ = bad_client.write_all(oversized_line.as_bytes());
+        let _ = bad_client.shutdown(std::net::Shutdown::Write);
         let mut bad_resp = String::new();
         let _ = bad_client.read_to_string(&mut bad_resp);
         assert!(bad_resp.starts_with("HTTP/1.1 431 Request Header Fields Too Large"));

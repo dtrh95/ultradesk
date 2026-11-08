@@ -353,6 +353,20 @@ fn read_bounded_line<R: BufRead>(reader: &mut R, max_len: usize) -> BoundedLineR
     }
 }
 
+fn close_after_error_response<R: BufRead>(stream: &mut TcpStream, reader: &mut R) {
+    let _ = stream.set_nonblocking(true);
+    loop {
+        match reader.fill_buf() {
+            Ok(buf) if !buf.is_empty() => {
+                let len = buf.len();
+                reader.consume(len);
+            }
+            _ => break,
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
 fn is_allowed_origin(origin: &str, bind_addr: &str) -> bool {
     let trimmed = origin.trim();
     if trimmed.is_empty() {
@@ -417,6 +431,7 @@ pub(crate) fn handle_http_client(
                     &json!({ "ok": false, "error": "Request line too large" }),
                     false,
                 );
+                close_after_error_response(&mut stream, &mut reader);
                 break;
             }
         };
@@ -501,6 +516,7 @@ pub(crate) fn handle_http_client(
                 &json!({ "ok": false, "error": "Request header fields too large" }),
                 false,
             );
+            close_after_error_response(&mut stream, &mut reader);
             break;
         }
         if header_read_err {
