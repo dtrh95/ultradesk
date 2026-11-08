@@ -8,7 +8,7 @@
   <h2 align="center">UltraDesk</h2>
 
   <p align="center">
-    <b>A fast, lightweight remote desktop client and host for Linux and macOS</b>
+    <b>A fast, lightweight remote desktop client and host for Linux and macOS that connects directly to UltraViewer on Windows</b>
     <br />
     <a href="https://ultradesk-rust.pages.dev/"><strong>Discover the package repository »</strong></a>
     <br />
@@ -46,11 +46,12 @@
 
 <br />
 
-**UltraDesk** (`ultradesk-rust`) lets you connect to a remote computer or share your screen from one simple desktop app on Linux and macOS. Whether you are helping a friend troubleshoot their computer or accessing your own workstation from afar, UltraDesk gives you a fast, responsive remote session without complicated setup.
+**UltraDesk** (`ultradesk-rust`) lets you connect to a remote computer or share your screen from one simple desktop app on Linux and macOS. It connects directly with **UltraViewer on Windows**, so you can control a Windows PC running UltraViewer from Linux or macOS, or let a Windows UltraViewer user connect to your Linux or macOS desktop without any extra bridge or configuration.
 
 ### Key Highlights
 
-- **Connect and share in one window**: View and control a remote partner using their 9-digit ID and password, or share your own screen for remote support.
+- **Direct UltraViewer on Windows compatibility**: Connect straight from Linux or macOS to any Windows PC running UltraViewer, or let a Windows UltraViewer user support your Linux or macOS machine using the standard 9-digit ID and password.
+- **Connect and share in one window**: View and control a remote partner or share your own screen for remote support from a single interface.
 - **Native on Linux and macOS**: Runs smoothly on macOS (Apple Silicon and Intel) as well as Linux desktops (Wayland and X11).
 - **Built-in session tools**: Chat in real time, send and receive files, sync clipboards automatically, stream remote desktop audio, and switch between multiple monitors.
 - **Built-in AI MCP server**: Let AI assistants (Claude Desktop, Cursor, Claude Code, VS Code) view screenshots, move the mouse, type text, sync clipboards, and transfer files via the Model Context Protocol (`ultradesk-rust mcp` or `ws://127.0.0.1:9333`).
@@ -144,8 +145,8 @@ nix run github:dtrh95/ultradesk#ultradesk-rust-head
 ### Quick Start
 
 1. **Launch UltraDesk** from your application menu or run `ultradesk-rust` in a terminal.
-2. **To control a remote computer**: Enter your partner's 9-digit **Partner ID** and **Password**, then click **Connect**.
-3. **To let someone control your computer**: Share your **My ID** and temporary **Password** shown in the app. You can also set a permanent password in the app settings for unattended access.
+2. **To control a remote computer (Windows UltraViewer, Linux, or macOS)**: Enter your partner's 9-digit **Partner ID** and **Password** from UltraViewer on Windows (or UltraDesk on Linux and macOS), then click **Connect**.
+3. **To let someone control your computer**: Share your **My ID** and temporary **Password** shown in the app with a partner using UltraViewer on Windows or UltraDesk on Linux and macOS. You can also set a permanent password in the app settings for unattended access.
 4. **Switching monitors**: Use the top toolbar inside an active session to view all displays (`ALL`) or focus on a specific monitor (`M1`, `M2`).
 
 > **Note for Linux Wayland users**: To allow a remote partner to control your mouse and keyboard on Wayland, grant your user account access to `/dev/uinput`:
