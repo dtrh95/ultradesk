@@ -250,7 +250,19 @@ fn local_hostname() -> String {
             return trimmed.to_string();
         }
     }
-    "linux-host".to_string()
+    if let Ok(out) = std::process::Command::new("hostname").arg("-s").output() {
+        if out.status.success() {
+            let trimmed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+    }
+    if cfg!(target_os = "macos") {
+        "mac-host".to_string()
+    } else {
+        "linux-host".to_string()
+    }
 }
 
 pub enum TransportChannel {

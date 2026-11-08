@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version without v prefix (for example 1.0.0)'
+        description: 'Release version without v prefix (for example 1.0.1)'
         required: false
       push_cachix:
         description: 'Push built Nix closures to Cachix'

@@ -247,28 +247,56 @@ pub fn normalize_display_name(name: &str) -> String {
 }
 
 pub fn discover_hardware_mac(_local_ip: Option<Ipv4Addr>) -> Option<String> {
-    let route = fs::read_to_string("/proc/net/route").unwrap_or_default();
-    let default_if = route.lines().skip(1).find_map(|l| {
-        let f: Vec<&str> = l.split_whitespace().collect();
-        (f.len() > 2 && f[1] == "00000000").then(|| f[0].to_string())
-    });
+    if let Ok(entries) = fs::read_dir("/sys/class/net") {
+        let route = fs::read_to_string("/proc/net/route").unwrap_or_default();
+        let default_if = route.lines().skip(1).find_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f.len() > 2 && f[1] == "00000000").then(|| f[0].to_string())
+        });
 
-    let mut names: Vec<String> = fs::read_dir("/sys/class/net")
-        .ok()?
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .filter(|n| n != "lo")
-        .collect();
-    names.sort();
+        let mut names: Vec<String> = entries
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n != "lo")
+            .collect();
+        names.sort();
 
-    if let Some(d) = default_if {
-        names.retain(|n| *n != d);
-        names.insert(0, d);
+        if let Some(d) = default_if {
+            names.retain(|n| *n != d);
+            names.insert(0, d);
+        }
+
+        if let Some(mac) = names.iter().find_map(|n| {
+            let path = format!("/sys/class/net/{n}/address");
+            normalize_mac(&fs::read_to_string(path).ok()?)
+        }) {
+            return Some(mac);
+        }
     }
 
-    names.iter().find_map(|n| {
-        let path = format!("/sys/class/net/{n}/address");
-        normalize_mac(&fs::read_to_string(path).ok()?)
-    })
+    for args in [&["en0"][..], &["en1"][..], &[][..]] {
+        if let Ok(out) = std::process::Command::new("ifconfig").args(args).output() {
+            if out.status.success() {
+                if let Some(mac) = parse_ifconfig_mac(&String::from_utf8_lossy(&out.stdout)) {
+                    return Some(mac);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn parse_ifconfig_mac(ifconfig_text: &str) -> Option<String> {
+    for line in ifconfig_text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("ether ") {
+            if let Some(candidate) = rest.split_whitespace().next() {
+                if let Some(mac) = normalize_mac(candidate) {
+                    return Some(mac);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn normalize_mac(s: &str) -> Option<String> {
@@ -584,6 +612,15 @@ mod tests {
         let first_byte = u8::from_str_radix(&syn_mac[..2], 16).unwrap();
         assert_eq!(first_byte & 0x02, 0x02);
         assert_eq!(first_byte & 0x01, 0x00);
+    }
+
+    #[test]
+    fn test_parse_ifconfig_mac_macos_format() {
+        let sample = "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\
+                      \toptions=6463<RXCSUM,TXCSUM,TSO4,TSO6,CHANNEL_IO,PARTIAL_CSUM,ZEROINVERT_CSUM>\n\
+                      \tether a4:83:e7:1b:2c:3d\n\
+                      \tinet 192.168.1.42 netmask 0xffffff00 broadcast 192.168.1.255\n";
+        assert_eq!(parse_ifconfig_mac(sample), Some("A483E71B2C3D".to_string()));
     }
 
     #[test]

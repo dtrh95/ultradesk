@@ -405,10 +405,67 @@ jobs:
           path: ultradesk-rust-*-x86_64-archlinux.tar.zst
           retention-days: 1
 
+  build-macos:
+    name: macOS [${{ matrix.arch }}]
+    needs: [verify-tag-pusher]
+    if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95' && startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Build Angular Web Viewer
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Install Rust target ${{ matrix.target }}
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Build macOS release binary (${{ matrix.arch }})
+        run: cargo build --release --target "${{ matrix.target }}"
+
+      - name: Run unit and security tests on macOS (arm64)
+        if: matrix.arch == 'arm64'
+        env:
+          ULTRADESK_SKIP_MACOS_PROMPT: '1'
+        run: cargo test --release --target aarch64-apple-darwin
+
+      - name: Package macOS .app and .dmg installer (${{ matrix.arch }})
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          chmod +x packaging/macos/package-macos.sh
+          ./packaging/macos/package-macos.sh "${{ matrix.target }}" "${{ matrix.arch }}" "${REF_NAME}"
+
+      - name: Upload macOS artifact (${{ matrix.arch }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            ultradesk-rust-*-${{ matrix.arch }}-macos.dmg
+            ultradesk-rust-*-${{ matrix.arch }}-macos.app.tar.gz
+          retention-days: 1
+
   release:
     name: Create GitHub Release
     if: github.actor == 'dtrh95' && github.triggering_actor == 'dtrh95'
-    needs: [build-deb, build-rpm-fedora, build-rpm-opensuse, build-arch]
+    needs: [build-deb, build-rpm-fedora, build-rpm-opensuse, build-arch, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -443,6 +500,8 @@ jobs:
             artifacts/deb-*/**/*.deb
             artifacts/rpm-*/**/*.rpm
             artifacts/**/*.tar.zst
+            artifacts/macos-*/**/*.dmg
+            artifacts/macos-*/**/*.app.tar.gz
           generate_release_notes: true
           draft: false
           prerelease: false

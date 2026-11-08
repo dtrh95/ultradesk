@@ -2113,42 +2113,467 @@ impl Capturer for WaylandGrimCapturer {
         }
         let (w, h, pixels) = parse_ppm_to_rgb555_top_down(&out.stdout)?;
         *self.shared_size.lock().unwrap() = (w, h);
-        let target_w = rect.width() as usize;
-        let target_h = rect.height() as usize;
-        let src_w = w as usize;
-        let src_h = h as usize;
-        if rect.left == 0 && rect.top == 0 && src_w == target_w && src_h == target_h {
-            return Ok(pixels);
+        Ok(crop_or_resize_rgb555(&pixels, w as usize, h as usize, rect))
+    }
+}
+
+pub fn crop_or_resize_rgb555(
+    pixels: &[u8],
+    src_w: usize,
+    src_h: usize,
+    rect: MonitorRect,
+) -> Vec<u8> {
+    let target_w = rect.width() as usize;
+    let target_h = rect.height() as usize;
+    if rect.left == 0 && rect.top == 0 && src_w == target_w && src_h == target_h {
+        return pixels.to_vec();
+    }
+    if rect.left >= 0
+        && rect.top >= 0
+        && (rect.right as usize) <= src_w
+        && (rect.bottom as usize) <= src_h
+    {
+        let start_x = rect.left as usize;
+        let start_y = rect.top as usize;
+        let mut cropped = vec![0u8; target_w * target_h * 2];
+        let row_bytes = target_w * 2;
+        for row in 0..target_h {
+            let src_start = ((start_y + row) * src_w + start_x) * 2;
+            let dst_start = row * row_bytes;
+            cropped[dst_start..dst_start + row_bytes]
+                .copy_from_slice(&pixels[src_start..src_start + row_bytes]);
         }
-        if rect.left >= 0
-            && rect.top >= 0
-            && (rect.right as usize) <= src_w
-            && (rect.bottom as usize) <= src_h
-        {
-            let start_x = rect.left as usize;
-            let start_y = rect.top as usize;
-            let mut cropped = vec![0u8; target_w * target_h * 2];
-            let row_bytes = target_w * 2;
-            for row in 0..target_h {
-                let src_start = ((start_y + row) * src_w + start_x) * 2;
-                let dst_start = row * row_bytes;
-                cropped[dst_start..dst_start + row_bytes]
-                    .copy_from_slice(&pixels[src_start..src_start + row_bytes]);
+        return cropped;
+    }
+    let mut resized = vec![0u8; target_w * target_h * 2];
+    for y in 0..target_h {
+        let sy = (y * src_h / target_h.max(1)).min(src_h.saturating_sub(1));
+        for x in 0..target_w {
+            let sx = (x * src_w / target_w.max(1)).min(src_w.saturating_sub(1));
+            let src_idx = (sy * src_w + sx) * 2;
+            let dst_idx = (y * target_w + x) * 2;
+            resized[dst_idx] = pixels[src_idx];
+            resized[dst_idx + 1] = pixels[src_idx + 1];
+        }
+    }
+    resized
+}
+
+pub fn parse_png_to_rgb555_top_down(png: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let img =
+        image::load_from_memory(png).map_err(|e| format!("failed to decode capture image: {e}"))?;
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    if w == 0 || h == 0 {
+        return Err("empty capture dimensions".to_string());
+    }
+    let raw = rgb.as_raw();
+    let mut out = Vec::with_capacity((w as usize) * (h as usize) * 2);
+    for px in raw.as_chunks::<3>().0 {
+        let word =
+            (((px[0] as u16) >> 3) << 10) | (((px[1] as u16) >> 3) << 5) | ((px[2] as u16) >> 3);
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    Ok((w, h, out))
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MacCgPoint {
+    x: f64,
+    y: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGEventCreateMouseEvent(
+        source: *const libc::c_void,
+        mouse_type: u32,
+        mouse_cursor_position: MacCgPoint,
+        mouse_button: u32,
+    ) -> *mut libc::c_void;
+    fn CGEventCreateScrollWheelEvent2(
+        source: *const libc::c_void,
+        units: u32,
+        wheel_count: u32,
+        wheel1: i32,
+        wheel2: i32,
+        wheel3: i32,
+    ) -> *mut libc::c_void;
+    fn CGEventCreateKeyboardEvent(
+        source: *const libc::c_void,
+        virtual_key: u16,
+        key_down: bool,
+    ) -> *mut libc::c_void;
+    fn CGEventKeyboardSetUnicodeString(
+        event: *mut libc::c_void,
+        string_length: libc::c_ulong,
+        unicode_string: *const u16,
+    );
+    fn CGEventPost(tap: u32, event: *mut libc::c_void);
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(the_dict: *const libc::c_void) -> bool;
+    static kAXTrustedCheckOptionPrompt: *const libc::c_void;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    static kCFBooleanTrue: *const libc::c_void;
+    static kCFTypeDictionaryKeyCallBacks: u8;
+    static kCFTypeDictionaryValueCallBacks: u8;
+    fn CFDictionaryCreate(
+        allocator: *const libc::c_void,
+        keys: *const *const libc::c_void,
+        values: *const *const libc::c_void,
+        num_values: isize,
+        key_callbacks: *const libc::c_void,
+        value_callbacks: *const libc::c_void,
+    ) -> *mut libc::c_void;
+    fn CFRelease(cf: *const libc::c_void);
+}
+
+pub fn ensure_macos_host_permissions(prompt: bool) -> (bool, bool) {
+    #[cfg(target_os = "macos")]
+    {
+        static PROMPT_ONCE: std::sync::Once = std::sync::Once::new();
+        let allow_prompt = prompt && std::env::var_os("ULTRADESK_SKIP_MACOS_PROMPT").is_none();
+        let mut screen_ok = unsafe { CGPreflightScreenCaptureAccess() };
+        let mut ax_ok = unsafe { AXIsProcessTrusted() };
+        if allow_prompt && (!screen_ok || !ax_ok) {
+            PROMPT_ONCE.call_once(|| {
+                if !screen_ok {
+                    screen_ok = unsafe { CGRequestScreenCaptureAccess() };
+                }
+                if !ax_ok {
+                    unsafe {
+                        let keys = [kAXTrustedCheckOptionPrompt];
+                        let values = [kCFBooleanTrue];
+                        let dict = CFDictionaryCreate(
+                            std::ptr::null(),
+                            keys.as_ptr(),
+                            values.as_ptr(),
+                            1,
+                            &kCFTypeDictionaryKeyCallBacks as *const u8 as *const libc::c_void,
+                            &kCFTypeDictionaryValueCallBacks as *const u8 as *const libc::c_void,
+                        );
+                        if !dict.is_null() {
+                            ax_ok = AXIsProcessTrustedWithOptions(dict);
+                            CFRelease(dict);
+                        }
+                    }
+                }
+            });
+        }
+        (screen_ok, ax_ok)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = prompt;
+        (true, true)
+    }
+}
+
+pub fn vk_to_macos_keycode(vk: u8) -> Option<u16> {
+    Some(match vk {
+        0x08 => 0x33,
+        0x09 => 0x30,
+        0x0d => 0x24,
+        0x10 | 0xa0 => 0x38,
+        0xa1 => 0x3c,
+        0x11 | 0xa2 => 0x3b,
+        0xa3 => 0x3e,
+        0x12 | 0xa4 => 0x3a,
+        0xa5 => 0x3d,
+        0x14 => 0x39,
+        0x1b => 0x35,
+        0x20 => 0x31,
+        0x21 => 0x74,
+        0x22 => 0x79,
+        0x23 => 0x77,
+        0x24 => 0x73,
+        0x25 => 0x7b,
+        0x26 => 0x7e,
+        0x27 => 0x7c,
+        0x28 => 0x7d,
+        0x2e => 0x75,
+        0x30 => 0x1d,
+        0x31 => 0x12,
+        0x32 => 0x13,
+        0x33 => 0x14,
+        0x34 => 0x15,
+        0x35 => 0x17,
+        0x36 => 0x16,
+        0x37 => 0x1a,
+        0x38 => 0x1c,
+        0x39 => 0x19,
+        0x41 => 0x00,
+        0x42 => 0x0b,
+        0x43 => 0x08,
+        0x44 => 0x02,
+        0x45 => 0x0e,
+        0x46 => 0x03,
+        0x47 => 0x05,
+        0x48 => 0x04,
+        0x49 => 0x22,
+        0x4a => 0x26,
+        0x4b => 0x28,
+        0x4c => 0x25,
+        0x4d => 0x2e,
+        0x4e => 0x2d,
+        0x4f => 0x1f,
+        0x50 => 0x23,
+        0x51 => 0x0c,
+        0x52 => 0x0f,
+        0x53 => 0x01,
+        0x54 => 0x11,
+        0x55 => 0x20,
+        0x56 => 0x09,
+        0x57 => 0x0d,
+        0x58 => 0x07,
+        0x59 => 0x10,
+        0x5a => 0x06,
+        0x5b | 0x5c => 0x37,
+        0x70 => 0x7a,
+        0x71 => 0x78,
+        0x72 => 0x63,
+        0x73 => 0x76,
+        0x74 => 0x60,
+        0x75 => 0x61,
+        0x76 => 0x62,
+        0x77 => 0x64,
+        0x78 => 0x65,
+        0x79 => 0x6d,
+        0x7a => 0x67,
+        0x7b => 0x6f,
+        0xba => 0x29,
+        0xbb => 0x18,
+        0xbc => 0x2b,
+        0xbd => 0x1b,
+        0xbe => 0x2f,
+        0xbf => 0x2c,
+        0xc0 => 0x32,
+        0xdb => 0x21,
+        0xdc => 0x2a,
+        0xdd => 0x1e,
+        0xde => 0x27,
+        _ => return None,
+    })
+}
+
+pub struct MacOsCapturer {
+    shared_size: Arc<Mutex<(u32, u32)>>,
+}
+
+impl MacOsCapturer {
+    pub fn probe(shared_size: Arc<Mutex<(u32, u32)>>) -> Result<Self, String> {
+        if !cfg!(target_os = "macos") {
+            return Err("not a macOS host".to_string());
+        }
+        let _ = ensure_macos_host_permissions(true);
+        let (w, h, _) = Self::capture_png_rgb555()?;
+        *shared_size.lock().unwrap() = (w, h);
+        Ok(Self { shared_size })
+    }
+
+    fn capture_png_rgb555() -> Result<(u32, u32, Vec<u8>), String> {
+        let tmp = std::env::temp_dir().join(format!(
+            "ultradesk_mac_cap_{}_{}.png",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let status = Command::new("/usr/sbin/screencapture")
+            .args(["-x", "-t", "png"])
+            .arg(&tmp)
+            .status()
+            .map_err(|e| format!("screencapture launch failed: {e}"))?;
+        let bytes_res = std::fs::read(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        if !status.success() {
+            return Err("screencapture exited with non-zero status".to_string());
+        }
+        let bytes = bytes_res.map_err(|e| format!("failed reading screencapture output: {e}"))?;
+        parse_png_to_rgb555_top_down(&bytes)
+    }
+}
+
+impl Capturer for MacOsCapturer {
+    fn enumerate_displays(&mut self) -> Result<Vec<MonitorRect>, String> {
+        let (mut w, mut h) = *self.shared_size.lock().unwrap();
+        if w == 0 || h == 0 {
+            if let Ok((pw, ph, _)) = Self::capture_png_rgb555() {
+                w = pw;
+                h = ph;
+                *self.shared_size.lock().unwrap() = (w, h);
             }
-            return Ok(cropped);
         }
-        let mut resized = vec![0u8; target_w * target_h * 2];
-        for y in 0..target_h {
-            let sy = (y * src_h / target_h.max(1)).min(src_h.saturating_sub(1));
-            for x in 0..target_w {
-                let sx = (x * src_w / target_w.max(1)).min(src_w.saturating_sub(1));
-                let src_idx = (sy * src_w + sx) * 2;
-                let dst_idx = (y * target_w + x) * 2;
-                resized[dst_idx] = pixels[src_idx];
-                resized[dst_idx + 1] = pixels[src_idx + 1];
+        if w > 0 && h > 0 {
+            Ok(vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: w as i32,
+                bottom: h as i32,
+            }])
+        } else {
+            Err("unable to determine macOS display dimensions".to_string())
+        }
+    }
+
+    fn capture_screen(&mut self, rect: MonitorRect) -> Result<Vec<u8>, String> {
+        let (w, h, pixels) = Self::capture_png_rgb555()?;
+        *self.shared_size.lock().unwrap() = (w, h);
+        Ok(crop_or_resize_rgb555(&pixels, w as usize, h as usize, rect))
+    }
+}
+
+pub struct MacOsCommandInjector {
+    pub injected_packets: Arc<Mutex<Vec<Vec<u8>>>>,
+    pub use_commands: bool,
+}
+
+impl MacOsCommandInjector {
+    pub fn new(use_commands: bool) -> Self {
+        Self {
+            injected_packets: Arc::new(Mutex::new(Vec::new())),
+            use_commands,
+        }
+    }
+}
+
+impl Injector for MacOsCommandInjector {
+    fn inject_event(&mut self, packet: &[u8]) -> Result<(), String> {
+        self.injected_packets.lock().unwrap().push(packet.to_vec());
+        if !self.use_commands {
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(evt) = decode_host_input(packet) {
+            unsafe {
+                match evt {
+                    HostInputEvent::Mouse {
+                        msg, x, y, wheel, ..
+                    } => {
+                        let pt = MacCgPoint {
+                            x: x.max(0) as f64,
+                            y: y.max(0) as f64,
+                        };
+                        match msg {
+                            0x0200 => {
+                                let ev = CGEventCreateMouseEvent(std::ptr::null(), 5, pt, 0);
+                                if !ev.is_null() {
+                                    CGEventPost(0, ev);
+                                    CFRelease(ev);
+                                }
+                            }
+                            0x0201 | 0x0203 => {
+                                let ev = CGEventCreateMouseEvent(std::ptr::null(), 1, pt, 0);
+                                if !ev.is_null() {
+                                    CGEventPost(0, ev);
+                                    CFRelease(ev);
+                                }
+                            }
+                            0x0202 => {
+                                let ev = CGEventCreateMouseEvent(std::ptr::null(), 2, pt, 0);
+                                if !ev.is_null() {
+                                    CGEventPost(0, ev);
+                                    CFRelease(ev);
+                                }
+                            }
+                            0x0204 | 0x0206 => {
+                                let ev = CGEventCreateMouseEvent(std::ptr::null(), 3, pt, 1);
+                                if !ev.is_null() {
+                                    CGEventPost(0, ev);
+                                    CFRelease(ev);
+                                }
+                            }
+                            0x0205 => {
+                                let ev = CGEventCreateMouseEvent(std::ptr::null(), 4, pt, 1);
+                                if !ev.is_null() {
+                                    CGEventPost(0, ev);
+                                    CFRelease(ev);
+                                }
+                            }
+                            0x0207 | 0x0209 => {
+                                let ev = CGEventCreateMouseEvent(std::ptr::null(), 25, pt, 2);
+                                if !ev.is_null() {
+                                    CGEventPost(0, ev);
+                                    CFRelease(ev);
+                                }
+                            }
+                            0x0208 => {
+                                let ev = CGEventCreateMouseEvent(std::ptr::null(), 26, pt, 2);
+                                if !ev.is_null() {
+                                    CGEventPost(0, ev);
+                                    CFRelease(ev);
+                                }
+                            }
+                            0x020A => {
+                                let steps = (wheel as i32 / 120).clamp(-10, 10);
+                                if steps != 0 {
+                                    let ev = CGEventCreateScrollWheelEvent2(
+                                        std::ptr::null(),
+                                        1,
+                                        1,
+                                        steps,
+                                        0,
+                                        0,
+                                    );
+                                    if !ev.is_null() {
+                                        CGEventPost(0, ev);
+                                        CFRelease(ev);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    HostInputEvent::Key { kind, vk, ch, .. } => {
+                        let down = kind == KEY_DOWN || kind == SYS_KEY_DOWN;
+                        if vk == VK_PACKET {
+                            if down && ch >= 0x20 {
+                                let down_ev = CGEventCreateKeyboardEvent(std::ptr::null(), 0, true);
+                                if !down_ev.is_null() {
+                                    let unit = [ch];
+                                    CGEventKeyboardSetUnicodeString(down_ev, 1, unit.as_ptr());
+                                    CGEventPost(0, down_ev);
+                                    CFRelease(down_ev);
+                                }
+                                let up_ev = CGEventCreateKeyboardEvent(std::ptr::null(), 0, false);
+                                if !up_ev.is_null() {
+                                    let unit = [ch];
+                                    CGEventKeyboardSetUnicodeString(up_ev, 1, unit.as_ptr());
+                                    CGEventPost(0, up_ev);
+                                    CFRelease(up_ev);
+                                }
+                            }
+                        } else if let Some(kc) = vk_to_macos_keycode(vk) {
+                            let ev = CGEventCreateKeyboardEvent(std::ptr::null(), kc, down);
+                            if !ev.is_null() {
+                                CGEventPost(0, ev);
+                                CFRelease(ev);
+                            }
+                        }
+                    }
+                }
             }
         }
-        Ok(resized)
+        Ok(())
+    }
+
+    fn release_all(&mut self) {
+        self.injected_packets
+            .lock()
+            .unwrap()
+            .push(b"RELEASE_ALL".to_vec());
     }
 }
 
@@ -2269,6 +2694,7 @@ pub fn ascii_to_evdev(ch: u16) -> Option<(u16, bool)> {
     })
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct UinputInputId {
     bustype: u16,
@@ -2277,6 +2703,7 @@ struct UinputInputId {
     version: u16,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct UinputSetup {
     id: UinputInputId,
@@ -2284,6 +2711,7 @@ struct UinputSetup {
     ff_effects_max: u32,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct UinputAbsinfo {
     value: i32,
@@ -2294,12 +2722,14 @@ struct UinputAbsinfo {
     resolution: i32,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct UinputAbsSetup {
     code: u16,
     absinfo: UinputAbsinfo,
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct RawLinuxInputEvent {
     tv_sec: libc::c_long,
@@ -2309,16 +2739,26 @@ struct RawLinuxInputEvent {
     value: i32,
 }
 
+#[cfg(target_os = "linux")]
 const UI_SET_EVBIT: libc::Ioctl = 0x4004_5564 as libc::Ioctl;
+#[cfg(target_os = "linux")]
 const UI_SET_KEYBIT: libc::Ioctl = 0x4004_5565 as libc::Ioctl;
+#[cfg(target_os = "linux")]
 const UI_SET_RELBIT: libc::Ioctl = 0x4004_5566 as libc::Ioctl;
+#[cfg(target_os = "linux")]
 const UI_SET_ABSBIT: libc::Ioctl = 0x4004_5567 as libc::Ioctl;
+#[cfg(target_os = "linux")]
 const UI_DEV_SETUP: libc::Ioctl = 0x405c_5503 as libc::Ioctl;
+#[cfg(target_os = "linux")]
 const UI_ABS_SETUP: libc::Ioctl = 0x401c_5504 as libc::Ioctl;
+#[cfg(target_os = "linux")]
 const UI_DEV_CREATE: libc::Ioctl = 0x5501 as libc::Ioctl;
+#[cfg(target_os = "linux")]
 const UI_DEV_DESTROY: libc::Ioctl = 0x5502 as libc::Ioctl;
+#[cfg(target_os = "linux")]
 const UINPUT_ABS_MAX: i32 = 65535;
 
+#[cfg(target_os = "linux")]
 pub struct UinputInjector {
     pointer_fd: i32,
     keyboard_fd: i32,
@@ -2328,6 +2768,7 @@ pub struct UinputInjector {
     wheel_remainder: i32,
 }
 
+#[cfg(target_os = "linux")]
 impl UinputInjector {
     pub fn connect(shared_size: Arc<Mutex<(u32, u32)>>) -> Result<Self, String> {
         unsafe {
@@ -2481,6 +2922,7 @@ impl UinputInjector {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for UinputInjector {
     fn drop(&mut self) {
         self.release_all();
@@ -2493,6 +2935,7 @@ impl Drop for UinputInjector {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Injector for UinputInjector {
     fn inject_event(&mut self, packet: &[u8]) -> Result<(), String> {
         let Some(event) = decode_host_input(packet) else {
@@ -2576,6 +3019,25 @@ impl Injector for UinputInjector {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+pub struct UinputInjector;
+
+#[cfg(not(target_os = "linux"))]
+impl UinputInjector {
+    pub fn connect(_shared_size: Arc<Mutex<(u32, u32)>>) -> Result<Self, String> {
+        Err("uinput is only supported on Linux".to_string())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Injector for UinputInjector {
+    fn inject_event(&mut self, _packet: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn release_all(&mut self) {}
+}
+
 pub struct DesktopBackend {
     pub name: &'static str,
     pub capturer: Box<dyn Capturer>,
@@ -2593,6 +3055,15 @@ impl DesktopBackend {
 
     pub fn auto_detect() -> Self {
         let shared_size = Arc::new(Mutex::new((1920u32, 1080u32)));
+        if cfg!(target_os = "macos") {
+            if let Ok(capturer) = MacOsCapturer::probe(shared_size.clone()) {
+                return Self {
+                    name: "MacOsScreencaptureBackend",
+                    capturer: Box::new(capturer),
+                    injector: Box::new(MacOsCommandInjector::new(true)),
+                };
+            }
+        }
         if is_wayland_session() {
             if let Ok(capturer) = WaylandGrimCapturer::probe(shared_size.clone()) {
                 if let Ok(injector) = UinputInjector::connect(shared_size.clone()) {
@@ -4503,5 +4974,36 @@ mod tests {
             clip_acts,
             vec![HostAction::ClipboardReceived("secret clip".to_string())]
         );
+    }
+
+    #[test]
+    fn test_macos_png_to_rgb555_and_command_injector() {
+        let png_bytes = crate::server::DEFAULT_APP_ICON_PNG;
+        let (w, h, rgb555) = parse_png_to_rgb555_top_down(png_bytes).unwrap();
+        assert!(w > 0 && h > 0);
+        assert_eq!(rgb555.len(), (w as usize) * (h as usize) * 2);
+
+        let sub = MonitorRect {
+            left: 0,
+            top: 0,
+            right: 4,
+            bottom: 4,
+        };
+        let cropped = crop_or_resize_rgb555(&rgb555, w as usize, h as usize, sub);
+        assert_eq!(cropped.len(), 4 * 4 * 2);
+
+        let mut inj = MacOsCommandInjector::new(false);
+        inj.inject_event(b"8|||512|||0|||10|||20").unwrap();
+        inj.release_all();
+        let recorded = inj.injected_packets.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0], b"8|||512|||0|||10|||20".to_vec());
+        assert_eq!(recorded[1], b"RELEASE_ALL".to_vec());
+
+        assert_eq!(vk_to_macos_keycode(0x41), Some(0x00));
+        assert_eq!(vk_to_macos_keycode(0x0d), Some(0x24));
+        assert_eq!(vk_to_macos_keycode(0x1b), Some(0x35));
+        assert_eq!(vk_to_macos_keycode(0x5b), Some(0x37));
+        let _ = ensure_macos_host_permissions(false);
     }
 }

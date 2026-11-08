@@ -280,6 +280,8 @@ enum UserEvent {
     IpcMessage(String),
     MenuEvent(muda::MenuEvent),
     ExitRequested,
+    #[cfg(not(target_os = "linux"))]
+    Tick,
 }
 
 #[cfg(feature = "gui")]
@@ -288,11 +290,14 @@ pub fn launch_native_gui(
     session: ControlSession,
     shutdown: Arc<AtomicBool>,
 ) -> GuiLaunchOutcome {
-    if config.disable_dmabuf {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-    }
-    if config.disable_compositing {
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    #[cfg(target_os = "linux")]
+    {
+        if config.disable_dmabuf {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        if config.disable_compositing {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
     }
 
     let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -323,7 +328,7 @@ pub fn launch_native_gui(
     GuiLaunchOutcome::FallbackToBrowser("GUI feature disabled at compile time".to_string())
 }
 
-#[cfg(feature = "gui")]
+#[cfg(all(feature = "gui", target_os = "linux"))]
 fn run_native_gui_inner(
     config: GuiConfig,
     session: ControlSession,
@@ -541,6 +546,207 @@ fn run_native_gui_inner(
         }
     });
 
+    shutdown.store(true, Ordering::SeqCst);
+    session.disconnect();
+    GuiLaunchOutcome::ClosedCleanly
+}
+
+#[cfg(all(feature = "gui", not(target_os = "linux")))]
+fn run_native_gui_inner(
+    config: GuiConfig,
+    session: ControlSession,
+    shutdown: Arc<AtomicBool>,
+) -> GuiLaunchOutcome {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tao::platform::run_return::EventLoopExtRunReturn;
+    use tao::window::{Icon, WindowBuilder};
+
+    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+
+    let icon = config.icon_bytes.and_then(|bytes| {
+        image::load_from_memory(bytes).ok().and_then(|img| {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            Icon::from_rgba(rgba.into_raw(), w, h).ok()
+        })
+    });
+
+    let mut window_builder = WindowBuilder::new()
+        .with_title(&config.title)
+        .with_inner_size(tao::dpi::LogicalSize::new(
+            config.default_width,
+            config.default_height,
+        ));
+
+    if let Some(ic) = icon {
+        window_builder = window_builder.with_window_icon(Some(ic));
+    }
+
+    let window = match window_builder.build(&event_loop) {
+        Ok(w) => w,
+        Err(e) => {
+            return GuiLaunchOutcome::FallbackToBrowser(format!("failed to build window: {}", e))
+        }
+    };
+
+    let ipc_proxy = event_loop.create_proxy();
+    let webview_builder = wry::WebViewBuilder::new()
+        .with_url(&config.url)
+        .with_ipc_handler(move |req| {
+            let body = req.into_body();
+            let _ = ipc_proxy.send_event(UserEvent::IpcMessage(body));
+        });
+
+    let webview = match webview_builder.build(&window) {
+        Ok(wv) => Rc::new(wv),
+        Err(e) => {
+            return GuiLaunchOutcome::FallbackToBrowser(format!(
+                "failed to build native webview: {}",
+                e
+            ))
+        }
+    };
+
+    let _menu_guard = if config.enable_native_menubar {
+        let menu = build_native_menubar();
+        #[cfg(target_os = "macos")]
+        menu.init_for_nsapp();
+        let menu_proxy = event_loop.create_proxy();
+        muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
+            let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
+        }));
+        Some(menu)
+    } else {
+        None
+    };
+
+    let clip_machine = Rc::new(RefCell::new(ClipboardSyncMachine::new()));
+    let viewer_path = config.viewer_path.clone();
+    let mut last_mtime: Option<std::time::SystemTime> = viewer_path
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()));
+
+    let ticker_stop = Arc::new(AtomicBool::new(false));
+    let ticker_stop_bg = ticker_stop.clone();
+    let shutdown_bg = shutdown.clone();
+    let tick_proxy = event_loop.create_proxy();
+    std::thread::spawn(move || {
+        while !ticker_stop_bg.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(500));
+            if shutdown_bg.load(Ordering::SeqCst) {
+                let _ = tick_proxy.send_event(UserEvent::ExitRequested);
+                break;
+            }
+            if tick_proxy.send_event(UserEvent::Tick).is_err() {
+                break;
+            }
+        }
+    });
+
+    let webview_loop = webview.clone();
+    let window_loop = &window;
+
+    event_loop.run_return(|event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        match event {
+            tao::event::Event::WindowEvent {
+                event: tao::event::WindowEvent::CloseRequested,
+                ..
+            } => {
+                *control_flow = ControlFlow::Exit;
+            }
+            tao::event::Event::UserEvent(user_event) => match user_event {
+                UserEvent::ExitRequested => {
+                    *control_flow = ControlFlow::Exit;
+                }
+                UserEvent::Tick => {
+                    if shutdown.load(Ordering::SeqCst) {
+                        *control_flow = ControlFlow::Exit;
+                        return;
+                    }
+                    if let Some(ref path) = viewer_path {
+                        if let Ok(metadata) = std::fs::metadata(path) {
+                            if let Ok(mtime) = metadata.modified() {
+                                if let Some(prev) = last_mtime {
+                                    if mtime > prev {
+                                        last_mtime = Some(mtime);
+                                        let _ = webview_loop
+                                            .evaluate_script("window.location.reload()");
+                                    }
+                                } else {
+                                    last_mtime = Some(mtime);
+                                }
+                            }
+                        }
+                    }
+
+                    let snap = session.snapshot();
+                    let is_connected = snap.state == "connected";
+                    let mut machine = clip_machine.borrow_mut();
+                    machine.step(ClipboardEvent::ConnectionChanged(is_connected));
+
+                    if !snap.clipboard_remote.is_empty() {
+                        if let Some(ClipboardAction::WriteToSystem(remote_text)) =
+                            machine.step(ClipboardEvent::RemoteTextReceived(snap.clipboard_remote))
+                        {
+                            let _ = crate::clipboard::set_linux_system_clipboard(&remote_text);
+                        }
+                    }
+
+                    if let Some(text) = crate::clipboard::get_linux_system_clipboard() {
+                        if let Some(ClipboardAction::PostToRemote(post_text)) =
+                            machine.step(ClipboardEvent::SystemTextRead(text))
+                        {
+                            let _ = session.send_clipboard(&post_text, true);
+                        }
+                    }
+                }
+                UserEvent::IpcMessage(msg) => {
+                    if let Ok(action) = serde_json::from_str::<ToolbarAction>(&msg) {
+                        dispatch_toolbar_action(
+                            action,
+                            window_loop,
+                            &webview_loop,
+                            &session,
+                            control_flow,
+                            true,
+                        );
+                    } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&msg) {
+                        if val.get("action").and_then(|a| a.as_str()) == Some("input") {
+                            if let Some(event_val) =
+                                val.get("payload").or_else(|| val.get("event"))
+                            {
+                                if let Ok(event) = serde_json::from_value::<
+                                    crate::input::InputEvent,
+                                >(event_val.clone())
+                                {
+                                    let _ = session.send_input(event);
+                                }
+                            }
+                        }
+                    }
+                }
+                UserEvent::MenuEvent(menu_event) => {
+                    let id_str: &str = menu_event.id.as_ref();
+                    if let Some(action) = menu_id_to_action(id_str) {
+                        dispatch_toolbar_action(
+                            action,
+                            window_loop,
+                            &webview_loop,
+                            &session,
+                            control_flow,
+                            false,
+                        );
+                    }
+                }
+            },
+            _ => {}
+        }
+    });
+
+    ticker_stop.store(true, Ordering::SeqCst);
     shutdown.store(true, Ordering::SeqCst);
     session.disconnect();
     GuiLaunchOutcome::ClosedCleanly

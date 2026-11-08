@@ -221,13 +221,17 @@ const GTK_CLIPBOARD_SET_PY: &str = "import sys, gi; gi.require_version('Gtk', '3
 const GTK_CLIPBOARD_GET_PY: &str = "import sys, gi; gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); from gi.repository import Gtk, Gdk; Gtk.init_check(); c = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD); t = c.wait_for_text(); sys.stdout.write(t if t is not None else '')";
 
 fn has_graphical_display() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+    cfg!(target_os = "macos")
+        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
         || std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty())
 }
 
 pub fn set_linux_system_clipboard(text: &str) -> bool {
     if !has_graphical_display() {
         return false;
+    }
+    if cfg!(target_os = "macos") && run_clipboard_write("pbcopy", &[], text) {
+        return true;
     }
     let mut any_ok = false;
     if run_clipboard_write("wl-copy", &[], text) {
@@ -248,12 +252,22 @@ pub fn get_linux_system_clipboard() -> Option<String> {
     if !has_graphical_display() {
         return None;
     }
-    let candidates: &[(&str, &[&str])] = &[
-        ("wl-paste", &["--no-newline"]),
-        ("xclip", &["-selection", "clipboard", "-o"]),
-        ("xsel", &["--clipboard", "--output"]),
-        ("python3", &["-c", GTK_CLIPBOARD_GET_PY]),
-    ];
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[
+            ("pbpaste", &[]),
+            ("wl-paste", &["--no-newline"]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+            ("xsel", &["--clipboard", "--output"]),
+            ("python3", &["-c", GTK_CLIPBOARD_GET_PY]),
+        ]
+    } else {
+        &[
+            ("wl-paste", &["--no-newline"]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+            ("xsel", &["--clipboard", "--output"]),
+            ("python3", &["-c", GTK_CLIPBOARD_GET_PY]),
+        ]
+    };
     let mut saw_empty_success = false;
     for (bin, args) in candidates {
         if let Ok(output) = Command::new(bin).args(*args).output() {

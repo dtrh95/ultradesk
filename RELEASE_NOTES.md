@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.0
+## UltraDesk (Rust Edition) v1.0.1
 
-First stable **v1.0.0** release of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — a Linux-native remote desktop controller and host written in Rust, wire-compatible with the UltraViewer 6.6.133 protocol and enhanced with end-to-end encryption (`UDE2E1`), Wayland and X11 display/input backends, and a modern Angular + native GTK/WebKit2 (`tao`/`wry`/`muda`) desktop interface.
+Release **v1.0.1** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) adds native **macOS** (`arm64` Apple Silicon and `x86_64` Intel) support, native Cocoa / `WKWebView` GUI integration, automatic macOS TCC permission requests (`Screen Recording` and `Accessibility`), CoreGraphics (`CGEvent`) input injection, and signed `.dmg` / `.app.tar.gz` installers alongside Linux multi-distro packages.
 
 ---
 

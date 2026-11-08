@@ -178,9 +178,28 @@ fn find_asset_file(file_name: &str) -> Option<PathBuf> {
             Some(share_dir.join(file_name))
         })
         .unwrap_or_default();
+    let exe_bundle_asset = env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| {
+            let prefix = p.parent()?.parent()?;
+            let res_dir = prefix.join("Resources");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let meta = fs::metadata(&res_dir).ok()?;
+                let euid = unsafe { libc::geteuid() };
+                if (meta.mode() & 0o002) != 0 || (meta.uid() != 0 && meta.uid() != euid) {
+                    return None;
+                }
+            }
+            Some(res_dir.join(file_name))
+        })
+        .unwrap_or_default();
     let candidates = [
         PathBuf::from("/usr/share/ultradesk-rust").join(file_name),
         exe_share_asset,
+        exe_bundle_asset,
         exe_dir_asset,
         user_config_asset,
     ];
@@ -190,12 +209,22 @@ fn find_asset_file(file_name: &str) -> Option<PathBuf> {
 }
 
 fn open_url_in_browser(url: &str) -> bool {
-    let launchers: &[(&str, &[&str])] = &[
-        ("xdg-open", &[url]),
-        ("gio", &["open", url]),
-        ("sensible-browser", &[url]),
-        ("x-www-browser", &[url]),
-    ];
+    let launchers: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[
+            ("open", &[url]),
+            ("xdg-open", &[url]),
+            ("gio", &["open", url]),
+            ("sensible-browser", &[url]),
+            ("x-www-browser", &[url]),
+        ]
+    } else {
+        &[
+            ("xdg-open", &[url]),
+            ("gio", &["open", url]),
+            ("sensible-browser", &[url]),
+            ("x-www-browser", &[url]),
+        ]
+    };
     for (bin, args) in launchers {
         if let Ok(child) = Command::new(bin)
             .args(*args)
@@ -352,7 +381,9 @@ fn main() {
     let shutdown = portal.shutdown.clone();
     let server_handle = portal.spawn(listener);
 
-    let has_display = env::var("DISPLAY").is_ok() || env::var("WAYLAND_DISPLAY").is_ok();
+    let has_display = cfg!(target_os = "macos")
+        || env::var("DISPLAY").is_ok()
+        || env::var("WAYLAND_DISPLAY").is_ok();
     let mut browser_fallback_needed = args.open_browser;
     if !args.no_gui && has_display {
         let viewer_path = find_asset_file("viewer.html");

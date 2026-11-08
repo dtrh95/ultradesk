@@ -1,6 +1,6 @@
 [package]
 name = "ultradesk-rust"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 license = "MIT"
 description = "Linux-native UltraDesk remote desktop client and host written in Rust with Screen, Input, Audio, Clipboard Sync, and File Transfer"
@@ -35,4 +35,6 @@ zstd = "0.13"
 tao = { version = "0.37", optional = true }
 wry = { version = "0.57", optional = true }
 muda = { version = "0.21", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }

@@ -1,5 +1,5 @@
 Name:           ultradesk-rust
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        Remote desktop controller and host for Linux (Rust Edition)
 License:        MIT
@@ -66,7 +66,7 @@ elif [ $1 -eq 2 ]; then
 fi
 
 %changelog
-* Sun Nov 08 2026 Hieu Doan <dtrunghieu96@gmail.com> - 1.0.0-1
-- Release UltraDesk (Rust Edition) 1.0.0 with E2E encryption, security hardening, and multi-distro packaging
+* Sun Nov 08 2026 Hieu Doan <dtrunghieu96@gmail.com> - 1.0.1-1
+- Release UltraDesk (Rust Edition) 1.0.1 with macOS support, TCC permission prompts, and DMG packaging
 - Support screen streaming, remote input, audio, clipboard sync, and file transfer
 - Add bilingual VI/EN portal and collapsible session toolbar
