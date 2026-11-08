@@ -18,7 +18,15 @@ export interface FrameFetchResult {
 @Injectable({ providedIn: 'root' })
 export class PortalHttpAdapter {
   async fetchStatus(): Promise<SessionSnapshot> {
-    const response = await fetch('/status', { signal: AbortSignal.timeout(3000) });
+    const response = await fetch('/status', {
+      headers: {
+        'X-Viewer-Token': VIEWER_TOKEN,
+      },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
     const raw: unknown = await response.json();
     return parseSessionSnapshot(raw);
   }
@@ -61,6 +69,9 @@ export class PortalHttpAdapter {
       : `/frame.jpg?q=${targetQuality}`;
     const response = await fetch(url, {
       cache: 'no-store',
+      headers: {
+        'X-Viewer-Token': VIEWER_TOKEN,
+      },
       signal: AbortSignal.timeout(3000),
     });
     if (response.status === 304) {

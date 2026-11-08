@@ -1639,4 +1639,74 @@ mod tests {
         shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = handle.join();
     }
+
+    #[test]
+    fn test_macos_inherited_nonblocking_socket_and_keep_alive_no_431() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+
+        let session = ControlSession::new();
+        let token = "test-viewer-token".to_string();
+        let bind_addr = format!("127.0.0.1:{}", port);
+
+        let srv_session = session.clone();
+        let srv_token = token.clone();
+        let srv_bind = bind_addr.clone();
+        let srv_thread = std::thread::spawn(move || {
+            let stream = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(e) => panic!("accept failed: {}", e),
+                }
+            };
+            stream.set_nonblocking(true).unwrap();
+            let _ =
+                crate::server::handle_http_client(stream, srv_session, None, &srv_token, &srv_bind);
+        });
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let req1 = format!(
+            "GET /status HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Viewer-Token: {}\r\nConnection: keep-alive\r\n\r\n",
+            port, token
+        );
+        client.write_all(req1.as_bytes()).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let req2 = format!(
+            "GET /status HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Viewer-Token: {}\r\nConnection: close\r\n\r\n",
+            port, token
+        );
+        client.write_all(req2.as_bytes()).unwrap();
+        let mut combined_resp = String::new();
+        client.read_to_string(&mut combined_resp).unwrap();
+        assert_eq!(
+            combined_resp.matches("HTTP/1.1 200 OK").count(),
+            2,
+            "Expected two 200 OK responses on macOS inherited nonblocking keep-alive socket, got:\n{}",
+            combined_resp
+        );
+        assert!(!combined_resp.contains("Request line too large"));
+        let _ = srv_thread.join();
+
+        let (portal, portal_listener) = PortalServer::bind("127.0.0.1", 0, session, None).unwrap();
+        let pport = portal.port;
+        let pshutdown = portal.shutdown.clone();
+        let phandle = portal.spawn(portal_listener);
+
+        let mut bad_client = TcpStream::connect(("127.0.0.1", pport)).unwrap();
+        let oversized_line = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(9000));
+        let _ = bad_client.write_all(oversized_line.as_bytes());
+        let mut bad_resp = String::new();
+        let _ = bad_client.read_to_string(&mut bad_resp);
+        assert!(bad_resp.starts_with("HTTP/1.1 431 Request Header Fields Too Large"));
+        assert!(bad_resp.contains("Request line too large"));
+
+        pshutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = phandle.join();
+    }
 }

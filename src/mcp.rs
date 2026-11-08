@@ -1835,6 +1835,7 @@ impl McpServer {
             while !self.shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
                         let _ = stream.set_nodelay(true);
                         let session = self.session.clone();
                         let token = self.auth_token.clone();
@@ -1882,6 +1883,8 @@ fn handle_mcp_tcp_client(
     session: ControlSession,
     auth_token: Option<&str>,
 ) -> std::io::Result<()> {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let mut reader = BufReader::new(stream.try_clone()?);

@@ -227,6 +227,7 @@ impl PortalServer {
             while !self.shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
                         let _ = stream.set_nodelay(true);
                         let session = self.session.clone();
                         let viewer_path = self.viewer_path.clone();
@@ -326,24 +327,30 @@ fn write_json_response(
     )
 }
 
-fn read_bounded_line<R: BufRead>(
-    reader: &mut R,
-    max_len: usize,
-) -> std::io::Result<Option<String>> {
+#[derive(Debug)]
+enum BoundedLineRead {
+    Line(String),
+    Eof,
+    TooLarge,
+    IoError,
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R, max_len: usize) -> BoundedLineRead {
     let mut buf = Vec::new();
-    let n = reader
+    match reader
         .take((max_len + 1) as u64)
-        .read_until(b'\n', &mut buf)?;
-    if n == 0 {
-        return Ok(None);
+        .read_until(b'\n', &mut buf)
+    {
+        Ok(0) => BoundedLineRead::Eof,
+        Ok(_) => {
+            if buf.len() > max_len && !buf.ends_with(b"\n") {
+                BoundedLineRead::TooLarge
+            } else {
+                BoundedLineRead::Line(String::from_utf8_lossy(&buf).into_owned())
+            }
+        }
+        Err(_) => BoundedLineRead::IoError,
     }
-    if buf.len() > max_len && !buf.ends_with(b"\n") {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "HTTP line exceeds limit",
-        ));
-    }
-    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
 fn is_allowed_origin(origin: &str, bind_addr: &str) -> bool {
@@ -381,13 +388,14 @@ fn extract_cookie_token(cookie_header: &str) -> Option<&str> {
     None
 }
 
-fn handle_http_client(
+pub(crate) fn handle_http_client(
     mut stream: TcpStream,
     session: ControlSession,
     viewer_path: Option<PathBuf>,
     viewer_token: &str,
     bind_addr: &str,
 ) -> std::io::Result<()> {
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -395,9 +403,14 @@ fn handle_http_client(
     let mut reader = BufReader::new(stream.try_clone()?);
     loop {
         let request_line = match read_bounded_line(&mut reader, MAX_HTTP_LINE_BYTES) {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(_) => {
+            BoundedLineRead::Line(line) => {
+                if line == "\r\n" || line == "\n" {
+                    continue;
+                }
+                line
+            }
+            BoundedLineRead::Eof | BoundedLineRead::IoError => break,
+            BoundedLineRead::TooLarge => {
                 let _ = write_json_response(
                     &mut stream,
                     431,
@@ -437,11 +450,15 @@ fn handle_http_client(
         let mut total_header_bytes = request_line.len();
         loop {
             match read_bounded_line(&mut reader, MAX_HTTP_LINE_BYTES) {
-                Ok(None) => {
+                BoundedLineRead::Eof | BoundedLineRead::IoError => {
                     header_read_err = true;
                     break;
                 }
-                Ok(Some(line)) => {
+                BoundedLineRead::TooLarge => {
+                    header_too_large = true;
+                    break;
+                }
+                BoundedLineRead::Line(line) => {
                     if line == "\r\n" || line == "\n" {
                         break;
                     }
@@ -474,10 +491,6 @@ fn handle_http_client(
                             }
                         }
                     }
-                }
-                Err(_) => {
-                    header_too_large = true;
-                    break;
                 }
             }
         }
