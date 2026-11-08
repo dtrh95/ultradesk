@@ -196,6 +196,7 @@ jobs:
     if: ${{ github.event_name == 'release' || github.event.inputs.publish_ppa == 'true' }}
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         series: [jammy, noble]
     runs-on: ubuntu-latest
@@ -226,7 +227,9 @@ jobs:
           echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
           echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
           echo "${LAUNCHPAD_GPG_PRIVATE_KEY}" | gpg --batch --import
-          KEYID=$(gpg --list-secret-keys --with-colons | grep '^sec' | head -1 | cut -d: -f5)
+          FINGERPRINT=$(gpg --list-secret-keys --with-colons | grep '^fpr' | head -1 | cut -d: -f10)
+          echo "${FINGERPRINT}:6:" | gpg --import-ownertrust
+          gpg-connect-agent reloadagent /bye || true
 
           if [ -n "${INPUT_VERSION}" ]; then
             VER="${INPUT_VERSION}"
@@ -243,8 +246,7 @@ jobs:
               ;;
           esac
 
-          tar --exclude='.git' --exclude='debian' --exclude='target' \
-            -czf "../ultradesk-rust_${VER}.orig.tar.gz" .
+          git archive --format=tar --prefix="ultradesk-rust-${VER}/" HEAD | gzip -n > "../ultradesk-rust_${VER}.orig.tar.gz"
           cp -r packaging/debian debian
           cat > debian/changelog << EOF
           ultradesk-rust (${VER}-1~ppa1~${SERIES}1) ${SERIES}; urgency=medium
@@ -254,6 +256,7 @@ jobs:
            -- ${DEBFULLNAME} <${DEBEMAIL}>  $(date -R)
           EOF
 
-          dpkg-buildpackage -S -sa -k"${KEYID}" -nc
-          dput "ppa:${LAUNCHPAD_PPA}" ../ultradesk-rust_${VER}-1~ppa1~${SERIES}1_source.changes
-          gpg --batch --yes --delete-secret-and-public-key "${KEYID}" || true
+          dpkg-buildpackage -S -sa -d -k"${FINGERPRINT}" -nc
+          PPA_TARGET="ppa:${LAUNCHPAD_PPA#ppa:}"
+          dput "${PPA_TARGET}" "../ultradesk-rust_${VER}-1~ppa1~${SERIES}1_source.changes"
+          gpg --batch --yes --delete-secret-and-public-key "${FINGERPRINT}" || true
