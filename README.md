@@ -14,83 +14,158 @@ Session tools run alongside the video stream. You can exchange real-time chat me
 
 ## Install on Linux distributions
 
-### Build from source
+### 1. Debian (`bookworm`, `trixie`, `forky`, `sid`)
 
-Install a Rust toolchain (`cargo` and `rustc`), `pkg-config`, `libx11-dev`, `libxext-dev`, and `libxtst-dev`. Then build and launch the release binary:
+#### Option A: Install prebuilt `.deb` from GitHub Releases
+Download the package matching your Debian codename (`bookworm`, `trixie`, `forky`, or `sid`) from the [Releases](https://github.com/dtrh95/ultradesk/releases) page:
 
 ```bash
-cargo build --release
-./run.sh
+CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-bookworm}")
+curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust_1.0.0-1_amd64_${CODENAME}.deb"
+sudo apt install -y "./ultradesk-rust_1.0.0-1_amd64_${CODENAME}.deb"
 ```
 
-To install the binary, desktop launcher, AppStream metadata, and icons system-wide through the `Makefile`:
+#### Option B: Install via signed APT repository
+```bash
+CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-bookworm}")
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://dtrh95.github.io/ultradesk/pubkey.gpg | sudo tee /etc/apt/keyrings/ultradesk-rust.asc >/dev/null
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] https://dtrh95.github.io/ultradesk/apt/debian/${CODENAME} ${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
+sudo apt update
+sudo apt install -y ultradesk-rust
+```
+
+#### Option C: Build `.deb` locally from source
+```bash
+cp -r packaging/debian debian
+dpkg-buildpackage -us -uc -b
+sudo apt install -y ../ultradesk-rust_1.0.0-1_amd64.deb
+```
+
+---
+
+### 2. Ubuntu, Linux Mint, and Pop!_OS (`jammy`, `noble`, `questing`, `resolute`)
+
+#### Option A: Install prebuilt `.deb` from GitHub Releases
+```bash
+CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-noble}}")
+curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust_1.0.0-1_amd64_${CODENAME}.deb"
+sudo apt install -y "./ultradesk-rust_1.0.0-1_amd64_${CODENAME}.deb"
+```
+
+#### Option B: Install via signed Ubuntu APT repository
+```bash
+CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-noble}}")
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://dtrh95.github.io/ultradesk/pubkey.gpg | sudo tee /etc/apt/keyrings/ultradesk-rust.asc >/dev/null
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/ultradesk-rust.asc] https://dtrh95.github.io/ultradesk/apt/ubuntu/${CODENAME} ${CODENAME} main" | sudo tee /etc/apt/sources.list.d/ultradesk-rust.list >/dev/null
+sudo apt update
+sudo apt install -y ultradesk-rust
+```
+
+---
+
+### 3. Fedora, RHEL, AlmaLinux, and Rocky Linux (`43`, `44`, `45`, `rawhide`)
+
+#### Option A: Install prebuilt `.rpm` from GitHub Releases
+```bash
+RELEASEVER=$(rpm -E %fedora)
+sudo dnf install -y "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-1.0.0-1.fc${RELEASEVER}.x86_64.${RELEASEVER}.rpm"
+```
+
+#### Option B: Build `.rpm` locally with `rpmbuild`
+```bash
+sudo dnf install -y rpm-build rpmdevtools dnf-plugins-core
+rpmdev-setuptree
+cp packaging/rpm/fedora/ultradesk-rust.spec ~/rpmbuild/SPECS/
+sudo dnf builddep -y ~/rpmbuild/SPECS/ultradesk-rust.spec
+tar --exclude='.git' --exclude='packaging' --exclude='target' \
+    --transform 's|^\.|ultradesk-rust-1.0.0|' \
+    -czf ~/rpmbuild/SOURCES/ultradesk-rust-1.0.0.tar.gz .
+rpmbuild -bb ~/rpmbuild/SPECS/ultradesk-rust.spec
+sudo dnf install -y ~/rpmbuild/RPMS/x86_64/ultradesk-rust-1.0.0-1*.rpm
+```
+
+---
+
+### 4. openSUSE Tumbleweed and Leap (`.rpm`)
+
+#### Option A: Install prebuilt `.rpm` from GitHub Releases
+```bash
+sudo zypper install -y "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-1.0.0-1.x86_64.tumbleweed.rpm"
+```
+
+#### Option B: Build `.rpm` locally with `rpmbuild`
+```bash
+sudo zypper install -y rpm-build rpmdevtools
+rpmdev-setuptree
+cp packaging/rpm/opensuse/ultradesk-rust.spec ~/rpmbuild/SPECS/
+tar --exclude='.git' --exclude='packaging' --exclude='target' \
+    --transform 's|^\.|ultradesk-rust-1.0.0|' \
+    -czf ~/rpmbuild/SOURCES/ultradesk-rust-1.0.0.tar.gz .
+rpmbuild -bb ~/rpmbuild/SPECS/ultradesk-rust.spec
+sudo zypper install -y ~/rpmbuild/RPMS/x86_64/ultradesk-rust-1.0.0-1*.rpm
+```
+
+---
+
+### 5. Arch Linux, Manjaro, and EndeavourOS
+
+#### Option A: Build and install with `makepkg` (`PKGBUILD`)
+```bash
+cd packaging/arch
+makepkg -si
+```
+
+#### Option B: Extract prebuilt Arch archive from GitHub Releases
+```bash
+curl -fLO "https://github.com/dtrh95/ultradesk/releases/latest/download/ultradesk-rust-v1.0.0-x86_64-archlinux.tar.zst"
+sudo pacman -S --needed --noconfirm openssl libxcb zstd gtk3 webkit2gtk-4.1 libsoup3
+sudo tar --zstd -xvf ultradesk-rust-v1.0.0-x86_64-archlinux.tar.zst -C /
+```
+
+---
+
+### 6. NixOS and Nix Flakes
+
+Run `ultradesk-rust` directly using Nix Flakes:
+
+```bash
+nix run github:dtrh95/ultradesk#ultradesk-rust-head
+```
+
+Or build from a local checkout:
+
+```bash
+nix build -L .#packages.x86_64-linux.ultradesk-rust-head
+```
+
+To enable `ultradesk-rust` declaratively in a NixOS configuration, import `nixosModules.ultradesk-rust` from `flake.nix`:
+
+```nix
+{
+  programs.ultradesk-rust.enable = true;
+}
+```
+
+---
+
+### 7. Build from source (Any Linux distribution)
+
+Install a Rust toolchain (`cargo` and `rustc`), `pkg-config`, `openssl`, `libxcb`, `zstd`, `gtk3`, `webkit2gtk-4.1`, and `libsoup-3.0`.
+
+Build and install system-wide (`/usr/bin/ultradesk-rust`):
 
 ```bash
 make build
 sudo make install PREFIX=/usr
 ```
 
-### Arch Linux and Manjaro (makepkg)
-
-Build and install locally from `packaging/arch/PKGBUILD`:
+Or install into your user profile (`~/.local/bin/ultradesk-rust`) without root privileges:
 
 ```bash
-cd packaging/arch
-makepkg -si
-```
-
-### Debian (bookworm, trixie, forky, and sid)
-
-Build a binary `.deb` package locally with `dpkg-buildpackage`:
-
-```bash
-cp -r packaging/debian debian
-dpkg-buildpackage -us -uc -b
-sudo apt install ../ultradesk-rust_0.2.0-1_amd64.deb
-```
-
-### Ubuntu and Linux Mint (jammy, noble, questing, and resolute)
-
-Install from the signed APT repository or build the `.deb` package locally with the commands in the Debian section above. Runtime dependencies on Debian and Ubuntu include `libgtk-3-0`, `libwebkit2gtk-4.1-0`, `libsoup-3.0-0`, `xclip`, and `wl-clipboard`.
-
-### Fedora, RHEL, AlmaLinux, and Rocky Linux (.rpm)
-
-Build and install the RPM package using `rpmbuild` and `packaging/rpm/fedora/ultradesk-rust.spec`:
-
-```bash
-rpmbuild -bb packaging/rpm/fedora/ultradesk-rust.spec
-sudo dnf install ~/rpmbuild/RPMS/x86_64/ultradesk-rust-0.2.0-1*.rpm
-```
-
-### openSUSE Tumbleweed and Leap (.rpm)
-
-Build and install the RPM package using `packaging/rpm/opensuse/ultradesk-rust.spec`:
-
-```bash
-rpmbuild -bb packaging/rpm/opensuse/ultradesk-rust.spec
-sudo zypper install ~/rpmbuild/RPMS/x86_64/ultradesk-rust-0.2.0-1*.rpm
-```
-
-### NixOS and Nix flakes
-
-Run `ultradesk-rust` directly from the repository flake:
-
-```bash
-nix run .#ultradesk-rust
-```
-
-To build the derivation from the current working tree:
-
-```bash
-nix build -L .#packages.x86_64-linux.ultradesk-rust-head
-```
-
-To enable `ultradesk-rust` in a NixOS system configuration, import `nixosModules.ultradesk-rust` from `flake.nix` and enable the program option:
-
-```nix
-{
-  programs.ultradesk-rust.enable = true;
-}
+make build
+make install PREFIX="$HOME/.local"
 ```
 
 ## Configure display and input backends
