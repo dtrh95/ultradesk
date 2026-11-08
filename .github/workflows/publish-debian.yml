@@ -62,7 +62,7 @@ jobs:
               exit 1
               ;;
           esac
-          sed -i "1s|(0\.2\.0-1)|(${VER}-1~${MATRIX_CODENAME}1)|" debian/changelog
+          sed -i "1s|([^)]*)|(${VER}-1~${MATRIX_CODENAME}1)|" debian/changelog
 
       - name: Build Debian DEB package
         uses: jtdor/build-deb-action@v1

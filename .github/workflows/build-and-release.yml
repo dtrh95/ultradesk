@@ -406,6 +406,8 @@ jobs:
       attestations: write
 
     steps:
+      - uses: actions/checkout@v7
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -419,12 +421,14 @@ jobs:
       - name: Upload to GitHub Releases
         uses: softprops/action-gh-release@v3
         with:
+          name: UltraDesk ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
           files: |
             artifacts/deb-*/**/*.deb
             artifacts/rpm-*/**/*.rpm
             artifacts/**/*.tar.zst
           generate_release_notes: true
-          draft: true
+          draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

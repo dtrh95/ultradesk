@@ -63,7 +63,7 @@ jobs:
               exit 1
               ;;
           esac
-          sed -i "1s|(0\.2\.0-1)|(${VER}-1~ubuntu-${MATRIX_CODENAME}1)|" debian/changelog
+          sed -i "1s|([^)]*)|(${VER}-1~ubuntu-${MATRIX_CODENAME}1)|" debian/changelog
           sed -i "1s|unstable|${MATRIX_CODENAME}|" debian/changelog
 
       - name: Build Ubuntu DEB package

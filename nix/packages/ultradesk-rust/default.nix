@@ -17,11 +17,11 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "ultradesk-rust";
-  version = "0.2.0";
+  version = "1.0.0";
 
   src = fetchFromGitHub {
-    owner = "ultradesk";
-    repo = "ultradesk-rust";
+    owner = "dtrh95";
+    repo = "ultradesk";
     tag = "v${finalAttrs.version}";
     hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
   };

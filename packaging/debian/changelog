@@ -1,7 +1,7 @@
-ultradesk-rust (0.2.0-1) unstable; urgency=medium
+ultradesk-rust (1.0.0-1) unstable; urgency=medium
 
-  * Release UltraDesk (Rust Edition) 0.2.0 with multi-distro packaging
+  * Release UltraDesk (Rust Edition) 1.0.0 with E2E encryption, security hardening, and multi-distro packaging
   * Support screen streaming, remote input, audio, clipboard sync, and file transfer
   * Add bilingual VI/EN portal and collapsible session toolbar
 
- -- Hieu Doan <dtrunghieu96@gmail.com>  Thu, 05 Nov 2026 14:45:00 +0700
+ -- Hieu Doan <dtrunghieu96@gmail.com>  Sun, 08 Nov 2026 12:55:00 +0700
