@@ -1746,4 +1746,30 @@ mod tests {
         assert_eq!(*written.borrow(), vec!["remote text".to_string()]);
         assert_eq!(*posted.borrow(), vec!["local updated text".to_string()]);
     }
+
+    #[test]
+    fn test_clipboard_sync_tick_does_not_poll_or_write_when_disconnected() {
+        let clip_machine = std::rc::Rc::new(std::cell::RefCell::new(ClipboardSyncMachine::new()));
+        let write_count = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let request_count = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let send_count = std::rc::Rc::new(std::cell::Cell::new(0usize));
+
+        let wc = write_count.clone();
+        let rc = request_count.clone();
+        let sc = send_count.clone();
+        run_clipboard_sync_tick(
+            &clip_machine,
+            false,
+            "stale remote",
+            move |_| wc.set(wc.get() + 1),
+            move |cb| {
+                rc.set(rc.get() + 1);
+                cb(Some("local text".to_string()));
+            },
+            move |_| sc.set(sc.get() + 1),
+        );
+        assert_eq!(write_count.get(), 0);
+        assert_eq!(request_count.get(), 0);
+        assert_eq!(send_count.get(), 0);
+    }
 }
