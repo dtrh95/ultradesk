@@ -533,6 +533,7 @@ pub struct FileTransferManager {
     pub download_dir: PathBuf,
     pub auto_accept: bool,
     pub allow_remote_requests: bool,
+    pub pending_requested_files: Vec<String>,
     pub chunk_size: usize,
     pub modern_protocol: bool,
     pub id_prefix: String,
@@ -560,10 +561,18 @@ impl FileTransferManager {
             download_dir,
             auto_accept: false,
             allow_remote_requests: false,
+            pending_requested_files: Vec::new(),
             chunk_size: DEFAULT_FILE_CHUNK_SIZE,
             modern_protocol: true,
             id_prefix: id_prefix.to_string(),
             next_id: 1,
+        }
+    }
+
+    pub fn record_requested_remote_path(&mut self, remote_path: &str) {
+        let clean = sanitize_file_name(remote_path);
+        if !clean.is_empty() {
+            self.pending_requested_files.push(clean);
         }
     }
 
@@ -740,8 +749,15 @@ impl FileTransferManager {
                     return Err("Too many active file transfers".to_string());
                 }
                 let clean_name = sanitize_file_name(file_name);
+                let requested_match = self
+                    .pending_requested_files
+                    .iter()
+                    .position(|n| n == &clean_name);
+                if let Some(idx) = requested_match {
+                    self.pending_requested_files.remove(idx);
+                }
                 let mut status = TransferStatus::Offered;
-                if self.auto_accept {
+                if self.auto_accept || requested_match.is_some() {
                     status = TransferStatus::Transferring;
                     replies.push(encode_file_accept(file_id, 1, self.modern_protocol)?);
                 }

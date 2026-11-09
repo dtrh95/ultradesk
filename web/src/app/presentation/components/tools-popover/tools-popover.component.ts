@@ -163,7 +163,9 @@ import { FileTransferItem } from '../../../domain/models/session.model';
                         {{ store.t('accept_file') }}
                       </button>
                     }
-                    @if (tr.status === 'completed') {
+                    @if (
+                      tr.status === 'completed' && (tr.direction === 'receive' || !tr.saved_path)
+                    ) {
                       <a class="dl-link" [href]="downloadHref(tr.file_id)">
                         {{ store.t('download_file') }}
                       </a>

@@ -7,7 +7,7 @@ if [ "${#}" -lt 1 ]; then
 fi
 
 RAW_VER="${1#v}"
-SUMMARY="${2:-Release UltraDesk (Rust Edition) ${RAW_VER} with bidirectional remote-to-host file transfer, automated release tooling, and Homebrew formula support}"
+SUMMARY="${2:-Release UltraDesk (Rust Edition) ${RAW_VER}}"
 
 if ! [[ "${RAW_VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Error: invalid semantic version '${RAW_VER}' (expected MAJOR.MINOR.PATCH)" >&2
@@ -136,6 +136,9 @@ pkgbuild = re.sub(
 )
 pkgbuild_path.write_text(pkgbuild, encoding="utf-8")
 
+deb_date = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7))).strftime(
+    "%a, %d %b %Y %H:%M:%S %z"
+)
 deb_changelog_path = root / "packaging" / "debian" / "changelog"
 deb_changelog = deb_changelog_path.read_text(encoding="utf-8")
 deb_changelog = re.sub(
@@ -153,6 +156,13 @@ if f"Release UltraDesk (Rust Edition) {new_ver}" not in deb_changelog and bullet
         deb_changelog,
         count=1,
     )
+deb_changelog = re.sub(
+    r'^( -- Hieu Doan <dtrunghieu96@gmail\.com>  ).+$',
+    rf'\g<1>{deb_date}',
+    deb_changelog,
+    count=1,
+    flags=re.M,
+)
 deb_changelog_path.write_text(deb_changelog, encoding="utf-8")
 
 plist_path = root / "packaging" / "macos" / "Info.plist"

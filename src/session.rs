@@ -1806,7 +1806,7 @@ impl ControlSession {
             return Err("Remote file path cannot be empty".to_string());
         }
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.files.auto_accept = true;
+        guard.files.record_requested_remote_path(cleaned);
         let modern = guard.files.modern_protocol;
         let pkt = encode_file_request(cleaned, modern)?;
         let is_utf16 = is_utf16_string_packet(&pkt);

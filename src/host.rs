@@ -969,14 +969,31 @@ impl HostCore {
                         return actions;
                     }
                     other => {
-                        if self.phase == HostPhase::Streaming && self.control_allowed {
-                            if let Ok(Some((ft_pkt, replies))) = self.files.handle_packet(payload) {
-                                for reply in replies {
-                                    let sealed = self.seal_peer_packet(&reply);
-                                    actions.push(HostAction::SendPeer(sealed));
+                        if self.control_allowed {
+                            match self.files.handle_packet(payload) {
+                                Ok(Some((ft_pkt, replies))) => {
+                                    for reply in replies {
+                                        let sealed = self.seal_peer_packet(&reply);
+                                        actions.push(HostAction::SendPeer(sealed));
+                                    }
+                                    actions.push(HostAction::FileTransferEvent(ft_pkt));
+                                    return actions;
                                 }
-                                actions.push(HostAction::FileTransferEvent(ft_pkt));
-                                return actions;
+                                Err(err) => {
+                                    if matches!(
+                                        other,
+                                        crate::file_transfer::FileTransferPacket::Request { .. }
+                                    ) {
+                                        let notice = encode_host_chat(&format!(
+                                            "File request failed: {}",
+                                            err
+                                        ));
+                                        let sealed = self.seal_peer_packet(&notice);
+                                        actions.push(HostAction::SendPeer(sealed));
+                                    }
+                                    return actions;
+                                }
+                                Ok(None) => {}
                             }
                         } else if let crate::file_transfer::FileTransferPacket::Offer {
                             file_id,
@@ -5515,7 +5532,8 @@ mod tests {
 
         let mut controller_files =
             crate::file_transfer::FileTransferManager::new(temp_dir.join("controller_dl"));
-        controller_files.auto_accept = true;
+        assert!(!controller_files.auto_accept);
+        controller_files.record_requested_remote_path(&remote_src.to_string_lossy());
 
         let req_pkt =
             crate::file_transfer::encode_file_request(&remote_src.to_string_lossy(), true).unwrap();
