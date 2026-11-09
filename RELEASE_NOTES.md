@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.5
+## UltraDesk (Rust Edition) v1.0.6
 
-Release **v1.0.5** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Release UltraDesk (Rust Edition) 1.0.5 with bidirectional remote-to-host file transfer, remote file pull (PACKET_FILE_REQUEST), automated release script, and Homebrew formula support.
+Release **v1.0.6** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Cross-distro and cross-OS auto-update engine, tasteskill 2.5 6-theme update popup (Confirm / Later), and remote-to-host file transfer..
 
 ---
 
