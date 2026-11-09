@@ -133,6 +133,35 @@ impl ClipboardSyncMachine {
     pub fn seeding_state(&self) -> ClipboardSeedingState {
         self.state
     }
+
+    pub fn poll_remote_in_cell(
+        cell: &std::cell::RefCell<Self>,
+        is_connected: bool,
+        remote_clipboard: &str,
+    ) -> Option<String> {
+        let mut machine = cell.try_borrow_mut().ok()?;
+        machine.step(ClipboardEvent::ConnectionChanged(is_connected));
+        if remote_clipboard.is_empty() {
+            return None;
+        }
+        match machine.step(ClipboardEvent::RemoteTextReceived(
+            remote_clipboard.to_string(),
+        )) {
+            Some(ClipboardAction::WriteToSystem(text)) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn poll_system_in_cell(
+        cell: &std::cell::RefCell<Self>,
+        system_text: &str,
+    ) -> Option<String> {
+        let mut machine = cell.try_borrow_mut().ok()?;
+        match machine.step(ClipboardEvent::SystemTextRead(system_text.to_string())) {
+            Some(ClipboardAction::PostToRemote(text)) => Some(text),
+            _ => None,
+        }
+    }
 }
 
 impl Default for ClipboardSyncMachine {
@@ -153,23 +182,17 @@ pub fn run_clipboard_sync_tick<W, R, S>(
     R: FnOnce(Box<dyn FnOnce(Option<String>)>),
     S: FnOnce(&str) + 'static,
 {
-    let mut machine = clip_machine.borrow_mut();
-    machine.step(ClipboardEvent::ConnectionChanged(is_connected));
-
-    if !remote_clipboard.is_empty() {
-        if let Some(ClipboardAction::WriteToSystem(remote_text)) =
-            machine.step(ClipboardEvent::RemoteTextReceived(remote_clipboard.to_string()))
-        {
-            write_system(&remote_text);
-        }
+    if let Some(remote_text) =
+        ClipboardSyncMachine::poll_remote_in_cell(clip_machine, is_connected, remote_clipboard)
+    {
+        write_system(&remote_text);
     }
 
     let machine_for_cb = clip_machine.clone();
     request_system(Box::new(move |text_opt| {
         if let Some(text) = text_opt {
-            let mut m = machine_for_cb.borrow_mut();
-            if let Some(ClipboardAction::PostToRemote(post_text)) =
-                m.step(ClipboardEvent::SystemTextRead(text))
+            if let Some(post_text) =
+                ClipboardSyncMachine::poll_system_in_cell(&machine_for_cb, &text)
             {
                 send_remote(&post_text);
             }
@@ -504,7 +527,6 @@ fn run_native_gui_inner(
             |remote_text| {
                 let clip = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
                 clip.set_text(remote_text);
-                clip.store();
             },
             |cb| {
                 let clip = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
@@ -714,24 +736,21 @@ fn run_native_gui_inner(
 
                     let snap = session.snapshot();
                     let is_connected = snap.state == "connected";
-                    let mut machine = clip_machine.borrow_mut();
-                    machine.step(ClipboardEvent::ConnectionChanged(is_connected));
-
-                    if !snap.clipboard_remote.is_empty() {
-                        if let Some(ClipboardAction::WriteToSystem(remote_text)) =
-                            machine.step(ClipboardEvent::RemoteTextReceived(snap.clipboard_remote))
-                        {
-                            let _ = crate::clipboard::set_linux_system_clipboard(&remote_text);
-                        }
-                    }
-
-                    if let Some(text) = crate::clipboard::get_linux_system_clipboard() {
-                        if let Some(ClipboardAction::PostToRemote(post_text)) =
-                            machine.step(ClipboardEvent::SystemTextRead(text))
-                        {
-                            let _ = session.send_clipboard(&post_text, true);
-                        }
-                    }
+                    let session_for_cb = session.clone();
+                    run_clipboard_sync_tick(
+                        &clip_machine,
+                        is_connected,
+                        &snap.clipboard_remote,
+                        |remote_text| {
+                            let _ = crate::clipboard::set_linux_system_clipboard(remote_text);
+                        },
+                        |cb| {
+                            cb(crate::clipboard::get_linux_system_clipboard());
+                        },
+                        move |post_text| {
+                            let _ = session_for_cb.send_clipboard(post_text, true);
+                        },
+                    );
                 }
                 UserEvent::IpcMessage(msg) => {
                     if let Ok(action) = serde_json::from_str::<ToolbarAction>(&msg) {

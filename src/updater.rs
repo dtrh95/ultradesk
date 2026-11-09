@@ -453,19 +453,40 @@ pub fn is_version_greater(remote: &str, current: &str) -> bool {
     false
 }
 
-pub fn get_private_update_cache_dir() -> PathBuf {
-    let base = if let Ok(cache) = env::var("XDG_CACHE_HOME") {
+pub fn resolve_private_update_cache_dir(
+    xdg_cache_home: Option<&str>,
+    home: Option<&str>,
+) -> PathBuf {
+    let base = if let Some(cache) = xdg_cache_home {
         if !cache.trim().is_empty() {
             PathBuf::from(cache)
         } else {
             crate::profile::fallback_private_config_dir()
         }
-    } else if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home).join(".cache")
+    } else if let Some(h) = home {
+        if !h.trim().is_empty() {
+            PathBuf::from(h).join(".cache")
+        } else {
+            crate::profile::fallback_private_config_dir()
+        }
     } else {
         crate::profile::fallback_private_config_dir()
     };
-    base.join("ultradesk-rust").join("updates")
+    let candidate = base.join("ultradesk-rust").join("updates");
+    if crate::profile::make_private_dir(&candidate).is_ok() {
+        return candidate;
+    }
+    let fallback_base = crate::profile::fallback_private_config_dir();
+    let _ = crate::profile::make_private_dir(&fallback_base);
+    let fallback = fallback_base.join("ultradesk-rust").join("updates");
+    let _ = crate::profile::make_private_dir(&fallback);
+    fallback
+}
+
+pub fn get_private_update_cache_dir() -> PathBuf {
+    let xdg = env::var("XDG_CACHE_HOME").ok();
+    let home = env::var("HOME").ok();
+    resolve_private_update_cache_dir(xdg.as_deref(), home.as_deref())
 }
 
 enum TransportStream {
@@ -958,18 +979,24 @@ impl UpdateEngine {
     }
 
     pub fn set_api_url(&self, url: String) {
-        let mut u = self.api_url.lock().unwrap();
+        let mut u = self.api_url.lock().unwrap_or_else(|e| e.into_inner());
         *u = url;
     }
 
     pub fn api_url(&self) -> String {
-        self.api_url.lock().unwrap().clone()
+        self.api_url
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_dismissed_version(&self, ver: Option<String>) {
-        let mut d = self.dismissed_version.lock().unwrap();
+        let mut d = self
+            .dismissed_version
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *d = ver.clone();
-        let mut st = self.status.lock().unwrap();
+        let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
         st.dismissed_version = ver;
     }
 
@@ -978,7 +1005,10 @@ impl UpdateEngine {
     }
 
     pub fn snapshot(&self) -> UpdateStatusSnapshot {
-        self.status.lock().unwrap().clone()
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn target(&self) -> &InstallTarget {
@@ -987,7 +1017,7 @@ impl UpdateEngine {
 
     pub fn check_for_updates(&self) -> Result<UpdateStatusSnapshot, String> {
         {
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(
                 st.state,
                 UpdateState::Checking | UpdateState::Downloading | UpdateState::Applying
@@ -1001,7 +1031,7 @@ impl UpdateEngine {
 
         let res = self.check_for_updates_inner();
         if let Err(ref e) = res {
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::Error;
             st.error = Some(e.clone());
         }
@@ -1037,7 +1067,7 @@ impl UpdateEngine {
             .map(str::to_string);
 
         if !is_version_greater(remote_ver, &self.current_version) {
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::UpToDate;
             st.latest_version = Some(remote_ver.to_string());
             st.release_notes = Some(body.to_string());
@@ -1113,11 +1143,11 @@ impl UpdateEngine {
         };
 
         {
-            let mut cached = self.cached_plan.lock().unwrap();
+            let mut cached = self.cached_plan.lock().unwrap_or_else(|e| e.into_inner());
             *cached = Some(plan.clone());
         }
 
-        let mut st = self.status.lock().unwrap();
+        let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
         st.state = UpdateState::Available;
         st.latest_version = Some(remote_ver.to_string());
         st.release_notes = Some(body.to_string());
@@ -1141,7 +1171,7 @@ impl UpdateEngine {
 
     pub fn confirm_and_apply(&self) -> Result<String, String> {
         {
-            let st = self.status.lock().unwrap();
+            let st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(
                 st.state,
                 UpdateState::Checking | UpdateState::Downloading | UpdateState::Applying
@@ -1152,7 +1182,7 @@ impl UpdateEngine {
 
         let res = self.confirm_and_apply_inner();
         if let Err(ref e) = res {
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::Error;
             st.error = Some(e.clone());
         }
@@ -1161,7 +1191,7 @@ impl UpdateEngine {
 
     fn confirm_and_apply_inner(&self) -> Result<String, String> {
         let plan = {
-            let cached = self.cached_plan.lock().unwrap();
+            let cached = self.cached_plan.lock().unwrap_or_else(|e| e.into_inner());
             cached.clone().ok_or_else(|| {
                 "No update available to confirm. Check for updates first.".to_string()
             })?
@@ -1194,7 +1224,7 @@ impl UpdateEngine {
                     )
                 }
             };
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::Applied;
             st.message = Some(msg.clone());
             return Ok(msg);
@@ -1205,7 +1235,7 @@ impl UpdateEngine {
         validate_redirect_or_fetch_url(api_is_loopback, &plan.asset.download_url)?;
 
         {
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::Downloading;
             st.downloaded_bytes = 0;
             st.download_progress_pct = Some(0);
@@ -1260,9 +1290,12 @@ impl UpdateEngine {
             .map_err(|e| format!("Failed to stage update package: {}", e))?;
 
         {
-            let mut sp = self.staged_package_path.lock().unwrap();
+            let mut sp = self
+                .staged_package_path
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             *sp = Some(staged_file.clone());
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::Ready;
             st.download_progress_pct = Some(100);
             st.downloaded_bytes = resp.body.len() as u64;
@@ -1270,12 +1303,12 @@ impl UpdateEngine {
         }
 
         {
-            let mut st = self.status.lock().unwrap();
+            let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::Applying;
         }
 
         let msg = self.execute_install_strategy(&plan, &staged_file)?;
-        let mut st = self.status.lock().unwrap();
+        let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
         st.state = UpdateState::Applied;
         st.message = Some(msg.clone());
         st.error = None;
@@ -1975,5 +2008,8 @@ Connection: close
             None => env::remove_var("XDG_CACHE_HOME"),
         }
         assert!(crate::profile::make_private_dir(&dir).is_ok());
+
+        let nix_dir = resolve_private_update_cache_dir(None, Some("/homeless-shelter"));
+        assert!(crate::profile::make_private_dir(&nix_dir).is_ok());
     }
 }

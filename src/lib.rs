@@ -1717,13 +1717,33 @@ mod tests {
     #[test]
     fn test_clipboard_sync_tick_synchronous_request_text_reentrant_borrow() {
         let clip_machine = std::rc::Rc::new(std::cell::RefCell::new(ClipboardSyncMachine::new()));
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let posted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+
+        let written_tick1 = written.clone();
+        let posted_tick1 = posted.clone();
         run_clipboard_sync_tick(
             &clip_machine,
             true,
             "remote text",
-            |_s| {},
+            move |s| written_tick1.borrow_mut().push(s.to_string()),
             |cb| cb(Some("remote text".to_string())),
-            |_post| {},
+            move |post| posted_tick1.borrow_mut().push(post.to_string()),
         );
+        assert_eq!(*written.borrow(), vec!["remote text".to_string()]);
+        assert!(posted.borrow().is_empty());
+
+        let written_tick2 = written.clone();
+        let posted_tick2 = posted.clone();
+        run_clipboard_sync_tick(
+            &clip_machine,
+            true,
+            "remote text",
+            move |s| written_tick2.borrow_mut().push(s.to_string()),
+            |cb| cb(Some("local updated text".to_string())),
+            move |post| posted_tick2.borrow_mut().push(post.to_string()),
+        );
+        assert_eq!(*written.borrow(), vec!["remote text".to_string()]);
+        assert_eq!(*posted.borrow(), vec!["local updated text".to_string()]);
     }
 }
