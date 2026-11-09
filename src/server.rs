@@ -1271,9 +1271,7 @@ pub(crate) fn handle_http_client(
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body) {
                     if let Some(api_url) = val.get("api_url").and_then(serde_json::Value::as_str) {
                         let trimmed = api_url.trim();
-                        if trimmed.starts_with("http://127.0.0.1")
-                            || trimmed.starts_with("http://localhost")
-                        {
+                        if crate::updater::is_loopback_update_url(trimmed) {
                             session.set_update_api_url(trimmed.to_string());
                         }
                     }

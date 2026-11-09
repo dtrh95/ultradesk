@@ -66,6 +66,26 @@ if "packages" in pkg_lock and "" in pkg_lock["packages"]:
     pkg_lock["packages"][""]["version"] = new_ver
 pkg_lock_path.write_text(json.dumps(pkg_lock, indent=2) + "\n", encoding="utf-8")
 
+modal_ts_path = root / "web" / "src" / "app" / "presentation" / "components" / "update-modal" / "update-modal.component.ts"
+if modal_ts_path.exists():
+    modal_ts = modal_ts_path.read_text(encoding="utf-8")
+    modal_ts = re.sub(
+        r"(current_version \|\| ')[0-9]+\.[0-9]+\.[0-9]+(')",
+        rf"\g<1>{new_ver}\g<2>",
+        modal_ts,
+    )
+    modal_ts_path.write_text(modal_ts, encoding="utf-8")
+
+parser_ts_path = root / "web" / "src" / "app" / "infrastructure" / "parsers" / "session-snapshot.parser.ts"
+if parser_ts_path.exists():
+    parser_ts = parser_ts_path.read_text(encoding="utf-8")
+    parser_ts = re.sub(
+        r"(asString\(value\['current_version'\],\s*')[0-9]+\.[0-9]+\.[0-9]+('\))",
+        rf"\g<1>{new_ver}\g<2>",
+        parser_ts,
+    )
+    parser_ts_path.write_text(parser_ts, encoding="utf-8")
+
 readme_path = root / "README.md"
 readme = readme_path.read_text(encoding="utf-8")
 readme = re.sub(r'ultradesk-rust-v[0-9]+\.[0-9]+\.[0-9]+', f'ultradesk-rust-v{new_ver}', readme)

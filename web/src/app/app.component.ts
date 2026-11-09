@@ -60,7 +60,14 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly keyDownHandler = (event: KeyboardEvent): void => {
     if (event.key === 'Escape' && this.facade.store.overlay() !== 'none') {
       event.preventDefault();
-      this.facade.setOverlay('none');
+      if (this.facade.store.overlay() === 'update') {
+        const st = this.facade.store.updateStatus()?.state;
+        if (st !== 'downloading' && st !== 'applying') {
+          void this.facade.dismissUpdate();
+        }
+      } else {
+        this.facade.setOverlay('none');
+      }
       return;
     }
     if (isEditableElement(event.target)) {

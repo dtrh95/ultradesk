@@ -21,7 +21,7 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
             <span class="update-target-chip">{{ updateStatus()?.install_target || 'Linux' }}</span>
           </h2>
           <div class="update-version-row">
-            <span class="current-ver">v{{ updateStatus()?.current_version || '1.0.5' }}</span>
+            <span class="current-ver">v{{ updateStatus()?.current_version || '1.0.6' }}</span>
             <span class="arrow">→</span>
             <span class="latest-ver">v{{ updateStatus()?.latest_version || '---' }}</span>
           </div>
@@ -41,7 +41,14 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
         </div>
 
         @if (isDownloadingOrApplying()) {
-          <div id="updateProgressBar" class="update-progress-wrap">
+          <div
+            id="updateProgressBar"
+            class="update-progress-wrap"
+            role="progressbar"
+            [attr.aria-valuenow]="progressPct()"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
             <div class="update-progress-fill" [style.width.%]="progressPct()"></div>
           </div>
         }
@@ -55,7 +62,13 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
         }
 
         <div class="update-actions-row">
-          <button id="btnLaterUpdate" class="secondary" type="button" (click)="onLater()">
+          <button
+            id="btnLaterUpdate"
+            class="secondary"
+            type="button"
+            [disabled]="isBusy()"
+            (click)="onLater()"
+          >
             {{ store.t('update_later') }}
           </button>
           <button
@@ -129,24 +142,35 @@ export class UpdateModalComponent {
     if (s?.state === 'applying') {
       return this.store.t('update_applying');
     }
+    if (s?.state === 'applied') {
+      return this.store.t('update_close');
+    }
     return this.store.t('update_confirm');
   });
 
   onBackdropClick(event: MouseEvent): void {
-    if (event.target === event.currentTarget) {
+    if (event.target === event.currentTarget && !this.isBusy()) {
       void this.facade.dismissUpdate();
     }
   }
 
   onEscape(): void {
-    void this.facade.dismissUpdate();
+    if (!this.isBusy()) {
+      void this.facade.dismissUpdate();
+    }
   }
 
   onLater(): void {
-    void this.facade.dismissUpdate();
+    if (!this.isBusy()) {
+      void this.facade.dismissUpdate();
+    }
   }
 
   onConfirm(): void {
+    if (this.updateStatus()?.state === 'applied') {
+      void this.facade.dismissUpdate();
+      return;
+    }
     void this.facade.confirmUpdate();
   }
 }

@@ -398,19 +398,25 @@ jobs:
             find /work/arch-dist/usr/bin -type f \
               -exec strip --strip-all {} + 2>/dev/null || true
 
-      - name: Package as tar.zst
+      - name: Package as tar.zst and portable linux tar.gz
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
           VERSION="${REF_NAME}"
           VERSION="${VERSION//\//-}"
           tar -c -I 'zstd -19 -T0' -f "ultradesk-rust-${VERSION}-x86_64-archlinux.tar.zst" -C arch-dist .
+          mkdir -p portable-dist
+          cp arch-dist/usr/bin/ultradesk-rust portable-dist/
+          cp viewer.html 8bit.dat portable-dist/
+          tar -czf "ultradesk-rust-${VERSION}-x86_64-linux.tar.gz" -C portable-dist .
 
-      - name: Upload Arch artifact
+      - name: Upload Arch and Portable Linux artifacts
         uses: actions/upload-artifact@v7
         with:
           name: arch-tar-zst
-          path: ultradesk-rust-*-x86_64-archlinux.tar.zst
+          path: |
+            ultradesk-rust-*-x86_64-archlinux.tar.zst
+            ultradesk-rust-*-x86_64-linux.tar.gz
           retention-days: 1
 
   build-macos:
@@ -495,7 +501,7 @@ jobs:
 
       - name: Generate SHA256 checksums
         run: |
-          (cd artifacts && find . -type f ! -name 'SHA256SUMS.txt' -exec sha256sum {} + > SHA256SUMS.txt)
+          (cd artifacts && find . -type f ! -name 'SHA256SUMS.txt' -exec sha256sum {} + | sed 's|  .*/|  |' > SHA256SUMS.txt)
 
       - name: Replace existing GitHub Release if present
         env:
@@ -512,6 +518,7 @@ jobs:
             artifacts/deb-*/**/*.deb
             artifacts/rpm-*/**/*.rpm
             artifacts/**/*.tar.zst
+            artifacts/**/*-linux.tar.gz
             artifacts/macos-*/**/*.dmg
             artifacts/macos-*/**/*.app.tar.gz
             artifacts/SHA256SUMS.txt

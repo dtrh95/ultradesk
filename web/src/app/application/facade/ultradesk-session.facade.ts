@@ -683,6 +683,7 @@ export class UltraDeskSessionFacade {
         this.showNotice(res['message'], 'info');
       }
     } catch (e: unknown) {
+      await this.refreshStatus();
       this.showNotice(e, 'error');
     }
   }
@@ -908,6 +909,8 @@ export class UltraDeskSessionFacade {
         u.latest_version &&
         u.dismissed_version !== u.latest_version &&
         this.autoOpenedUpdateVersion !== u.latest_version &&
+        s.state !== 'connected' &&
+        !s.frames &&
         (this.store.overlay() === 'none' ||
           (this.store.overlay() === 'connect' && hs?.phase !== 'approval'))
       ) {

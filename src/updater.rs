@@ -246,6 +246,9 @@ impl InstallTarget {
         if !exact_name.is_empty() {
             for a in assets {
                 let name = a.get("name").and_then(Value::as_str).unwrap_or("");
+                if sanitize_asset_filename(name).is_err() {
+                    continue;
+                }
                 if name == exact_name {
                     let url = a
                         .get("browser_download_url")
@@ -268,6 +271,9 @@ impl InstallTarget {
 
         for a in assets {
             let name = a.get("name").and_then(Value::as_str).unwrap_or("");
+            if sanitize_asset_filename(name).is_err() {
+                continue;
+            }
             let url = a
                 .get("browser_download_url")
                 .and_then(Value::as_str)
@@ -319,6 +325,9 @@ impl InstallTarget {
 
         for a in assets {
             let name = a.get("name").and_then(Value::as_str).unwrap_or("");
+            if sanitize_asset_filename(name).is_err() {
+                continue;
+            }
             let url = a
                 .get("browser_download_url")
                 .and_then(Value::as_str)
@@ -334,7 +343,11 @@ impl InstallTarget {
                 Self::FedoraRpm { .. } | Self::OpenSuseRpm { .. } => name.ends_with(".rpm"),
                 Self::ArchPkg { .. } => name.ends_with(".tar.zst"),
                 Self::MacOsApp { .. } => name.ends_with(".dmg") || name.ends_with(".app.tar.gz"),
-                Self::PortableBinary { .. } => name.ends_with(".tar.gz"),
+                Self::PortableBinary { .. } => {
+                    name.ends_with(".tar.gz")
+                        && !name.contains("macos")
+                        && !name.ends_with(".app.tar.gz")
+                }
                 _ => false,
             };
 
@@ -492,6 +505,57 @@ struct ParsedUrl {
     path_and_query: String,
 }
 
+const MAX_METADATA_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+
+pub fn is_loopback_update_url(url: &str) -> bool {
+    match parse_http_url(url.trim()) {
+        Ok(parsed) => !parsed.is_tls && (parsed.host == "127.0.0.1" || parsed.host == "localhost"),
+        Err(_) => false,
+    }
+}
+
+fn is_allowed_remote_host(is_tls: bool, host: &str) -> bool {
+    if !is_tls {
+        return false;
+    }
+    let h = host.to_ascii_lowercase();
+    h == "api.github.com"
+        || h == "github.com"
+        || h == "objects.githubusercontent.com"
+        || h.ends_with(".githubusercontent.com")
+        || h.ends_with(".github.com")
+}
+
+pub fn sanitize_asset_filename(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Asset filename cannot be empty".to_string());
+    }
+    if trimmed.starts_with('-') || trimmed.starts_with('.') {
+        return Err(format!("Unsafe asset filename prefix: {}", trimmed));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains("..") {
+        return Err(format!(
+            "Path traversal rejected in asset filename: {}",
+            trimmed
+        ));
+    }
+    if Path::new(trimmed).file_name().and_then(|n| n.to_str()) != Some(trimmed) {
+        return Err(format!("Invalid asset basename: {}", trimmed));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
+    {
+        return Err(format!(
+            "Disallowed characters in asset filename: {}",
+            trimmed
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn parse_http_url(url: &str) -> Result<ParsedUrl, String> {
     let (is_tls, rest) = if let Some(stripped) = url.strip_prefix("https://") {
         (true, stripped)
@@ -547,6 +611,7 @@ impl HttpResponse {
 
 fn execute_http_request(
     url: &str,
+    max_bytes: u64,
     progress_callback: Option<&mut dyn FnMut(u64, Option<u64>)>,
 ) -> Result<HttpResponse, String> {
     let parsed = parse_http_url(url)?;
@@ -577,11 +642,12 @@ fn execute_http_request(
         TransportStream::Plain(tcp)
     };
 
-    let host_header = if (parsed.is_tls && parsed.port == 443) || (!parsed.is_tls && parsed.port == 80) {
-        parsed.host.clone()
-    } else {
-        format!("{}:{}", parsed.host, parsed.port)
-    };
+    let host_header =
+        if (parsed.is_tls && parsed.port == 443) || (!parsed.is_tls && parsed.port == 80) {
+            parsed.host.clone()
+        } else {
+            format!("{}:{}", parsed.host, parsed.port)
+        };
     let req = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: ultradesk-rust/{}\r\nAccept: application/vnd.github.v3+json, application/octet-stream, */*\r\nConnection: close\r\n\r\n",
         parsed.path_and_query, host_header, CURRENT_VERSION
@@ -657,6 +723,15 @@ fn execute_http_request(
         .get_header("content-length")
         .and_then(|v| v.parse::<u64>().ok());
 
+    if let Some(len) = content_len {
+        if len > max_bytes {
+            return Err(format!(
+                "HTTP response Content-Length ({} bytes) exceeds maximum allowed ({} bytes)",
+                len, max_bytes
+            ));
+        }
+    }
+
     let mut body = Vec::new();
 
     if is_chunked {
@@ -678,6 +753,12 @@ fn execute_http_request(
                 let mut trailer = String::new();
                 let _ = reader.read_line(&mut trailer);
                 break;
+            }
+            if (body.len() as u64).saturating_add(chunk_size as u64) > max_bytes {
+                return Err(format!(
+                    "Chunked HTTP response exceeds maximum allowed size ({} bytes)",
+                    max_bytes
+                ));
             }
             let cur_len = body.len();
             body.resize(cur_len + chunk_size, 0u8);
@@ -710,6 +791,13 @@ fn execute_http_request(
                 Err(e) => return Err(format!("Error reading body stream: {}", e)),
             }
         }
+        if (body.len() as u64) != len {
+            return Err(format!(
+                "Truncated HTTP response body: expected {} bytes, got {}",
+                len,
+                body.len()
+            ));
+        }
     } else {
         let mut chunk = [0u8; 16384];
         let mut progress_acc = 0u64;
@@ -718,6 +806,12 @@ fn execute_http_request(
             match stream.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if (body.len() as u64).saturating_add(n as u64) > max_bytes {
+                        return Err(format!(
+                            "HTTP response body exceeds maximum allowed size ({} bytes)",
+                            max_bytes
+                        ));
+                    }
                     body.extend_from_slice(&chunk[..n]);
                     progress_acc += n as u64;
                     if let Some(ref mut cb) = cb_opt {
@@ -737,17 +831,47 @@ fn execute_http_request(
     })
 }
 
+fn validate_redirect_or_fetch_url(
+    initial_is_loopback: bool,
+    candidate_url: &str,
+) -> Result<(), String> {
+    let parsed = parse_http_url(candidate_url)?;
+    if initial_is_loopback {
+        if !parsed.is_tls && (parsed.host == "127.0.0.1" || parsed.host == "localhost") {
+            return Ok(());
+        }
+        return Err(format!(
+            "Loopback update source cannot redirect or fetch non-loopback URL: {}",
+            candidate_url
+        ));
+    }
+    if is_allowed_remote_host(parsed.is_tls, &parsed.host) {
+        return Ok(());
+    }
+    Err(format!(
+        "Disallowed update URL host or scheme: {}",
+        candidate_url
+    ))
+}
+
 fn fetch_with_redirects(
     url: &str,
     max_hops: usize,
+    max_bytes: u64,
     mut progress_callback: Option<&mut dyn FnMut(u64, Option<u64>)>,
 ) -> Result<HttpResponse, String> {
+    let initial_parsed = parse_http_url(url)?;
+    let initial_is_loopback = !initial_parsed.is_tls
+        && (initial_parsed.host == "127.0.0.1" || initial_parsed.host == "localhost");
+    validate_redirect_or_fetch_url(initial_is_loopback, url)?;
+
     let mut current_url = url.to_string();
     for _ in 0..=max_hops {
+        validate_redirect_or_fetch_url(initial_is_loopback, &current_url)?;
         let cb = progress_callback
             .as_mut()
             .map(|cb| &mut **cb as &mut dyn FnMut(u64, Option<u64>));
-        let resp = execute_http_request(&current_url, cb)?;
+        let resp = execute_http_request(&current_url, max_bytes, cb)?;
         if [301, 302, 303, 307, 308].contains(&resp.status_code) {
             let loc = resp
                 .get_header("location")
@@ -761,6 +885,7 @@ fn fetch_with_redirects(
             } else {
                 return Err(format!("Unsupported relative redirect URL: {}", loc));
             }
+            validate_redirect_or_fetch_url(initial_is_loopback, &current_url)?;
             continue;
         }
         return Ok(resp);
@@ -863,28 +988,35 @@ impl UpdateEngine {
     pub fn check_for_updates(&self) -> Result<UpdateStatusSnapshot, String> {
         {
             let mut st = self.status.lock().unwrap();
+            if matches!(
+                st.state,
+                UpdateState::Checking | UpdateState::Downloading | UpdateState::Applying
+            ) {
+                return Err("An update operation is already in progress".to_string());
+            }
             st.state = UpdateState::Checking;
             st.error = None;
             st.message = None;
         }
 
-        let current_api = self.api_url();
-        let resp = match fetch_with_redirects(&current_api, 5, None) {
-            Ok(r) => r,
-            Err(e) => {
-                let mut st = self.status.lock().unwrap();
-                st.state = UpdateState::Error;
-                st.error = Some(e.clone());
-                return Err(e);
-            }
-        };
-
-        if resp.status_code != 200 {
-            let err_msg = format!("HTTP error from release server: {}", resp.status_code);
+        let res = self.check_for_updates_inner();
+        if let Err(ref e) = res {
             let mut st = self.status.lock().unwrap();
             st.state = UpdateState::Error;
-            st.error = Some(err_msg.clone());
-            return Err(err_msg);
+            st.error = Some(e.clone());
+        }
+        res
+    }
+
+    fn check_for_updates_inner(&self) -> Result<UpdateStatusSnapshot, String> {
+        let current_api = self.api_url();
+        let resp = fetch_with_redirects(&current_api, 5, MAX_METADATA_BYTES, None)?;
+
+        if resp.status_code != 200 {
+            return Err(format!(
+                "HTTP error from release server: {}",
+                resp.status_code
+            ));
         }
 
         let resp_json: Value = serde_json::from_slice(&resp.body)
@@ -935,16 +1067,25 @@ impl UpdateEngine {
         if let Some(ref mut asset) = matched_asset {
             if asset.expected_sha256.is_none() {
                 if let Some(sums_url) = sha256sums_url {
-                    if let Ok(sums_resp) = fetch_with_redirects(&sums_url, 5, None) {
+                    if let Ok(sums_resp) =
+                        fetch_with_redirects(&sums_url, 5, MAX_METADATA_BYTES, None)
+                    {
                         if sums_resp.status_code == 200 {
                             if let Ok(sums_text) = std::str::from_utf8(&sums_resp.body) {
                                 for line in sums_text.lines() {
                                     let parts: Vec<&str> = line.split_whitespace().collect();
                                     if parts.len() >= 2 {
-                                        let file_part = parts[1]
-                                            .trim_start_matches("./")
-                                            .trim_start_matches('*');
-                                        if file_part == asset.name || parts[1] == asset.name {
+                                        let raw_part = parts[1]
+                                            .trim_start_matches('*')
+                                            .trim_start_matches("./");
+                                        let base_part = Path::new(raw_part)
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or(raw_part);
+                                        if base_part == asset.name
+                                            || raw_part == asset.name
+                                            || parts[1] == asset.name
+                                        {
                                             asset.expected_sha256 =
                                                 Some(parts[0].to_ascii_lowercase());
                                             break;
@@ -999,6 +1140,26 @@ impl UpdateEngine {
     }
 
     pub fn confirm_and_apply(&self) -> Result<String, String> {
+        {
+            let st = self.status.lock().unwrap();
+            if matches!(
+                st.state,
+                UpdateState::Checking | UpdateState::Downloading | UpdateState::Applying
+            ) {
+                return Err("An update operation is already in progress".to_string());
+            }
+        }
+
+        let res = self.confirm_and_apply_inner();
+        if let Err(ref e) = res {
+            let mut st = self.status.lock().unwrap();
+            st.state = UpdateState::Error;
+            st.error = Some(e.clone());
+        }
+        res
+    }
+
+    fn confirm_and_apply_inner(&self) -> Result<String, String> {
         let plan = {
             let cached = self.cached_plan.lock().unwrap();
             cached.clone().ok_or_else(|| {
@@ -1039,16 +1200,21 @@ impl UpdateEngine {
             return Ok(msg);
         }
 
+        let safe_asset_name = sanitize_asset_filename(&plan.asset.name)?;
+        let api_is_loopback = is_loopback_update_url(&self.api_url());
+        validate_redirect_or_fetch_url(api_is_loopback, &plan.asset.download_url)?;
+
         {
             let mut st = self.status.lock().unwrap();
             st.state = UpdateState::Downloading;
             st.downloaded_bytes = 0;
             st.download_progress_pct = Some(0);
+            st.error = None;
         }
 
         let cache_dir = get_private_update_cache_dir();
         crate::profile::make_private_dir(&cache_dir)?;
-        let staged_file = cache_dir.join(&plan.asset.name);
+        let staged_file = cache_dir.join(&safe_asset_name);
 
         let mut progress_fn = |downloaded: u64, total: Option<u64>| {
             if let Ok(mut st) = self.status.lock() {
@@ -1063,25 +1229,18 @@ impl UpdateEngine {
             }
         };
 
-        let resp = match fetch_with_redirects(&plan.asset.download_url, 5, Some(&mut progress_fn)) {
-            Ok(r) => r,
-            Err(e) => {
-                let mut st = self.status.lock().unwrap();
-                st.state = UpdateState::Error;
-                st.error = Some(e.clone());
-                return Err(e);
-            }
-        };
+        let resp = fetch_with_redirects(
+            &plan.asset.download_url,
+            5,
+            MAX_ASSET_BYTES,
+            Some(&mut progress_fn),
+        )?;
 
         if resp.status_code != 200 {
-            let err_msg = format!(
+            return Err(format!(
                 "Failed to download update asset (HTTP {})",
                 resp.status_code
-            );
-            let mut st = self.status.lock().unwrap();
-            st.state = UpdateState::Error;
-            st.error = Some(err_msg.clone());
-            return Err(err_msg);
+            ));
         }
 
         if let Some(ref exp) = plan.asset.expected_sha256 {
@@ -1090,14 +1249,10 @@ impl UpdateEngine {
             let hash_bytes: [u8; 32] = hasher.finalize().into();
             let calculated: String = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
             if !calculated.eq_ignore_ascii_case(exp) {
-                let err_msg = format!(
+                return Err(format!(
                     "SHA-256 verification failed for '{}'! Expected {}, computed {}",
-                    plan.asset.name, exp, calculated
-                );
-                let mut st = self.status.lock().unwrap();
-                st.state = UpdateState::Error;
-                st.error = Some(err_msg.clone());
-                return Err(err_msg);
+                    safe_asset_name, exp, calculated
+                ));
             }
         }
 
@@ -1119,22 +1274,12 @@ impl UpdateEngine {
             st.state = UpdateState::Applying;
         }
 
-        let install_outcome = self.execute_install_strategy(&plan, &staged_file);
-        match install_outcome {
-            Ok(msg) => {
-                let mut st = self.status.lock().unwrap();
-                st.state = UpdateState::Applied;
-                st.message = Some(msg.clone());
-                st.error = None;
-                Ok(msg)
-            }
-            Err(e) => {
-                let mut st = self.status.lock().unwrap();
-                st.state = UpdateState::Error;
-                st.error = Some(e.clone());
-                Err(e)
-            }
-        }
+        let msg = self.execute_install_strategy(&plan, &staged_file)?;
+        let mut st = self.status.lock().unwrap();
+        st.state = UpdateState::Applied;
+        st.message = Some(msg.clone());
+        st.error = None;
+        Ok(msg)
     }
 
     fn execute_install_strategy(
@@ -1179,7 +1324,7 @@ impl UpdateEngine {
             InstallTarget::UbuntuDeb { .. } | InstallTarget::DebianDeb { .. } => {
                 if is_root {
                     let status = Command::new("apt-get")
-                        .args(["install", "-y", "--reinstall"])
+                        .args(["install", "-y", "--reinstall", "--"])
                         .arg(pkg_path)
                         .status()
                         .map_err(|e| format!("Failed to spawn apt-get: {}", e))?;
@@ -1189,7 +1334,7 @@ impl UpdateEngine {
                     Ok("Debian/Ubuntu package installed successfully".to_string())
                 } else if has_display && has_pkexec {
                     let status = Command::new("pkexec")
-                        .args(["apt-get", "install", "-y", "--reinstall"])
+                        .args(["apt-get", "install", "-y", "--reinstall", "--"])
                         .arg(pkg_path)
                         .status()
                         .map_err(|e| format!("Failed to spawn pkexec apt-get: {}", e))?;
@@ -1208,7 +1353,7 @@ impl UpdateEngine {
             InstallTarget::FedoraRpm { .. } => {
                 if is_root {
                     let status = Command::new("dnf")
-                        .args(["install", "-y"])
+                        .args(["install", "-y", "--"])
                         .arg(pkg_path)
                         .status()
                         .map_err(|e| format!("Failed to spawn dnf: {}", e))?;
@@ -1218,7 +1363,7 @@ impl UpdateEngine {
                     Ok("Fedora RPM package installed successfully".to_string())
                 } else if has_display && has_pkexec {
                     let status = Command::new("pkexec")
-                        .args(["dnf", "install", "-y"])
+                        .args(["dnf", "install", "-y", "--"])
                         .arg(pkg_path)
                         .status()
                         .map_err(|e| format!("Failed to spawn pkexec dnf: {}", e))?;
@@ -1237,7 +1382,7 @@ impl UpdateEngine {
             InstallTarget::OpenSuseRpm { .. } => {
                 if is_root {
                     let status = Command::new("zypper")
-                        .args(["--non-interactive", "install", "-y"])
+                        .args(["--non-interactive", "install", "-y", "--"])
                         .arg(pkg_path)
                         .status()
                         .map_err(|e| format!("Failed to spawn zypper: {}", e))?;
@@ -1247,7 +1392,7 @@ impl UpdateEngine {
                     Ok("openSUSE RPM package installed successfully".to_string())
                 } else if has_display && has_pkexec {
                     let status = Command::new("pkexec")
-                        .args(["zypper", "--non-interactive", "install", "-y"])
+                        .args(["zypper", "--non-interactive", "install", "-y", "--"])
                         .arg(pkg_path)
                         .status()
                         .map_err(|e| format!("Failed to spawn pkexec zypper: {}", e))?;
@@ -1264,29 +1409,64 @@ impl UpdateEngine {
                 }
             }
             InstallTarget::ArchPkg { .. } => {
-                if is_root {
-                    let status = Command::new("pacman")
-                        .args(["-U", "--noconfirm"])
-                        .arg(pkg_path)
-                        .status()
-                        .map_err(|e| format!("Failed to spawn pacman: {}", e))?;
-                    if !status.success() {
-                        return Err(format!("pacman exited with status {}", status));
+                let is_pacman_pkg = pkg_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with(".pkg.tar.zst"))
+                    .unwrap_or(false);
+                if is_pacman_pkg {
+                    if is_root {
+                        let status = Command::new("pacman")
+                            .args(["-U", "--noconfirm", "--"])
+                            .arg(pkg_path)
+                            .status()
+                            .map_err(|e| format!("Failed to spawn pacman: {}", e))?;
+                        if !status.success() {
+                            return Err(format!("pacman exited with status {}", status));
+                        }
+                        Ok("Arch Linux package installed successfully".to_string())
+                    } else if has_display && has_pkexec {
+                        let status = Command::new("pkexec")
+                            .args(["pacman", "-U", "--noconfirm", "--"])
+                            .arg(pkg_path)
+                            .status()
+                            .map_err(|e| format!("Failed to spawn pkexec pacman: {}", e))?;
+                        if !status.success() {
+                            return Err(format!("pkexec pacman exited with status {}", status));
+                        }
+                        Ok("Arch Linux package installed successfully via pkexec".to_string())
+                    } else {
+                        Ok(format!(
+                            "Update package downloaded and verified at {}. Install with: sudo pacman -U {}",
+                            pkg_path.display(),
+                            pkg_path.display()
+                        ))
                     }
-                    Ok("Arch Linux package installed successfully".to_string())
+                } else if is_root {
+                    let status = Command::new("tar")
+                        .args(["--zstd", "-xf"])
+                        .arg(pkg_path)
+                        .args(["-C", "/"])
+                        .status()
+                        .map_err(|e| format!("Failed to extract Arch tar.zst archive: {}", e))?;
+                    if !status.success() {
+                        return Err(format!("tar --zstd exited with status {}", status));
+                    }
+                    Ok("Arch Linux archive installed successfully".to_string())
                 } else if has_display && has_pkexec {
                     let status = Command::new("pkexec")
-                        .args(["pacman", "-U", "--noconfirm"])
+                        .args(["tar", "--zstd", "-xf"])
                         .arg(pkg_path)
+                        .args(["-C", "/"])
                         .status()
-                        .map_err(|e| format!("Failed to spawn pkexec pacman: {}", e))?;
+                        .map_err(|e| format!("Failed to spawn pkexec tar: {}", e))?;
                     if !status.success() {
-                        return Err(format!("pkexec pacman exited with status {}", status));
+                        return Err(format!("pkexec tar exited with status {}", status));
                     }
-                    Ok("Arch Linux package installed successfully via pkexec".to_string())
+                    Ok("Arch Linux archive installed successfully via pkexec".to_string())
                 } else {
                     Ok(format!(
-                        "Update package downloaded and verified at {}. Install with: sudo pacman -U {}",
+                        "Update archive downloaded and verified at {}. Install with: sudo tar --zstd -xf {} -C /",
                         pkg_path.display(),
                         pkg_path.display()
                     ))
@@ -1296,11 +1476,75 @@ impl UpdateEngine {
                 let current_exe = env::current_exe()
                     .map_err(|e| format!("Could not determine current executable path: {}", e))?;
                 let tmp_exe = current_exe.with_extension(format!("tmp.{}", std::process::id()));
-                let bytes = fs::read(pkg_path)
+                let pkg_name = pkg_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                let raw_bytes = fs::read(pkg_path)
                     .map_err(|e| format!("Failed to read staged package: {}", e))?;
+                let is_gzip = raw_bytes.starts_with(&[0x1f, 0x8b]);
+                let is_tar_gz =
+                    pkg_name.ends_with(".tar.gz") || pkg_name.ends_with(".tgz") || is_gzip;
 
-                fs::write(&tmp_exe, &bytes)
-                    .map_err(|e| format!("Failed writing binary replacement to {}: {}", tmp_exe.display(), e))?;
+                let exe_bytes = if is_tar_gz {
+                    let extract_dir = get_private_update_cache_dir()
+                        .join(format!("extract-{}", std::process::id()));
+                    let _ = fs::remove_dir_all(&extract_dir);
+                    crate::profile::make_private_dir(&extract_dir)?;
+                    let status = Command::new("tar")
+                        .arg("-xzf")
+                        .arg(pkg_path)
+                        .arg("-C")
+                        .arg(&extract_dir)
+                        .status()
+                        .map_err(|e| {
+                            let _ = fs::remove_dir_all(&extract_dir);
+                            format!("Failed to extract portable tar.gz archive: {}", e)
+                        })?;
+                    if !status.success() {
+                        let _ = fs::remove_dir_all(&extract_dir);
+                        return Err(format!("tar -xzf exited with status {}", status));
+                    }
+                    let candidate_root = extract_dir.join("ultradesk-rust");
+                    let candidate_usr = extract_dir.join("usr").join("bin").join("ultradesk-rust");
+                    let bin_path = if candidate_root.is_file() {
+                        candidate_root
+                    } else if candidate_usr.is_file() {
+                        candidate_usr
+                    } else {
+                        let _ = fs::remove_dir_all(&extract_dir);
+                        return Err(
+                            "Extracted archive does not contain ultradesk-rust binary".to_string(),
+                        );
+                    };
+                    let extracted = fs::read(&bin_path).map_err(|e| {
+                        let _ = fs::remove_dir_all(&extract_dir);
+                        format!("Failed reading extracted binary: {}", e)
+                    })?;
+                    let _ = fs::remove_dir_all(&extract_dir);
+                    extracted
+                } else {
+                    raw_bytes
+                };
+
+                let is_valid_binary = exe_bytes.starts_with(b"\x7fELF")
+                    || exe_bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+                    || exe_bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+                    || exe_bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe]);
+                if !is_valid_binary {
+                    return Err(
+                        "Staged portable binary is not a valid ELF or Mach-O executable"
+                            .to_string(),
+                    );
+                }
+
+                fs::write(&tmp_exe, &exe_bytes).map_err(|e| {
+                    format!(
+                        "Failed writing binary replacement to {}: {}",
+                        tmp_exe.display(),
+                        e
+                    )
+                })?;
 
                 #[cfg(unix)]
                 {
@@ -1317,15 +1561,6 @@ impl UpdateEngine {
                 ))
             }
             InstallTarget::MacOsApp { .. } => {
-                let attach = Command::new("hdiutil")
-                    .args(["attach", "-nobrowse"])
-                    .arg(pkg_path)
-                    .output()
-                    .map_err(|e| format!("Failed to execute hdiutil attach: {}", e))?;
-                if !attach.status.success() {
-                    return Err(format!("hdiutil attach failed: {}", String::from_utf8_lossy(&attach.stderr)));
-                }
-
                 let app_dest = Path::new("/Applications/UltraDesk.app");
                 let target_app_dir = if app_dest.parent().map(|p| p.is_dir()).unwrap_or(false) {
                     app_dest.to_path_buf()
@@ -1335,26 +1570,88 @@ impl UpdateEngine {
                     app_dest.to_path_buf()
                 };
 
+                let pkg_name = pkg_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                if pkg_name.ends_with(".app.tar.gz") {
+                    let parent_dir = target_app_dir
+                        .parent()
+                        .unwrap_or_else(|| Path::new("/Applications"));
+                    let status = Command::new("tar")
+                        .arg("-xzf")
+                        .arg(pkg_path)
+                        .arg("-C")
+                        .arg(parent_dir)
+                        .status()
+                        .map_err(|e| format!("Failed extracting macOS app archive: {}", e))?;
+                    if !status.success() {
+                        return Err(format!("tar -xzf exited with status {}", status));
+                    }
+                    return Ok(format!(
+                        "macOS application updated to {}",
+                        target_app_dir.display()
+                    ));
+                }
+
+                let attach = Command::new("hdiutil")
+                    .args(["attach", "-nobrowse"])
+                    .arg(pkg_path)
+                    .output()
+                    .map_err(|e| format!("Failed to execute hdiutil attach: {}", e))?;
+                if !attach.status.success() {
+                    return Err(format!(
+                        "hdiutil attach failed: {}",
+                        String::from_utf8_lossy(&attach.stderr)
+                    ));
+                }
+
+                let mounted_app = Path::new("/Volumes/UltraDesk/UltraDesk.app");
+                let copy_res = Command::new("ditto")
+                    .arg(mounted_app)
+                    .arg(&target_app_dir)
+                    .output();
+
                 let _ = Command::new("hdiutil")
                     .args(["detach", "/Volumes/UltraDesk", "-force"])
                     .status();
 
-                Ok(format!("macOS application updated to {}", target_app_dir.display()))
+                match copy_res {
+                    Ok(out) if out.status.success() => Ok(format!(
+                        "macOS application updated to {}",
+                        target_app_dir.display()
+                    )),
+                    Ok(out) => Err(format!(
+                        "ditto copy to {} failed: {}",
+                        target_app_dir.display(),
+                        String::from_utf8_lossy(&out.stderr)
+                    )),
+                    Err(e) => Err(format!("Failed to execute ditto: {}", e)),
+                }
             }
             InstallTarget::MacOsHomebrew => {
-                if Command::new("which").arg("brew").output().map(|o| o.status.success()).unwrap_or(false) {
-                    let _ = Command::new("brew").args(["upgrade", "ultradesk-rust"]).status();
+                if Command::new("which")
+                    .arg("brew")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+                {
+                    let status = Command::new("brew")
+                        .args(["upgrade", "ultradesk-rust"])
+                        .status()
+                        .map_err(|e| format!("Failed to run brew upgrade: {}", e))?;
+                    if !status.success() {
+                        return Err(format!("brew upgrade exited with status {}", status));
+                    }
                     Ok("Upgraded via brew upgrade ultradesk-rust".to_string())
                 } else {
                     Ok("Run: brew upgrade ultradesk-rust".to_string())
                 }
             }
-            InstallTarget::NixOs => {
-                Ok(format!(
-                    "Update package verified at {}. Run nix flake update or update system configuration.",
-                    pkg_path.display()
-                ))
-            }
+            InstallTarget::NixOs => Ok(format!(
+                "Update package verified at {}. Run nix flake update or update system configuration.",
+                pkg_path.display()
+            )),
         }
     }
 }
@@ -1512,11 +1809,7 @@ mod tests {
         }
 
         let asset_name = "ultradesk-rust_9.9.9-1_amd64_noble.deb";
-        let sums_content = format!(
-            "{}  ./{}
-",
-            expected_hex, asset_name
-        );
+        let sums_content = format!("{}  ./deb-ubuntu-24.04/{}\n", expected_hex, asset_name);
 
         let release_json = serde_json::json!({
             "tag_name": "v9.9.9",
@@ -1526,8 +1819,7 @@ mod tests {
                 {
                     "name": asset_name,
                     "browser_download_url": format!("http://127.0.0.1:{}/redirect-deb", port),
-                    "size": payload_bytes.len(),
-                    "digest": format!("sha256:{}", expected_hex)
+                    "size": payload_bytes.len()
                 },
                 {
                     "name": "SHA256SUMS.txt",
@@ -1632,5 +1924,44 @@ Connection: close
 
         running.store(false, Ordering::Relaxed);
         let _ = server_thread.join();
+    }
+
+    #[test]
+    fn test_security_sanitization_and_ssrf_guards() {
+        assert!(sanitize_asset_filename("ultradesk-rust_1.0.6-1_amd64_noble.deb").is_ok());
+        assert!(sanitize_asset_filename("ultradesk-rust-v1.0.6-x86_64-linux.tar.gz").is_ok());
+        assert!(sanitize_asset_filename("../etc/passwd").is_err());
+        assert!(sanitize_asset_filename("/etc/shadow").is_err());
+        assert!(sanitize_asset_filename("-oProxyCommand=id.deb").is_err());
+        assert!(sanitize_asset_filename(".bashrc").is_err());
+        assert!(sanitize_asset_filename("sub/file.deb").is_err());
+        assert!(sanitize_asset_filename("").is_err());
+
+        assert!(is_loopback_update_url("http://127.0.0.1:8080/api"));
+        assert!(is_loopback_update_url("http://localhost:9000/api"));
+        assert!(!is_loopback_update_url("http://localhost.evil.com/api"));
+        assert!(!is_loopback_update_url("http://127.0.0.1.evil.com/api"));
+        assert!(!is_loopback_update_url("https://127.0.0.1:8080/api"));
+
+        assert!(validate_redirect_or_fetch_url(true, "http://127.0.0.1:4567/pkg.deb").is_ok());
+        assert!(
+            validate_redirect_or_fetch_url(true, "http://169.254.169.254/latest/meta-data")
+                .is_err()
+        );
+        assert!(validate_redirect_or_fetch_url(true, "https://api.github.com/repos").is_err());
+
+        assert!(validate_redirect_or_fetch_url(
+            false,
+            "https://api.github.com/repos/dtrh95/ultradesk/releases/latest"
+        )
+        .is_ok());
+        assert!(validate_redirect_or_fetch_url(
+            false,
+            "https://objects.githubusercontent.com/github-production-release-asset/123"
+        )
+        .is_ok());
+        assert!(validate_redirect_or_fetch_url(false, "http://api.github.com/repos").is_err());
+        assert!(validate_redirect_or_fetch_url(false, "https://evil.com/malware.deb").is_err());
+        assert!(validate_redirect_or_fetch_url(false, "http://127.0.0.1:8080/internal").is_err());
     }
 }
