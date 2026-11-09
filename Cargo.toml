@@ -1,6 +1,6 @@
 [package]
 name = "ultradesk-rust"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 license = "MIT"
 description = "Linux-native UltraDesk remote desktop client and host written in Rust with Screen, Input, Audio, Clipboard Sync, and File Transfer"

@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.4
+## UltraDesk (Rust Edition) v1.0.5
 
-Release **v1.0.4** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) upgrades core cryptography, compression, and X11 protocol dependencies (`aes 0.9.4`, `cbc 0.2.1`, `cipher 0.5.2`, `des 0.9.0`, `md-5 0.11.0`, `sha2 0.11.1`, `x11rb 0.14.0`, and `zstd 0.14.3`), updates CI/CD actions (`actions/setup-node@v7`, `cloudflare/wrangler-action@v4`, `cachix/cachix-action@v17`), fixes Ubuntu Launchpad PPA source package generation, and highlights direct bidirectional compatibility with **UltraViewer on Windows**.
+Release **v1.0.5** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Release UltraDesk (Rust Edition) 1.0.5 with bidirectional remote-to-host file transfer, remote file pull (PACKET_FILE_REQUEST), automated release script, and Homebrew formula support.
 
 ---
 

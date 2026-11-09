@@ -5,9 +5,16 @@ DESTDIR ?=
 
 BINARY := $(firstword $(wildcard target/release/ultradesk-rust target/release/ultraviewer-linux))
 
-.PHONY: all build build-web check install clean
+.PHONY: all build build-web check install clean release
 
 all: build
+
+release:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Usage: make release VERSION=x.y.z [SUMMARY='...']" >&2; \
+		exit 1; \
+	fi
+	./scripts/release.sh "$(VERSION)" $(if $(SUMMARY),"$(SUMMARY)",)
 
 build-web:
 	cd web && npm run build

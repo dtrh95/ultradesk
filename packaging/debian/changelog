@@ -1,5 +1,6 @@
-ultradesk-rust (1.0.4-1) unstable; urgency=medium
+ultradesk-rust (1.0.5-1) unstable; urgency=medium
 
+  * Release UltraDesk (Rust Edition) 1.0.5 with bidirectional remote-to-host file transfer, remote file pull (PACKET_FILE_REQUEST), automated release script, and Homebrew formula support
   * Release UltraDesk (Rust Edition) 1.0.4 with RustCrypto (aes 0.9.4, cbc 0.2.1, cipher 0.5.2, des 0.9.0, md-5 0.11.0, sha2 0.11.1), x11rb 0.14.0, zstd 0.14.3, and Launchpad PPA build fixes
   * Release UltraDesk (Rust Edition) 1.0.3 with macOS Host ID registration fallback, high-resolution relay frame compression, and E2E handshake ordering fixes
   * Release UltraDesk (Rust Edition) 1.0.2 with built-in Model Context Protocol (MCP) server and community docs

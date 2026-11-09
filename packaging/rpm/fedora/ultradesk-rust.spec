@@ -1,5 +1,5 @@
 Name:           ultradesk-rust
-Version:        1.0.4
+Version:        1.0.5
 Release:        1%{?dist}
 Summary:        Remote desktop controller and host for Linux (Rust Edition)
 License:        MIT
@@ -66,7 +66,8 @@ elif [ $1 -eq 2 ]; then
 fi
 
 %changelog
-* Sun Nov 08 2026 Hieu Doan <dtrunghieu96@gmail.com> - 1.0.4-1
+* Mon Nov 09 2026 Hieu Doan <dtrunghieu96@gmail.com> - 1.0.5-1
+- Release UltraDesk (Rust Edition) 1.0.5 with bidirectional remote-to-host file transfer, remote file pull (PACKET_FILE_REQUEST), automated release script, and Homebrew formula support
 - Release UltraDesk (Rust Edition) 1.0.4 with RustCrypto 0.9/0.5/0.2/0.11 and x11rb 0.14.0 dependency upgrades
 - Release UltraDesk (Rust Edition) 1.0.3 with macOS Host ID registration fallback, high-resolution relay frame compression, and E2E handshake ordering fixes
 - Release UltraDesk (Rust Edition) 1.0.2 with built-in Model Context Protocol (MCP) server and community docs
