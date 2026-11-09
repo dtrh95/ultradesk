@@ -1964,4 +1964,16 @@ Connection: close
         assert!(validate_redirect_or_fetch_url(false, "https://evil.com/malware.deb").is_err());
         assert!(validate_redirect_or_fetch_url(false, "http://127.0.0.1:8080/internal").is_err());
     }
+
+    #[test]
+    fn test_update_cache_dir_falls_back_when_home_unwritable() {
+        let prev_xdg = env::var_os("XDG_CACHE_HOME");
+        env::set_var("XDG_CACHE_HOME", "/homeless-shelter/.cache");
+        let dir = get_private_update_cache_dir();
+        match prev_xdg {
+            Some(v) => env::set_var("XDG_CACHE_HOME", v),
+            None => env::remove_var("XDG_CACHE_HOME"),
+        }
+        assert!(crate::profile::make_private_dir(&dir).is_ok());
+    }
 }

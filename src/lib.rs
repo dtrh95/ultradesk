@@ -21,6 +21,8 @@ pub mod server;
 pub mod session;
 pub mod updater;
 
+pub use gui::run_clipboard_sync_tick;
+
 #[cfg(test)]
 mod tests {
     use crate::audio::{
@@ -38,8 +40,8 @@ mod tests {
         FileTransferPacket, TransferDirection, TransferStatus,
     };
     use crate::gui::{
-        ClipboardAction, ClipboardEvent, ClipboardSeedingState, ClipboardSyncMachine, LanguageCode,
-        SpecialKey, ThemeName, ToolTab, ToolbarAction,
+        run_clipboard_sync_tick, ClipboardAction, ClipboardEvent, ClipboardSeedingState,
+        ClipboardSyncMachine, LanguageCode, SpecialKey, ThemeName, ToolTab, ToolbarAction,
     };
     use crate::input::{
         keyboard, mouse_button, mouse_move, mouse_wheel, with_held_key, InputEvent,
@@ -1710,5 +1712,18 @@ mod tests {
 
         pshutdown.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = phandle.join();
+    }
+
+    #[test]
+    fn test_clipboard_sync_tick_synchronous_request_text_reentrant_borrow() {
+        let clip_machine = std::rc::Rc::new(std::cell::RefCell::new(ClipboardSyncMachine::new()));
+        run_clipboard_sync_tick(
+            &clip_machine,
+            true,
+            "remote text",
+            |_s| {},
+            |cb| cb(Some("remote text".to_string())),
+            |_post| {},
+        );
     }
 }

@@ -141,6 +141,42 @@ impl Default for ClipboardSyncMachine {
     }
 }
 
+pub fn run_clipboard_sync_tick<W, R, S>(
+    clip_machine: &std::rc::Rc<std::cell::RefCell<ClipboardSyncMachine>>,
+    is_connected: bool,
+    remote_clipboard: &str,
+    mut write_system: W,
+    request_system: R,
+    send_remote: S,
+) where
+    W: FnMut(&str),
+    R: FnOnce(Box<dyn FnOnce(Option<String>)>),
+    S: FnOnce(&str) + 'static,
+{
+    let mut machine = clip_machine.borrow_mut();
+    machine.step(ClipboardEvent::ConnectionChanged(is_connected));
+
+    if !remote_clipboard.is_empty() {
+        if let Some(ClipboardAction::WriteToSystem(remote_text)) =
+            machine.step(ClipboardEvent::RemoteTextReceived(remote_clipboard.to_string()))
+        {
+            write_system(&remote_text);
+        }
+    }
+
+    let machine_for_cb = clip_machine.clone();
+    request_system(Box::new(move |text_opt| {
+        if let Some(text) = text_opt {
+            let mut m = machine_for_cb.borrow_mut();
+            if let Some(ClipboardAction::PostToRemote(post_text)) =
+                m.step(ClipboardEvent::SystemTextRead(text))
+            {
+                send_remote(&post_text);
+            }
+        }
+    }));
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolTab {
@@ -460,32 +496,26 @@ fn run_native_gui_inner(
 
         let snap = session_timer.snapshot();
         let is_connected = snap.state == "connected";
-        let mut machine = clip_machine_timer.borrow_mut();
-        machine.step(ClipboardEvent::ConnectionChanged(is_connected));
-
-        if !snap.clipboard_remote.is_empty() {
-            if let Some(ClipboardAction::WriteToSystem(remote_text)) =
-                machine.step(ClipboardEvent::RemoteTextReceived(snap.clipboard_remote))
-            {
-                let clip = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-                clip.set_text(&remote_text);
-                clip.store();
-            }
-        }
-
-        let clip = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-        let machine_for_cb = clip_machine_timer.clone();
         let session_for_cb = session_timer.clone();
-        clip.request_text(move |_clip, text_opt| {
-            if let Some(text) = text_opt {
-                let mut m = machine_for_cb.borrow_mut();
-                if let Some(ClipboardAction::PostToRemote(post_text)) =
-                    m.step(ClipboardEvent::SystemTextRead(text.to_string()))
-                {
-                    let _ = session_for_cb.send_clipboard(&post_text, true);
-                }
-            }
-        });
+        run_clipboard_sync_tick(
+            &clip_machine_timer,
+            is_connected,
+            &snap.clipboard_remote,
+            |remote_text| {
+                let clip = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+                clip.set_text(remote_text);
+                clip.store();
+            },
+            |cb| {
+                let clip = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+                clip.request_text(move |_clip, text_opt| {
+                    cb(text_opt.map(|s| s.to_string()));
+                });
+            },
+            move |post_text| {
+                let _ = session_for_cb.send_clipboard(post_text, true);
+            },
+        );
 
         gtk::glib::ControlFlow::Continue
     });
