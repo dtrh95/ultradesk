@@ -1590,11 +1590,7 @@ impl ControlSession {
                         guard.screen = new_screen;
                         guard.login_acknowledged = true;
                         guard.outbound_queue.clear();
-                        if guard.clipboard.auto_sync_system {
-                            if let Some(sys_clip) = get_linux_system_clipboard() {
-                                guard.clipboard.local_text = sys_clip;
-                            }
-                        }
+                        let should_seed_clip = guard.clipboard.auto_sync_system;
                         if let Ok(pkt48) =
                             encode_byte_array_fields(&[&[48u8][..], &[effective_bs as u8][..]])
                         {
@@ -1604,6 +1600,15 @@ impl ControlSession {
                         guard.state.state = "connected".to_string();
                         guard.state.last_message = format!("Remote desktop size {}x{}", w, h);
                         Self::sync_state_fields(&mut guard);
+                        drop(guard);
+                        if should_seed_clip {
+                            if let Some(sys_clip) = get_linux_system_clipboard() {
+                                let mut guard =
+                                    self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                                guard.clipboard.local_text = sys_clip;
+                                Self::sync_state_fields(&mut guard);
+                            }
+                        }
                         return;
                     }
                 }
@@ -1674,17 +1679,23 @@ impl ControlSession {
         }
 
         if let Some(clip_msg) = decode_clipboard_packet(payload) {
+            let prev_remote = guard.clipboard.remote_text.clone();
+            let should_write_os = guard.login_acknowledged
+                && guard.clipboard.auto_sync_system
+                && !clip_msg.text.is_empty()
+                && !clipboard_text_eq(&clip_msg.text, &prev_remote);
             guard.clipboard.remote_text = clip_msg.text.clone();
             guard.clipboard.local_text = clip_msg.text.clone();
             guard.clipboard.updates_received += 1;
-            if guard.clipboard.auto_sync_system {
-                let _ = set_linux_system_clipboard(&clip_msg.text);
-            }
             guard.state.last_message = format!(
                 "Clipboard synced from remote ({} chars)",
                 clip_msg.text.len()
             );
             Self::sync_state_fields(&mut guard);
+            drop(guard);
+            if should_write_os {
+                let _ = set_linux_system_clipboard(&clip_msg.text);
+            }
             return;
         }
 
@@ -1749,17 +1760,20 @@ impl ControlSession {
     }
 
     pub fn send_clipboard(&self, text: &str, sync_system: bool) -> Result<Vec<u8>, String> {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.clipboard.local_text = text.to_string();
-        guard.clipboard.updates_sent += 1;
+        let payload = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clipboard.local_text = text.to_string();
+            guard.clipboard.updates_sent += 1;
+            let _ = guard.host_session.send_clipboard(text);
+            let (payload, unicode_bytes) = encode_clipboard_for_remote(text)?;
+            Self::dispatch_payload(&mut guard, &payload, unicode_bytes, None)?;
+            guard.state.last_message = format!("Sent clipboard to remote ({} chars)", text.len());
+            Self::sync_state_fields(&mut guard);
+            payload
+        };
         if sync_system {
             let _ = set_linux_system_clipboard(text);
         }
-        let _ = guard.host_session.send_clipboard(text);
-        let (payload, unicode_bytes) = encode_clipboard_for_remote(text)?;
-        Self::dispatch_payload(&mut guard, &payload, unicode_bytes, None)?;
-        guard.state.last_message = format!("Sent clipboard to remote ({} chars)", text.len());
-        Self::sync_state_fields(&mut guard);
         Ok(payload)
     }
 
@@ -2260,15 +2274,23 @@ impl ControlSession {
         while self.is_active(gen) {
             if last_clip_poll.elapsed() >= Duration::from_millis(800) {
                 last_clip_poll = Instant::now();
-                let should_poll = {
+                let (should_poll, prev_recv, prev_sent) = {
                     let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.login_acknowledged && guard.clipboard.auto_sync_system
+                    (
+                        guard.login_acknowledged && guard.clipboard.auto_sync_system,
+                        guard.clipboard.updates_received,
+                        guard.clipboard.updates_sent,
+                    )
                 };
                 if should_poll {
                     if let Some(sys_clip) = get_linux_system_clipboard() {
                         if !sys_clip.is_empty() {
                             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                            if !clipboard_text_eq(&sys_clip, &guard.clipboard.local_text)
+                            if guard.login_acknowledged
+                                && guard.clipboard.auto_sync_system
+                                && guard.clipboard.updates_received == prev_recv
+                                && guard.clipboard.updates_sent == prev_sent
+                                && !clipboard_text_eq(&sys_clip, &guard.clipboard.local_text)
                                 && !clipboard_text_eq(&sys_clip, &guard.clipboard.remote_text)
                             {
                                 guard.clipboard.local_text = sys_clip.clone();

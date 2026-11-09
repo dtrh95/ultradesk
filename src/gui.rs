@@ -182,6 +182,11 @@ pub fn run_clipboard_sync_tick<W, R, S>(
     R: FnOnce(Box<dyn FnOnce(Option<String>)>),
     S: FnOnce(&str) + 'static,
 {
+    if !is_connected {
+        let _ = ClipboardSyncMachine::poll_remote_in_cell(clip_machine, false, "");
+        return;
+    }
+
     if let Some(remote_text) =
         ClipboardSyncMachine::poll_remote_in_cell(clip_machine, is_connected, remote_clipboard)
     {
@@ -393,7 +398,6 @@ fn run_native_gui_inner(
     session: ControlSession,
     shutdown: Arc<AtomicBool>,
 ) -> GuiLaunchOutcome {
-    use std::cell::RefCell;
     use std::rc::Rc;
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tao::platform::run_return::EventLoopExtRunReturn;
@@ -484,11 +488,8 @@ fn run_native_gui_inner(
         }));
     }
 
-    let clip_machine = Rc::new(RefCell::new(ClipboardSyncMachine::new()));
-    let session_timer = session.clone();
     let shutdown_timer = shutdown.clone();
     let webview_timer = webview.clone();
-    let clip_machine_timer = clip_machine.clone();
     let viewer_path = config.viewer_path.clone();
     let mut last_mtime: Option<std::time::SystemTime> = viewer_path
         .as_ref()
@@ -516,28 +517,6 @@ fn run_native_gui_inner(
                 }
             }
         }
-
-        let snap = session_timer.snapshot();
-        let is_connected = snap.state == "connected";
-        let session_for_cb = session_timer.clone();
-        run_clipboard_sync_tick(
-            &clip_machine_timer,
-            is_connected,
-            &snap.clipboard_remote,
-            |remote_text| {
-                let clip = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-                clip.set_text(remote_text);
-            },
-            |cb| {
-                let clip = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-                clip.request_text(move |_clip, text_opt| {
-                    cb(text_opt.map(|s| s.to_string()));
-                });
-            },
-            move |post_text| {
-                let _ = session_for_cb.send_clipboard(post_text, true);
-            },
-        );
 
         gtk::glib::ControlFlow::Continue
     });
@@ -609,7 +588,6 @@ fn run_native_gui_inner(
     session: ControlSession,
     shutdown: Arc<AtomicBool>,
 ) -> GuiLaunchOutcome {
-    use std::cell::RefCell;
     use std::rc::Rc;
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tao::platform::run_return::EventLoopExtRunReturn;
@@ -674,7 +652,6 @@ fn run_native_gui_inner(
         None
     };
 
-    let clip_machine = Rc::new(RefCell::new(ClipboardSyncMachine::new()));
     let viewer_path = config.viewer_path.clone();
     let mut last_mtime: Option<std::time::SystemTime> = viewer_path
         .as_ref()
@@ -733,24 +710,6 @@ fn run_native_gui_inner(
                             }
                         }
                     }
-
-                    let snap = session.snapshot();
-                    let is_connected = snap.state == "connected";
-                    let session_for_cb = session.clone();
-                    run_clipboard_sync_tick(
-                        &clip_machine,
-                        is_connected,
-                        &snap.clipboard_remote,
-                        |remote_text| {
-                            let _ = crate::clipboard::set_linux_system_clipboard(remote_text);
-                        },
-                        |cb| {
-                            cb(crate::clipboard::get_linux_system_clipboard());
-                        },
-                        move |post_text| {
-                            let _ = session_for_cb.send_clipboard(post_text, true);
-                        },
-                    );
                 }
                 UserEvent::IpcMessage(msg) => {
                     if let Ok(action) = serde_json::from_str::<ToolbarAction>(&msg) {

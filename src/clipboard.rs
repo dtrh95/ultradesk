@@ -220,6 +220,52 @@ pub fn clipboard_text_eq(a: &str, b: &str) -> bool {
 const GTK_CLIPBOARD_SET_PY: &str = "import sys, gi; gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); from gi.repository import Gtk, Gdk; Gtk.init_check(); c = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD); t = sys.stdin.read(); c.set_text(t, -1); c.store()";
 const GTK_CLIPBOARD_GET_PY: &str = "import sys, gi; gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); from gi.repository import Gtk, Gdk; Gtk.init_check(); c = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD); t = c.wait_for_text(); sys.stdout.write(t if t is not None else '')";
 
+pub fn is_system_clipboard_disabled() -> bool {
+    cfg!(test)
+        || std::env::var_os("ULTRADESK_DISABLE_SYSTEM_CLIPBOARD")
+            .is_some_and(|v| v == "1" || v.to_str().is_some_and(|s| s.eq_ignore_ascii_case("true")))
+}
+
+pub fn select_wayland_paste_mime_type(types_output: &str) -> Option<&'static str> {
+    const PREFERRED_PLAIN_TYPES: &[&str] = &[
+        "text/plain;charset=utf-8",
+        "text/plain; charset=utf-8",
+        "text/plain;charset=UTF-8",
+        "text/plain",
+        "UTF8_STRING",
+        "TEXT",
+        "STRING",
+    ];
+    let offered: Vec<&str> = types_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    PREFERRED_PLAIN_TYPES
+        .iter()
+        .copied()
+        .find(|preferred| offered.contains(preferred))
+}
+
+pub fn select_linux_clipboard_write_backends(
+    has_wayland: bool,
+    has_x11: bool,
+) -> Vec<(&'static str, &'static [&'static str])> {
+    let mut out = Vec::new();
+    if has_wayland {
+        out.push(("wl-copy", &[][..]));
+    }
+    if has_x11 {
+        out.push((
+            "xclip",
+            &["-selection", "clipboard", "-t", "UTF8_STRING"][..],
+        ));
+        out.push(("xsel", &["--clipboard", "--input"][..]));
+        out.push(("python3", &["-c", GTK_CLIPBOARD_SET_PY][..]));
+    }
+    out
+}
+
 fn has_graphical_display() -> bool {
     cfg!(target_os = "macos")
         || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
@@ -227,47 +273,65 @@ fn has_graphical_display() -> bool {
 }
 
 pub fn set_linux_system_clipboard(text: &str) -> bool {
-    if !has_graphical_display() {
+    if is_system_clipboard_disabled() || !has_graphical_display() {
         return false;
     }
-    if cfg!(target_os = "macos") && run_clipboard_write("pbcopy", &[], text) {
-        return true;
+    if cfg!(target_os = "macos") {
+        return run_clipboard_write("pbcopy", &[], text);
     }
-    let mut any_ok = false;
-    if run_clipboard_write("wl-copy", &[], text) {
-        any_ok = true;
+    let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    let has_x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+    for (bin, args) in select_linux_clipboard_write_backends(has_wayland, has_x11) {
+        if run_clipboard_write(bin, args, text) {
+            return true;
+        }
     }
-    if run_clipboard_write("xclip", &["-selection", "clipboard"], text)
-        || run_clipboard_write("xsel", &["--clipboard", "--input"], text)
-    {
-        any_ok = true;
-    }
-    if !any_ok && run_clipboard_write("python3", &["-c", GTK_CLIPBOARD_SET_PY], text) {
-        any_ok = true;
-    }
-    any_ok
+    false
 }
 
 pub fn get_linux_system_clipboard() -> Option<String> {
-    if !has_graphical_display() {
+    if is_system_clipboard_disabled() || !has_graphical_display() {
         return None;
     }
-    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
-        &[
-            ("pbpaste", &[]),
-            ("wl-paste", &["--no-newline"]),
-            ("xclip", &["-selection", "clipboard", "-o"]),
-            ("xsel", &["--clipboard", "--output"]),
-            ("python3", &["-c", GTK_CLIPBOARD_GET_PY]),
-        ]
-    } else {
-        &[
-            ("wl-paste", &["--no-newline"]),
-            ("xclip", &["-selection", "clipboard", "-o"]),
-            ("xsel", &["--clipboard", "--output"]),
-            ("python3", &["-c", GTK_CLIPBOARD_GET_PY]),
-        ]
-    };
+    if cfg!(target_os = "macos") {
+        let output = Command::new("pbpaste").output().ok()?;
+        if output.status.success() {
+            return Some(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+        return None;
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
+        if let Ok(list_out) = Command::new("wl-paste").arg("--list-types").output() {
+            if list_out.status.success() {
+                let types_str = String::from_utf8_lossy(&list_out.stdout);
+                let Some(mime) = select_wayland_paste_mime_type(&types_str) else {
+                    return Some(String::new());
+                };
+                if let Ok(paste_out) = Command::new("wl-paste")
+                    .args(["--no-newline", "--type", mime])
+                    .output()
+                {
+                    if paste_out.status.success() {
+                        return Some(String::from_utf8_lossy(&paste_out.stdout).to_string());
+                    }
+                }
+                return Some(String::new());
+            }
+            let stderr_str = String::from_utf8_lossy(&list_out.stderr);
+            if stderr_str.contains("Nothing is copied") {
+                return Some(String::new());
+            }
+        }
+    }
+    let candidates: &[(&str, &[&str])] = &[
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "UTF8_STRING", "-o"],
+        ),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["--clipboard", "--output"]),
+        ("python3", &["-c", GTK_CLIPBOARD_GET_PY]),
+    ];
     let mut saw_empty_success = false;
     for (bin, args) in candidates {
         if let Ok(output) = Command::new(bin).args(*args).output() {

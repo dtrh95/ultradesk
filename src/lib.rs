@@ -815,7 +815,7 @@ mod tests {
         assert_eq!(snap_after_login.screen_width, 1920);
         assert_eq!(snap_after_login.screen_height, 1080);
 
-        let clip_pkt = encode_clipboard_modern_packet(1, "Remote clip 123").unwrap();
+        let clip_pkt = encode_clipboard_modern_packet(1, "uv_test_remote_clipboard").unwrap();
         session.handle_session_payload(&clip_pkt);
         let host_chat_pkt =
             encode_byte_array_fields(&[&[12u8, 0u8], &encode_senddata_string("hello cc", true)])
@@ -835,7 +835,7 @@ mod tests {
         let handle = portal.spawn(listener);
 
         let resp_state = http_get(&addr, "/status");
-        assert!(resp_state.contains("\"clipboard_remote\":\"Remote clip 123\""));
+        assert!(resp_state.contains("\"clipboard_remote\":\"uv_test_remote_clipboard\""));
         assert!(resp_state.contains("\"audio_chunks_received\":1"));
 
         let resp_send = http_post(
@@ -1771,5 +1771,46 @@ mod tests {
         assert_eq!(write_count.get(), 0);
         assert_eq!(request_count.get(), 0);
         assert_eq!(send_count.get(), 0);
+        assert!(crate::clipboard::is_system_clipboard_disabled());
+        assert_eq!(
+            crate::clipboard::select_wayland_paste_mime_type(
+                "TIMESTAMP\nTARGETS\nMULTIPLE\nSAVE_TARGETS\ntext/rtf\nTEXT/RTF\napplication/rtf\ntext/html\nTEXT/HTML\nUTF8_STRING\nCOMPOUND_TEXT\nSTRING\n"
+            ),
+            Some("UTF8_STRING")
+        );
+        assert_eq!(
+            crate::clipboard::select_wayland_paste_mime_type("image/png\n"),
+            None
+        );
+        assert_eq!(
+            crate::clipboard::select_linux_clipboard_write_backends(true, false),
+            vec![("wl-copy", &[][..])]
+        );
+        assert_eq!(
+            crate::clipboard::select_linux_clipboard_write_backends(true, true)[0],
+            ("wl-copy", &[][..])
+        );
+        assert_eq!(
+            crate::clipboard::select_linux_clipboard_write_backends(false, true)[0],
+            (
+                "xclip",
+                &["-selection", "clipboard", "-t", "UTF8_STRING"][..]
+            )
+        );
+
+        let session = ControlSession::new();
+        let pre_login_pkt = encode_clipboard_modern_packet(1, "pre_login_clip").unwrap();
+        session.handle_session_payload(&pre_login_pkt);
+        assert_eq!(session.snapshot().clipboard_remote, "pre_login_clip");
+        let login_pkt = encode_byte_array_fields(&[
+            b"\x00\x00",
+            &1920i32.to_le_bytes(),
+            &1080i32.to_le_bytes(),
+        ])
+        .unwrap();
+        session.handle_session_payload(&login_pkt);
+        let post_login_pkt = encode_clipboard_modern_packet(1, "post_login_clip").unwrap();
+        session.handle_session_payload(&post_login_pkt);
+        assert_eq!(session.snapshot().clipboard_remote, "post_login_clip");
     }
 }
