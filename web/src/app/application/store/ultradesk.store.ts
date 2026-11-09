@@ -177,6 +177,25 @@ export class UltraDeskStore {
     () => this.snapshot()?.file_transfers ?? [],
   );
   readonly chatMessages = computed<readonly string[]>(() => this.snapshot()?.chat_messages ?? []);
+  readonly updateStatus = computed(() => this.snapshot()?.update_status ?? null);
+  readonly updateBadgeVisible = computed(() => {
+    const u = this.updateStatus();
+    return Boolean(
+      u &&
+      (u.state === 'available' ||
+        u.state === 'downloading' ||
+        u.state === 'applying' ||
+        u.state === 'ready' ||
+        u.state === 'applied') &&
+      u.latest_version,
+    );
+  });
+  readonly shouldAutoOpenUpdateModal = computed(() => {
+    const u = this.updateStatus();
+    return Boolean(
+      u && u.state === 'available' && u.latest_version && u.dismissed_version !== u.latest_version,
+    );
+  });
 
   t(key: I18nKey, vars: Readonly<Record<string, string | number>> = {}): string {
     return translate(this.lang(), key, vars);

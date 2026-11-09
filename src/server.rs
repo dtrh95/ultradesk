@@ -1267,6 +1267,62 @@ pub(crate) fn handle_http_client(
                     ),
                 }
             }
+            ("POST", "/update/check") => {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body) {
+                    if let Some(api_url) = val.get("api_url").and_then(serde_json::Value::as_str) {
+                        let trimmed = api_url.trim();
+                        if trimmed.starts_with("http://127.0.0.1")
+                            || trimmed.starts_with("http://localhost")
+                        {
+                            session.set_update_api_url(trimmed.to_string());
+                        }
+                    }
+                }
+                match session.check_for_updates() {
+                    Ok(snap) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "update_status": snap }),
+                        keep_alive,
+                    ),
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e, "update_status": session.update_snapshot() }),
+                        keep_alive,
+                    ),
+                }
+            }
+            ("POST", "/update/confirm" | "/update/apply") => match session.confirm_update() {
+                Ok(msg) => write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "message": msg, "update_status": session.update_snapshot() }),
+                    keep_alive,
+                ),
+                Err(e) => write_json_response(
+                    &mut stream,
+                    400,
+                    &json!({ "ok": false, "error": e, "update_status": session.update_snapshot() }),
+                    keep_alive,
+                ),
+            },
+            ("POST", "/update/later" | "/update/dismiss") => {
+                let ver = if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body) {
+                    val.get("version")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                } else {
+                    None
+                };
+                session.dismiss_update(ver.as_deref());
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "update_status": session.update_snapshot() }),
+                    keep_alive,
+                )
+            }
             ("GET", "/mcp" | "/mcp/tools") => {
                 let tools = crate::mcp::list_mcp_tools();
                 write_json_response(

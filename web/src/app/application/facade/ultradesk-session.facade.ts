@@ -40,6 +40,7 @@ export class UltraDeskSessionFacade {
   private credsInitialized = false;
   private initialConnectCheckDone = false;
   private lastApprovalAutoOpened = false;
+  private autoOpenedUpdateVersion: string | null = null;
 
   private inputChain: Promise<void> = Promise.resolve();
   private readonly heldKeys = new Set<number>();
@@ -661,6 +662,43 @@ export class UltraDeskSessionFacade {
       .catch(() => undefined);
   }
 
+  openUpdateModal(): void {
+    this.setOverlay('update');
+  }
+
+  async checkForUpdates(apiUrl?: string): Promise<void> {
+    try {
+      await this.http.checkUpdate(apiUrl);
+      await this.refreshStatus();
+    } catch (e: unknown) {
+      this.showNotice(e, 'error');
+    }
+  }
+
+  async confirmUpdate(): Promise<void> {
+    try {
+      const res = await this.http.confirmUpdate();
+      await this.refreshStatus();
+      if (typeof res['message'] === 'string' && res['message']) {
+        this.showNotice(res['message'], 'info');
+      }
+    } catch (e: unknown) {
+      this.showNotice(e, 'error');
+    }
+  }
+
+  async dismissUpdate(version?: string | null): Promise<void> {
+    const nextOverlay = this.store.snapshot()?.state === 'connected' ? 'none' : 'connect';
+    try {
+      const targetVer = version || this.store.updateStatus()?.latest_version || null;
+      await this.http.dismissUpdate(targetVer);
+      this.setOverlay(nextOverlay);
+      await this.refreshStatus();
+    } catch {
+      this.setOverlay(nextOverlay);
+    }
+  }
+
   async sendChatMessage(text: string): Promise<void> {
     const clean = text.trim();
     if (!clean) {
@@ -862,7 +900,21 @@ export class UltraDeskSessionFacade {
         }
       }
 
+      const u = s.update_status;
       const hs = s.host_status;
+      if (
+        u &&
+        u.state === 'available' &&
+        u.latest_version &&
+        u.dismissed_version !== u.latest_version &&
+        this.autoOpenedUpdateVersion !== u.latest_version &&
+        (this.store.overlay() === 'none' ||
+          (this.store.overlay() === 'connect' && hs?.phase !== 'approval'))
+      ) {
+        this.autoOpenedUpdateVersion = u.latest_version;
+        this.setOverlay('update');
+      }
+
       if (hs?.phase === 'approval') {
         if (!this.lastApprovalAutoOpened) {
           this.lastApprovalAutoOpened = true;

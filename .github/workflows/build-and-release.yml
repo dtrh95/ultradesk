@@ -493,6 +493,10 @@ jobs:
         with:
           subject-path: 'artifacts/**/*'
 
+      - name: Generate SHA256 checksums
+        run: |
+          (cd artifacts && find . -type f ! -name 'SHA256SUMS.txt' -exec sha256sum {} + > SHA256SUMS.txt)
+
       - name: Replace existing GitHub Release if present
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -510,6 +514,7 @@ jobs:
             artifacts/**/*.tar.zst
             artifacts/macos-*/**/*.dmg
             artifacts/macos-*/**/*.app.tar.gz
+            artifacts/SHA256SUMS.txt
           generate_release_notes: true
           draft: false
           prerelease: false

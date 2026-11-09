@@ -54,6 +54,20 @@ export class PortalHttpAdapter {
     return record;
   }
 
+  async checkUpdate(apiUrl?: string): Promise<Record<string, unknown>> {
+    const payload = apiUrl ? { api_url: apiUrl } : {};
+    return this.postJson('/update/check', payload, 'Failed to check for updates');
+  }
+
+  async confirmUpdate(): Promise<Record<string, unknown>> {
+    return this.postJson('/update/confirm', {}, 'Failed to confirm update');
+  }
+
+  async dismissUpdate(version?: string | null): Promise<Record<string, unknown>> {
+    const payload = version ? { version } : {};
+    return this.postJson('/update/later', payload, 'Failed to dismiss update');
+  }
+
   async sendInputEvent(event: RemoteInputEvent, fallbackError: string): Promise<void> {
     await this.postJson('/event', event, fallbackError);
   }

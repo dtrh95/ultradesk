@@ -40,7 +40,7 @@ export const THEME_SHORT_LABELS: Readonly<Record<ThemeMode, string>> = {
 };
 
 export type LanguageCode = 'vi' | 'en';
-export type OverlayKind = 'none' | 'connect' | 'tools';
+export type OverlayKind = 'none' | 'connect' | 'tools' | 'update';
 export type ToolTab = 'chat' | 'files' | 'clipboard' | 'audio';
 export type NoticeKind = 'error' | 'warn' | 'info';
 

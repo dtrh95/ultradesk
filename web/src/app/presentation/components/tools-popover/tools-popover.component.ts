@@ -138,9 +138,7 @@ import { FileTransferItem } from '../../../domain/models/session.model';
               <div class="transfer-item">
                 <div style="display: flex; justify-content: space-between">
                   <strong>
-                    {{
-                      tr.direction === 'receive' ? store.t('dir_receive') : store.t('dir_send')
-                    }}
+                    {{ tr.direction === 'receive' ? store.t('dir_receive') : store.t('dir_send') }}
                     · {{ tr.file_name }}
                   </strong>
                   <span class="muted">{{ tr.status }}</span>

@@ -31,6 +31,8 @@ struct CliArgs {
     auto_approve: bool,
     no_gui: bool,
     open_browser: bool,
+    update_apply: bool,
+    update_check: bool,
 }
 
 impl Default for CliArgs {
@@ -52,6 +54,8 @@ impl Default for CliArgs {
             auto_approve: false,
             no_gui: false,
             open_browser: false,
+            update_apply: false,
+            update_check: false,
         }
     }
 }
@@ -63,7 +67,7 @@ fn parse_args() -> CliArgs {
     if let Some(first) = args.first() {
         if matches!(
             first.as_str(),
-            "host" | "id" | "master-password" | "mcp" | "help"
+            "host" | "id" | "master-password" | "mcp" | "update" | "help"
         ) {
             cfg.subcommand = Some(first.clone());
             i = 1;
@@ -135,6 +139,14 @@ fn parse_args() -> CliArgs {
             }
             "--open-browser" => {
                 cfg.open_browser = true;
+                i += 1;
+            }
+            "--check" => {
+                cfg.update_check = true;
+                i += 1;
+            }
+            "--apply" => {
+                cfg.update_apply = true;
                 i += 1;
             }
             other => {
@@ -274,6 +286,7 @@ fn main() {
             println!("  ultradesk-rust mcp [--port <PORT>] [OPTS]     Run Model Context Protocol (MCP) server (stdio or WebSocket/HTTP)");
             println!("  ultradesk-rust id                             Print Host ID, Temp Password, and XDG profile info");
             println!("  ultradesk-rust master-password <PW>|--clear   Set or clear persistent Host master password");
+            println!("  ultradesk-rust update [--check | --apply]     Check for updates or apply staged release");
             println!("\nOptions:");
             println!(
                 "  --host <ADDR>          Bind address for Portal/MCP server (default: 127.0.0.1)"
@@ -343,6 +356,54 @@ fn main() {
                 }
             }
         }
+        if sub == "update" {
+            let session = ControlSession::new();
+            match session.check_for_updates() {
+                Ok(snap) => {
+                    println!("UltraDesk Update Status:");
+                    println!("  Current version: {}", snap.current_version);
+                    println!(
+                        "  Latest version:  {}",
+                        snap.latest_version.as_deref().unwrap_or("---")
+                    );
+                    println!(
+                        "  Install target:  {} ({})",
+                        snap.install_target, snap.install_target_kind
+                    );
+                    if let Some(ref asset) = snap.asset_name {
+                        println!("  Matched asset:   {}", asset);
+                    }
+                    if let Some(ref notes) = snap.release_notes {
+                        println!("  Release notes:   {}", notes.lines().next().unwrap_or(""));
+                    }
+                    if snap.state == ultradesk_rust::updater::UpdateState::UpToDate {
+                        println!("Status: UltraDesk is up to date.");
+                        return;
+                    }
+                    if snap.state == ultradesk_rust::updater::UpdateState::Available {
+                        println!("Status: New update is available!");
+                        if args.update_apply {
+                            println!("Applying update...");
+                            match session.confirm_update() {
+                                Ok(msg) => println!("Success: {}", msg),
+                                Err(e) => {
+                                    eprintln!("Error applying update: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                        } else {
+                            println!("Run 'ultradesk-rust update --apply' to download and install this update.");
+                        }
+                        return;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Update check failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
     }
 
     let reg_profile = args
@@ -366,6 +427,7 @@ fn main() {
         .unwrap_or_else(|| DEFAULT_ZSTD_DICT.to_vec());
 
     let session = ControlSession::with_profiles(reg_profile, partner_profile, dict_bytes);
+    session.spawn_background_update_check();
 
     if args.auto_approve {
         if let Ok(guard) = session.inner.lock() {

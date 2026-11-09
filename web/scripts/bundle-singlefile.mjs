@@ -7,7 +7,7 @@ const distBrowserDir = path.resolve(__dirname, '../dist/ultradesk-viewer/browser
 const srcStylesPath = path.resolve(__dirname, '../src/styles.css');
 const outputViewerHtml = path.resolve(__dirname, '../../viewer.html');
 
-const STATIC_SSR_SHELL = `<ud-root><header id="topPill" class="top-pill menu-toolbar" role="menubar"><button id="pillDragHandle" class="pill-drag-handle" type="button"></button><div id="pillExpandedContent" class="pill-expanded-content"><button id="btnToggleConnect" class="pill-btn active" type="button" data-conn-state="disconnected"><span id="status">Connect</span></button><button id="btnCycleTheme" class="pill-btn" type="button"></button><select id="themeSelect"></select><button id="btnLangVi" class="lang-btn" type="button">VI</button><button id="btnLangEn" class="lang-btn active" type="button">EN</button><button id="btnFullscreen" class="pill-btn" type="button"></button><button id="btnCollapsePill" class="pill-btn" type="button"></button></div><button id="btnRestorePill" class="pill-restore-tab" type="button"><span id="restoreStatusDot" class="restore-dot"></span></button></header><aside id="uiNotice" class="ui-notice" role="alert" aria-live="assertive"></aside><div class="canvas-stage"><canvas tabindex="0" id="screen" width="1280" height="720"></canvas></div><div id="connectModal" class="modal-backdrop"></div><div id="toolsPopover" class="tools-popover"><div class="tab-bar"><div class="m-tab-ind"></div></div></div></ud-root>`;
+const STATIC_SSR_SHELL = `<ud-root><header id="topPill" class="top-pill menu-toolbar" role="menubar"><button id="pillDragHandle" class="pill-drag-handle" type="button"></button><div id="pillExpandedContent" class="pill-expanded-content"><button id="btnToggleConnect" class="pill-btn active" type="button" data-conn-state="disconnected"><span id="status">Connect</span></button><button id="btnUpdateBadge" class="pill-btn update-badge-btn" type="button" style="display:none"></button><button id="btnCycleTheme" class="pill-btn" type="button"></button><select id="themeSelect"></select><button id="btnLangVi" class="lang-btn" type="button">VI</button><button id="btnLangEn" class="lang-btn active" type="button">EN</button><button id="btnFullscreen" class="pill-btn" type="button"></button><button id="btnCollapsePill" class="pill-btn" type="button"></button></div><button id="btnRestorePill" class="pill-restore-tab" type="button"><span id="restoreStatusDot" class="restore-dot"></span></button></header><aside id="uiNotice" class="ui-notice" role="alert" aria-live="assertive"></aside><div class="canvas-stage"><canvas tabindex="0" id="screen" width="1280" height="720"></canvas></div><div id="connectModal" class="modal-backdrop"></div><div id="toolsPopover" class="tools-popover"><div class="tab-bar"><div class="m-tab-ind"></div></div></div><div id="updateModal" class="modal-backdrop" style="display:none"><div class="spotlight-card update-modal-card"><button id="btnConfirmUpdate"></button><button id="btnLaterUpdate"></button></div></div></ud-root>`;
 
 const RUNTIME_CONTRACT_PRELUDE = `const I18N = { vi: { nav_connect: 'Kết nối' }, en: { nav_connect: 'Connect' } };
 const KEYMAP_VERIFY_SIG = { ControlLeft:17, lang: 'en' };
@@ -90,6 +90,10 @@ ${jsContent}
     '--m-ease',
     'showNotice',
     '.m-tab-ind',
+    'id="updateModal"',
+    'id="btnConfirmUpdate"',
+    'id="btnLaterUpdate"',
+    'id="btnUpdateBadge"',
   ];
 
   for (const req of requiredSubstrings) {

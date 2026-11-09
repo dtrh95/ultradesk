@@ -711,6 +711,8 @@ pub struct SavedCredentials {
     pub language: String,
     #[serde(default)]
     pub toolbar_collapsed: bool,
+    #[serde(default)]
+    pub dismissed_update_version: Option<String>,
 }
 
 fn default_remember_true() -> bool {
@@ -735,6 +737,7 @@ impl Default for SavedCredentials {
             theme: default_theme_mode(),
             language: default_ui_language(),
             toolbar_collapsed: false,
+            dismissed_update_version: None,
         }
     }
 }
@@ -874,6 +877,8 @@ pub struct SessionState {
     pub e2e_cipher: String,
     #[serde(default)]
     pub e2e_fingerprint: String,
+    #[serde(default)]
+    pub update_status: crate::updater::UpdateStatusSnapshot,
 }
 
 impl Default for SessionState {
@@ -931,6 +936,7 @@ impl Default for SessionState {
             e2e_enabled: false,
             e2e_cipher: String::new(),
             e2e_fingerprint: String::new(),
+            update_status: crate::updater::UpdateStatusSnapshot::default(),
         }
     }
 }
@@ -957,6 +963,7 @@ pub struct ControlSessionInner {
     pub outbound_queue: Vec<(Vec<u8>, bool, Option<InputEvent>)>,
     pub last_local_move_at: Option<Instant>,
     pub e2e: crate::e2e::E2eNegotiationState,
+    pub update_engine: Arc<crate::updater::UpdateEngine>,
 }
 
 #[derive(Clone)]
@@ -1052,6 +1059,11 @@ impl ControlSession {
             DesktopBackend::auto_detect(),
         );
         host_session.set_auto_approve(true);
+        let update_engine = Arc::new(crate::updater::UpdateEngine::new());
+        let saved_creds = load_saved_credentials();
+        if let Some(ref dismissed) = saved_creds.dismissed_update_version {
+            update_engine.set_dismissed_version(Some(dismissed.clone()));
+        }
         let mut inner = ControlSessionInner {
             state: SessionState::default(),
             registration_profile,
@@ -1074,6 +1086,7 @@ impl ControlSession {
             outbound_queue: Vec::new(),
             last_local_move_at: None,
             e2e: crate::e2e::E2eNegotiationState::Disabled,
+            update_engine,
         };
         Self::sync_state_fields(&mut inner);
         Self {
@@ -1430,6 +1443,7 @@ impl ControlSession {
         inner.state.e2e_enabled = inner.e2e.is_enabled();
         inner.state.e2e_cipher = inner.e2e.cipher_name().to_string();
         inner.state.e2e_fingerprint = inner.e2e.fingerprint().to_string();
+        inner.state.update_status = inner.update_engine.snapshot();
         inner.state.updated_at = now_epoch_secs();
     }
 
@@ -1893,6 +1907,7 @@ impl ControlSession {
                 theme: existing.theme,
                 language: existing.language,
                 toolbar_collapsed: existing.toolbar_collapsed,
+                dismissed_update_version: existing.dismissed_update_version,
             }
         } else {
             SavedCredentials {
@@ -1903,6 +1918,7 @@ impl ControlSession {
                 theme: existing.theme,
                 language: existing.language,
                 toolbar_collapsed: existing.toolbar_collapsed,
+                dismissed_update_version: existing.dismissed_update_version,
             }
         };
         let _ = save_credentials(&creds);
@@ -2509,5 +2525,70 @@ impl ControlSession {
         let payload = mouse_move(rx, ry)?;
         Self::dispatch_payload(&mut guard, &payload, false, None)?;
         Ok(payload)
+    }
+
+    pub fn check_for_updates(&self) -> Result<crate::updater::UpdateStatusSnapshot, String> {
+        let engine = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.update_engine.clone()
+        };
+        let snap = engine.check_for_updates()?;
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::sync_state_fields(&mut guard);
+        Ok(snap)
+    }
+
+    pub fn confirm_update(&self) -> Result<String, String> {
+        let engine = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.update_engine.clone()
+        };
+        let msg = engine.confirm_and_apply()?;
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::sync_state_fields(&mut guard);
+        Ok(msg)
+    }
+
+    pub fn dismiss_update(&self, version: Option<&str>) {
+        let (engine, target_ver) = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let v = version
+                .map(str::to_string)
+                .or_else(|| guard.update_engine.snapshot().latest_version);
+            (guard.update_engine.clone(), v)
+        };
+        engine.set_dismissed_version(target_ver.clone());
+        let mut creds = load_saved_credentials();
+        creds.dismissed_update_version = target_ver;
+        let _ = save_credentials(&creds);
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::sync_state_fields(&mut guard);
+    }
+
+    pub fn set_update_api_url(&self, url: String) {
+        let engine = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.update_engine.clone()
+        };
+        engine.set_api_url(url);
+    }
+
+    pub fn update_snapshot(&self) -> crate::updater::UpdateStatusSnapshot {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.update_engine.snapshot()
+    }
+
+    pub fn spawn_background_update_check(&self) {
+        if std::env::var("ULTRADESK_DISABLE_AUTO_UPDATE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let session = self.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(1200));
+            let _ = session.check_for_updates();
+        });
     }
 }

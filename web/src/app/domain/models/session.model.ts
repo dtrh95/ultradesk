@@ -37,6 +37,35 @@ export interface HostStatusSnapshot {
   readonly selected_monitors: readonly number[];
 }
 
+export type UpdateState =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'up_to_date'
+  | 'downloading'
+  | 'ready'
+  | 'applying'
+  | 'applied'
+  | 'error';
+
+export interface UpdateStatusSnapshot {
+  readonly state: UpdateState;
+  readonly current_version: string;
+  readonly latest_version: string | null;
+  readonly release_notes: string | null;
+  readonly release_url: string | null;
+  readonly download_progress_pct: number | null;
+  readonly downloaded_bytes: number;
+  readonly total_bytes: number | null;
+  readonly install_target: string;
+  readonly install_target_kind: string;
+  readonly asset_name: string | null;
+  readonly staged_path: string | null;
+  readonly error: string | null;
+  readonly dismissed_version: string | null;
+  readonly message: string | null;
+}
+
 export interface SessionSnapshot {
   readonly state: ConnectionState;
   readonly error: string | null;
@@ -69,6 +98,7 @@ export interface SessionSnapshot {
   readonly file_transfers: readonly FileTransferItem[];
   readonly chat_messages: readonly string[];
   readonly host_status: HostStatusSnapshot | null;
+  readonly update_status: UpdateStatusSnapshot | null;
 }
 
 export interface ActiveE2eInfo {

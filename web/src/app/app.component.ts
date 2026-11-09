@@ -11,6 +11,7 @@ import { resolveVirtualKeyCode } from './domain/services/keymap.domain-service';
 import { CanvasStageComponent } from './presentation/components/canvas-stage/canvas-stage.component';
 import { ConnectModalComponent } from './presentation/components/connect-modal/connect-modal.component';
 import { ToolsPopoverComponent } from './presentation/components/tools-popover/tools-popover.component';
+import { UpdateModalComponent } from './presentation/components/update-modal/update-modal.component';
 import { TopPillToolbarComponent } from './presentation/components/top-pill-toolbar/top-pill-toolbar.component';
 import { UiNoticeComponent } from './presentation/components/ui-notice/ui-notice.component';
 
@@ -37,6 +38,7 @@ function isEditableElement(target: EventTarget | null): boolean {
     CanvasStageComponent,
     ConnectModalComponent,
     ToolsPopoverComponent,
+    UpdateModalComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -45,6 +47,7 @@ function isEditableElement(target: EventTarget | null): boolean {
     <ud-canvas-stage />
     <ud-connect-modal />
     <ud-tools-popover #toolsPopover />
+    <ud-update-modal />
   `,
 })
 export class AppComponent implements OnInit, OnDestroy {

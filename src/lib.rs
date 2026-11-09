@@ -19,6 +19,7 @@ pub mod protocol;
 pub mod screen;
 pub mod server;
 pub mod session;
+pub mod updater;
 
 #[cfg(test)]
 mod tests {

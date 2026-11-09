@@ -162,7 +162,7 @@ impl McpTool {
                 "Accept, cancel, or download a file transfer by file_id."
             }
             Self::ManageHost => {
-                "Inspect or control the local UltraDesk Host service (status, start, stop, approve, decline, set_control, or set_master_password)."
+                "Inspect or control the local UltraDesk Host service (status, start, stop, approve, decline, set_control, set_master_password, check_update, apply_update, dismiss_update)."
             }
         }
     }
@@ -446,7 +446,12 @@ impl McpTool {
                             "approve",
                             "decline",
                             "set_control",
-                            "set_master_password"
+                            "set_master_password",
+                            "check_update",
+                            "apply_update",
+                            "confirm_update",
+                            "dismiss_update",
+                            "later_update"
                         ],
                         "default": "status"
                     },
@@ -1222,23 +1227,69 @@ impl McpTool {
                     .get("allow_control")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
-                let host = match action {
-                    "status" => session.host_status(),
-                    "start" => session.host_start(),
-                    "stop" => session.host_stop(),
-                    "approve" => session.host_approve(allow_control)?,
-                    "decline" => session.host_decline()?,
-                    "set_control" => session.host_set_control(allow_control)?,
-                    "set_master_password" => {
-                        let pw = args.get("master_password").and_then(Value::as_str);
-                        session.host_set_master_password(pw)?
+                match action {
+                    "check_update" => {
+                        let snap = session.check_for_updates()?;
+                        Ok(vec![json!({
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&json!({
+                                "ok": true,
+                                "action": "check_update",
+                                "update_status": snap
+                            })).unwrap_or_default()
+                        })])
                     }
-                    other => return Err(format!("unsupported host action: {}", other)),
-                };
-                Ok(vec![json!({
-                    "type": "text",
-                    "text": serde_json::to_string_pretty(&host).unwrap_or_default()
-                })])
+                    "apply_update" | "confirm_update" => {
+                        let msg = session.confirm_update()?;
+                        Ok(vec![json!({
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&json!({
+                                "ok": true,
+                                "action": "apply_update",
+                                "message": msg,
+                                "update_status": session.update_snapshot()
+                            })).unwrap_or_default()
+                        })])
+                    }
+                    "dismiss_update" | "later_update" => {
+                        let ver = args.get("version").and_then(Value::as_str);
+                        session.dismiss_update(ver);
+                        Ok(vec![json!({
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&json!({
+                                "ok": true,
+                                "action": "dismiss_update",
+                                "update_status": session.update_snapshot()
+                            })).unwrap_or_default()
+                        })])
+                    }
+                    "status"
+                    | "start"
+                    | "stop"
+                    | "approve"
+                    | "decline"
+                    | "set_control"
+                    | "set_master_password" => {
+                        let host = match action {
+                            "status" => session.host_status(),
+                            "start" => session.host_start(),
+                            "stop" => session.host_stop(),
+                            "approve" => session.host_approve(allow_control)?,
+                            "decline" => session.host_decline()?,
+                            "set_control" => session.host_set_control(allow_control)?,
+                            "set_master_password" => {
+                                let pw = args.get("master_password").and_then(Value::as_str);
+                                session.host_set_master_password(pw)?
+                            }
+                            _ => unreachable!(),
+                        };
+                        Ok(vec![json!({
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&host).unwrap_or_default()
+                        })])
+                    }
+                    other => Err(format!("unsupported host action: {}", other)),
+                }
             }
         }
     }

@@ -51,6 +51,20 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
           >
             {{ store.e2eLabel() }}
           </span>
+          <button
+            id="btnUpdateBadge"
+            class="pill-btn update-badge-btn"
+            type="button"
+            [style.display]="store.updateBadgeVisible() ? 'inline-flex' : 'none'"
+            (click)="facade.openUpdateModal()"
+          >
+            <svg class="svg-icon" viewBox="0 0 24 24">
+              <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2" />
+              <path d="M7 11l5 5l5 -5" />
+              <path d="M12 4l0 12" />
+            </svg>
+            <span>{{ updateBadgeLabel() }}</span>
+          </button>
         </div>
         <div class="pill-sep"></div>
         <div class="toolbar-cluster center-cluster">
@@ -275,6 +289,12 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
 export class TopPillToolbarComponent {
   protected readonly facade = inject(UltraDeskSessionFacade);
   protected readonly store = this.facade.store;
+
+  protected readonly updateBadgeLabel = computed(() => {
+    const snap = this.store.updateStatus();
+    const ver = snap?.latest_version || '';
+    return this.store.t('update_badge', { ver });
+  });
 
   protected readonly restoreDotColor = computed(() => {
     const state = this.store.connectionState();

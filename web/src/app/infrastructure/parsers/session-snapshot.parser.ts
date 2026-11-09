@@ -6,6 +6,8 @@ import {
   SavedRemote,
   SessionSnapshot,
   TransferDirection,
+  UpdateState,
+  UpdateStatusSnapshot,
 } from '../../domain/models/session.model';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -134,6 +136,71 @@ function parseFileTransfers(value: unknown): FileTransferItem[] {
   return list;
 }
 
+function parseUpdateState(value: unknown): UpdateState {
+  if (
+    value === 'idle' ||
+    value === 'checking' ||
+    value === 'available' ||
+    value === 'up_to_date' ||
+    value === 'downloading' ||
+    value === 'ready' ||
+    value === 'applying' ||
+    value === 'applied' ||
+    value === 'error'
+  ) {
+    return value;
+  }
+  return 'idle';
+}
+
+function parseUpdateStatus(value: unknown): UpdateStatusSnapshot | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const pctRaw = value['download_progress_pct'];
+  const pct = typeof pctRaw === 'number' && Number.isFinite(pctRaw) ? Math.round(pctRaw) : null;
+  const totalRaw = value['total_bytes'];
+  const total = typeof totalRaw === 'number' && Number.isFinite(totalRaw) ? totalRaw : null;
+  const latestRaw = value['latest_version'];
+  const latest =
+    typeof latestRaw === 'string' && latestRaw.trim().length > 0 ? latestRaw.trim() : null;
+  const notesRaw = value['release_notes'];
+  const notes = typeof notesRaw === 'string' && notesRaw.trim().length > 0 ? notesRaw : null;
+  const urlRaw = value['release_url'];
+  const releaseUrl = typeof urlRaw === 'string' && urlRaw.trim().length > 0 ? urlRaw.trim() : null;
+  const assetRaw = value['asset_name'];
+  const assetName =
+    typeof assetRaw === 'string' && assetRaw.trim().length > 0 ? assetRaw.trim() : null;
+  const stagedRaw = value['staged_path'];
+  const stagedPath =
+    typeof stagedRaw === 'string' && stagedRaw.trim().length > 0 ? stagedRaw.trim() : null;
+  const errRaw = value['error'];
+  const error = typeof errRaw === 'string' && errRaw.trim().length > 0 ? errRaw.trim() : null;
+  const dismissedRaw = value['dismissed_version'];
+  const dismissed =
+    typeof dismissedRaw === 'string' && dismissedRaw.trim().length > 0 ? dismissedRaw.trim() : null;
+  const msgRaw = value['message'];
+  const message = typeof msgRaw === 'string' && msgRaw.trim().length > 0 ? msgRaw.trim() : null;
+
+  return {
+    state: parseUpdateState(value['state']),
+    current_version: asString(value['current_version'], '1.0.5'),
+    latest_version: latest,
+    release_notes: notes,
+    release_url: releaseUrl,
+    download_progress_pct: pct,
+    downloaded_bytes: asNumber(value['downloaded_bytes'], 0),
+    total_bytes: total,
+    install_target: asString(value['install_target'], 'Unknown'),
+    install_target_kind: asString(value['install_target_kind'], 'unknown'),
+    asset_name: assetName,
+    staged_path: stagedPath,
+    error,
+    dismissed_version: dismissed,
+    message,
+  };
+}
+
 export function parseSessionSnapshot(raw: unknown): SessionSnapshot {
   const obj = isRecord(raw) ? raw : {};
   const selMonRaw = obj['selected_monitor'];
@@ -179,5 +246,6 @@ export function parseSessionSnapshot(raw: unknown): SessionSnapshot {
       ? obj['chat_messages'].map((m) => String(m))
       : [],
     host_status: parseHostStatus(obj['host_status']),
+    update_status: parseUpdateStatus(obj['update_status']),
   };
 }
