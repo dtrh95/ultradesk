@@ -115,15 +115,20 @@ function parseFileTransfers(value: unknown): FileTransferItem[] {
     if (!isRecord(item)) {
       continue;
     }
-    const dirRaw = item['direction'];
+    const dirRaw = asString(item['direction'], 'send').toLowerCase();
     const direction: TransferDirection = dirRaw === 'receive' ? 'receive' : 'send';
+    const statusRaw = asString(item['status'], 'offered').toLowerCase();
+    const savedPathRaw = item['saved_path'];
+    const savedPath =
+      typeof savedPathRaw === 'string' && savedPathRaw.trim().length > 0 ? savedPathRaw : null;
     list.push({
       file_id: asString(item['file_id'], ''),
       file_name: asString(item['file_name'], 'file'),
       file_size: asNumber(item['file_size'], 0),
       transferred_bytes: asNumber(item['transferred_bytes'], 0),
       direction,
-      status: asString(item['status'], 'offered'),
+      status: statusRaw,
+      saved_path: savedPath,
     });
   }
   return list;

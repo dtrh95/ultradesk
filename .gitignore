@@ -12,3 +12,4 @@ credentials.json
 *-private.json
 decisions.tsv
 .audit/
+.agents/skills/verify-ultradesk-rust/

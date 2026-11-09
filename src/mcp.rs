@@ -421,14 +421,18 @@ impl McpTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["accept", "cancel", "download"]
+                        "enum": ["accept", "cancel", "download", "receive"]
                     },
                     "file_id": {
                         "type": "string",
-                        "description": "Identifier of the file transfer."
+                        "description": "Identifier of the file transfer (for accept, cancel, download)."
+                    },
+                    "remote_path": {
+                        "type": "string",
+                        "description": "Remote file path to pull from the connected remote host (for action='receive')."
                     }
                 },
-                "required": ["action", "file_id"]
+                "required": ["action"]
             }),
             Self::ManageHost => json!({
                 "type": "object",
@@ -1139,12 +1143,12 @@ impl McpTool {
                     .get("action")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "missing 'action'".to_string())?;
-                let file_id = args
-                    .get("file_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "missing 'file_id'".to_string())?;
                 match action {
                     "accept" => {
+                        let file_id = args
+                            .get("file_id")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "missing 'file_id'".to_string())?;
                         session.accept_file(file_id)?;
                         Ok(vec![json!({
                             "type": "text",
@@ -1156,6 +1160,10 @@ impl McpTool {
                         })])
                     }
                     "cancel" => {
+                        let file_id = args
+                            .get("file_id")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "missing 'file_id'".to_string())?;
                         session.cancel_file(file_id)?;
                         Ok(vec![json!({
                             "type": "text",
@@ -1167,6 +1175,10 @@ impl McpTool {
                         })])
                     }
                     "download" => {
+                        let file_id = args
+                            .get("file_id")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "missing 'file_id'".to_string())?;
                         let (name, bytes) = session
                             .downloaded_file_bytes(file_id)
                             .ok_or_else(|| format!("file transfer '{}' not found", file_id))?;
@@ -1178,6 +1190,23 @@ impl McpTool {
                                 "file_name": name,
                                 "size": bytes.len(),
                                 "data_base64": encode_base64(&bytes)
+                            })).unwrap_or_default()
+                        })])
+                    }
+                    "receive" => {
+                        let remote_path = args
+                            .get("remote_path")
+                            .or_else(|| args.get("file_path"))
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| "missing 'remote_path'".to_string())?;
+                        let wire = session.request_remote_file(remote_path)?;
+                        Ok(vec![json!({
+                            "type": "text",
+                            "text": serde_json::to_string(&json!({
+                                "ok": true,
+                                "action": "receive",
+                                "remote_path": remote_path.trim(),
+                                "bytes_sent": wire.len()
                             })).unwrap_or_default()
                         })])
                     }

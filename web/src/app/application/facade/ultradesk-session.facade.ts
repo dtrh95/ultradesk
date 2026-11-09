@@ -633,6 +633,22 @@ export class UltraDeskSessionFacade {
     }
   }
 
+  async receiveRemoteFileByPath(remotePath: string): Promise<void> {
+    const clean = remotePath.trim();
+    if (!clean) {
+      return;
+    }
+    try {
+      await this.http.postJson(
+        '/files/receive',
+        { remote_path: clean },
+        this.store.t('err_failed'),
+      );
+    } catch (e: unknown) {
+      this.showNotice(e, 'error');
+    }
+  }
+
   async acceptTransfer(fileId: string): Promise<void> {
     await this.http
       .postJson('/files/accept', { file_id: fileId }, this.store.t('err_failed'))

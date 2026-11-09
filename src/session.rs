@@ -5,7 +5,8 @@ use crate::clipboard::{
 };
 use crate::cursor::{decode_cursor_parts, CursorManager};
 use crate::file_transfer::{
-    encode_chat_message, is_utf16_string_packet, FileTransferEntry, FileTransferManager,
+    encode_chat_message, encode_file_request, is_utf16_string_packet, FileTransferEntry,
+    FileTransferManager,
 };
 use crate::host::{DesktopBackend, HostSession, HostStatus, DEFAULT_LAN_PORT};
 use crate::input::{
@@ -1322,13 +1323,15 @@ impl ControlSession {
 
     pub fn downloaded_file_bytes(&self, file_id: &str) -> Option<(String, Vec<u8>)> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = guard.files.transfers.get(file_id)?;
-        if entry.direction == crate::file_transfer::TransferDirection::Send
-            && entry.saved_path.is_some()
-        {
-            return None;
+        if let Some(entry) = guard.files.transfers.get(file_id) {
+            if entry.direction == crate::file_transfer::TransferDirection::Send
+                && entry.saved_path.is_some()
+            {
+                return None;
+            }
+            return Some((entry.file_name.clone(), entry.buffer.clone()));
         }
-        Some((entry.file_name.clone(), entry.buffer.clone()))
+        guard.host_session.downloaded_file_bytes(file_id)
     }
 
     fn sync_state_fields(inner: &mut ControlSessionInner) {
@@ -1412,7 +1415,17 @@ impl ControlSession {
         inner.state.clipboard_auto_sync = inner.clipboard.auto_sync_system;
         inner.state.clipboard_updates_sent = inner.clipboard.updates_sent;
         inner.state.clipboard_updates_received = inner.clipboard.updates_received;
-        inner.state.file_transfers = inner.files.transfers.values().cloned().collect();
+        let mut combined_transfers: Vec<FileTransferEntry> =
+            inner.files.transfers.values().cloned().collect();
+        for host_tr in inner.host_session.file_transfers() {
+            if !combined_transfers
+                .iter()
+                .any(|t| t.file_id == host_tr.file_id)
+            {
+                combined_transfers.push(host_tr);
+            }
+        }
+        inner.state.file_transfers = combined_transfers;
         inner.state.chat_messages = inner.files.chat_messages.clone();
         inner.state.e2e_enabled = inner.e2e.is_enabled();
         inner.state.e2e_cipher = inner.e2e.cipher_name().to_string();
@@ -1744,6 +1757,18 @@ impl ControlSession {
 
     pub fn offer_file_bytes(&self, file_name: &str, data: Vec<u8>) -> Result<String, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.state.state != "connected" {
+            let hs = guard.host_session.status();
+            if matches!(
+                hs.phase,
+                crate::host::HostPhase::Starting | crate::host::HostPhase::Streaming
+            ) {
+                let file_id = guard.host_session.offer_file_bytes(file_name, data)?;
+                guard.state.last_message = format!("Host offered file {} ({})", file_name, file_id);
+                Self::sync_state_fields(&mut guard);
+                return Ok(file_id);
+            }
+        }
         let (file_id, pkt) = guard.files.offer_file_bytes(file_name, data)?;
         let is_utf16 = is_utf16_string_packet(&pkt);
         Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
@@ -1754,6 +1779,19 @@ impl ControlSession {
 
     pub fn offer_file_from_path(&self, path: &Path) -> Result<String, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.state.state != "connected" {
+            let hs = guard.host_session.status();
+            if matches!(
+                hs.phase,
+                crate::host::HostPhase::Starting | crate::host::HostPhase::Streaming
+            ) {
+                let file_id = guard.host_session.offer_file_from_path(path)?;
+                guard.state.last_message =
+                    format!("Host offered file {} ({})", path.display(), file_id);
+                Self::sync_state_fields(&mut guard);
+                return Ok(file_id);
+            }
+        }
         let (file_id, pkt) = guard.files.offer_file_from_path(path)?;
         let is_utf16 = is_utf16_string_packet(&pkt);
         Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
@@ -1762,22 +1800,50 @@ impl ControlSession {
         Ok(file_id)
     }
 
-    pub fn accept_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
+    pub fn request_remote_file(&self, remote_path: &str) -> Result<Vec<u8>, String> {
+        let cleaned = remote_path.trim();
+        if cleaned.is_empty() {
+            return Err("Remote file path cannot be empty".to_string());
+        }
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let pkt = guard.files.accept_incoming_offer(file_id)?;
+        guard.files.auto_accept = true;
+        let modern = guard.files.modern_protocol;
+        let pkt = encode_file_request(cleaned, modern)?;
         let is_utf16 = is_utf16_string_packet(&pkt);
         Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
-        guard.state.last_message = format!("Accepted incoming file {}", file_id);
+        guard.state.last_message = format!("Requested remote file {}", cleaned);
+        Self::sync_state_fields(&mut guard);
+        Ok(pkt)
+    }
+
+    pub fn accept_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.files.transfers.contains_key(file_id) {
+            let pkt = guard.files.accept_incoming_offer(file_id)?;
+            let is_utf16 = is_utf16_string_packet(&pkt);
+            Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
+            guard.state.last_message = format!("Accepted incoming file {}", file_id);
+            Self::sync_state_fields(&mut guard);
+            return Ok(pkt);
+        }
+        let pkt = guard.host_session.accept_file(file_id)?;
+        guard.state.last_message = format!("Host accepted incoming file {}", file_id);
         Self::sync_state_fields(&mut guard);
         Ok(pkt)
     }
 
     pub fn cancel_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let pkt = guard.files.cancel_transfer(file_id)?;
-        let is_utf16 = is_utf16_string_packet(&pkt);
-        Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
-        guard.state.last_message = format!("Cancelled file transfer {}", file_id);
+        if guard.files.transfers.contains_key(file_id) {
+            let pkt = guard.files.cancel_transfer(file_id)?;
+            let is_utf16 = is_utf16_string_packet(&pkt);
+            Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
+            guard.state.last_message = format!("Cancelled file transfer {}", file_id);
+            Self::sync_state_fields(&mut guard);
+            return Ok(pkt);
+        }
+        let pkt = guard.host_session.cancel_file(file_id)?;
+        guard.state.last_message = format!("Host cancelled file transfer {}", file_id);
         Self::sync_state_fields(&mut guard);
         Ok(pkt)
     }

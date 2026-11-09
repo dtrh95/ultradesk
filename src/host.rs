@@ -585,6 +585,7 @@ pub enum HostAction {
     ReleaseAllInput,
     ChatReceived(String),
     ClipboardReceived(String),
+    FileTransferEvent(crate::file_transfer::FileTransferPacket),
     SessionEnded(String),
 }
 
@@ -716,6 +717,7 @@ pub struct HostCore {
     pub layout: DisplayLayout,
     pub qos: VideoQos,
     pub e2e: crate::e2e::E2eNegotiationState,
+    pub files: crate::file_transfer::FileTransferManager,
     pub used_nonces: std::collections::VecDeque<String>,
 }
 
@@ -725,6 +727,10 @@ impl HostCore {
         master_password_proof: Option<String>,
         layout: DisplayLayout,
     ) -> Self {
+        let mut files = crate::file_transfer::FileTransferManager::default();
+        files.id_prefix = "uvh_".to_string();
+        files.auto_accept = true;
+        files.allow_remote_requests = true;
         Self {
             phase: HostPhase::None,
             temp_password: temp_password.to_string(),
@@ -739,6 +745,7 @@ impl HostCore {
             layout,
             qos: VideoQos::default(),
             e2e: crate::e2e::E2eNegotiationState::Disabled,
+            files,
             used_nonces: std::collections::VecDeque::new(),
         }
     }
@@ -953,6 +960,39 @@ impl HostCore {
                 if let Some(clip) = crate::clipboard::decode_clipboard_packet(payload) {
                     actions.push(HostAction::ClipboardReceived(clip.text));
                     return actions;
+                }
+            }
+            if let Some(decoded_ft) = crate::file_transfer::decode_file_transfer_packet(payload) {
+                match decoded_ft {
+                    crate::file_transfer::FileTransferPacket::ChatMessage { text } => {
+                        actions.push(HostAction::ChatReceived(text));
+                        return actions;
+                    }
+                    other => {
+                        if self.phase == HostPhase::Streaming && self.control_allowed {
+                            if let Ok(Some((ft_pkt, replies))) = self.files.handle_packet(payload) {
+                                for reply in replies {
+                                    let sealed = self.seal_peer_packet(&reply);
+                                    actions.push(HostAction::SendPeer(sealed));
+                                }
+                                actions.push(HostAction::FileTransferEvent(ft_pkt));
+                                return actions;
+                            }
+                        } else if let crate::file_transfer::FileTransferPacket::Offer {
+                            file_id,
+                            ..
+                        } = other
+                        {
+                            if let Ok(cancel_pkt) = crate::file_transfer::encode_file_cancel(
+                                &file_id,
+                                self.files.modern_protocol,
+                            ) {
+                                let sealed = self.seal_peer_packet(&cancel_pkt);
+                                actions.push(HostAction::SendPeer(sealed));
+                            }
+                            return actions;
+                        }
+                    }
                 }
             }
         }
@@ -3530,6 +3570,69 @@ impl HostSession {
         }
     }
 
+    pub fn set_download_dir(&self, download_dir: std::path::PathBuf) {
+        let mut s = self.inner.lock().unwrap();
+        s.core.files.download_dir = download_dir;
+    }
+
+    pub fn file_transfers(&self) -> Vec<crate::file_transfer::FileTransferEntry> {
+        let s = self.inner.lock().unwrap();
+        s.core.files.transfers.values().cloned().collect()
+    }
+
+    pub fn downloaded_file_bytes(&self, file_id: &str) -> Option<(String, Vec<u8>)> {
+        let s = self.inner.lock().unwrap();
+        let entry = s.core.files.transfers.get(file_id)?;
+        if entry.direction == crate::file_transfer::TransferDirection::Send
+            && entry.saved_path.is_some()
+        {
+            return None;
+        }
+        Some((entry.file_name.clone(), entry.buffer.clone()))
+    }
+
+    pub fn offer_file_bytes(&self, file_name: &str, data: Vec<u8>) -> Result<String, String> {
+        let mut s = self.inner.lock().unwrap();
+        if !matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
+            return Err("No active viewer connected to host".to_string());
+        }
+        let (file_id, pkt) = s.core.files.offer_file_bytes(file_name, data)?;
+        let sealed = s.core.seal_peer_packet(&pkt);
+        s.outbound_peer_packets.push(sealed);
+        Ok(file_id)
+    }
+
+    pub fn offer_file_from_path(&self, path: &std::path::Path) -> Result<String, String> {
+        let mut s = self.inner.lock().unwrap();
+        if !matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
+            return Err("No active viewer connected to host".to_string());
+        }
+        let (file_id, pkt) = s.core.files.offer_file_from_path(path)?;
+        let sealed = s.core.seal_peer_packet(&pkt);
+        s.outbound_peer_packets.push(sealed);
+        Ok(file_id)
+    }
+
+    pub fn accept_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
+        let mut s = self.inner.lock().unwrap();
+        let pkt = s.core.files.accept_incoming_offer(file_id)?;
+        if matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
+            let sealed = s.core.seal_peer_packet(&pkt);
+            s.outbound_peer_packets.push(sealed);
+        }
+        Ok(pkt)
+    }
+
+    pub fn cancel_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
+        let mut s = self.inner.lock().unwrap();
+        let pkt = s.core.files.cancel_transfer(file_id)?;
+        if matches!(s.core.phase, HostPhase::Starting | HostPhase::Streaming) {
+            let sealed = s.core.seal_peer_packet(&pkt);
+            s.outbound_peer_packets.push(sealed);
+        }
+        Ok(pkt)
+    }
+
     pub fn drain_auxiliary_events(&self) -> (Vec<String>, Option<String>) {
         let mut s = self.inner.lock().unwrap();
         let chats = std::mem::take(&mut s.pending_chats);
@@ -5270,5 +5373,182 @@ mod tests {
 
         server_handle.join().unwrap();
         let _ = session.stop();
+    }
+
+    #[test]
+    fn test_host_core_remote_file_offer_and_streaming() {
+        let layout = DisplayLayout {
+            width: 4,
+            height: 4,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 4,
+                bottom: 4,
+            }],
+        };
+        let mut core = HostCore::new("temp_pass", None, layout);
+        let temp_dir =
+            std::env::temp_dir().join(format!("ultradesk_host_ft_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        core.files.download_dir = temp_dir.clone();
+        let now = Instant::now();
+
+        let valid_payload = sample_login_payload("temp_pass", "2", 1);
+        let _ = core.handle_packet(&valid_payload, now);
+        let _ = core.approve(true);
+        let _ = core.handle_packet(b"17", now);
+        assert_eq!(core.phase, HostPhase::Streaming);
+
+        let mut sender = crate::file_transfer::FileTransferManager::new(temp_dir.clone());
+        let payload_bytes = b"hello from remote controller to host".to_vec();
+        let (file_id, offer_pkt) = sender
+            .offer_file_bytes("remote_note.txt", payload_bytes.clone())
+            .unwrap();
+
+        let actions = core.handle_packet(&offer_pkt, now);
+        assert_eq!(actions.len(), 2);
+        let accept_pkt = match &actions[0] {
+            HostAction::SendPeer(p) => p.clone(),
+            other => panic!("expected SendPeer accept, got {:?}", other),
+        };
+        assert!(matches!(
+            &actions[1],
+            HostAction::FileTransferEvent(crate::file_transfer::FileTransferPacket::Offer { .. })
+        ));
+
+        let (_, chunk_replies) = sender.handle_packet(&accept_pkt).unwrap().unwrap();
+        assert!(!chunk_replies.is_empty());
+        for chunk_pkt in chunk_replies {
+            let chunk_actions = core.handle_packet(&chunk_pkt, now);
+            assert!(!chunk_actions.is_empty());
+        }
+
+        let entry = core.files.transfers.get(&file_id).unwrap();
+        assert_eq!(
+            entry.status,
+            crate::file_transfer::TransferStatus::Completed
+        );
+        assert_eq!(
+            entry.direction,
+            crate::file_transfer::TransferDirection::Receive
+        );
+        assert_eq!(entry.buffer, payload_bytes);
+        let saved_path = entry.saved_path.as_ref().unwrap();
+        assert_eq!(std::fs::read(saved_path).unwrap(), payload_bytes);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_host_core_rejects_file_offer_when_control_disallowed() {
+        let layout = DisplayLayout {
+            width: 4,
+            height: 4,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 4,
+                bottom: 4,
+            }],
+        };
+        let mut core = HostCore::new("temp_pass", None, layout);
+        let now = Instant::now();
+        let valid_payload = sample_login_payload("temp_pass", "2", 1);
+        let _ = core.handle_packet(&valid_payload, now);
+        let _ = core.approve(false);
+        let _ = core.handle_packet(b"17", now);
+        assert_eq!(core.phase, HostPhase::Streaming);
+        assert!(!core.control_allowed);
+
+        let offer_pkt =
+            crate::file_transfer::encode_file_offer("uvf_99", "blocked.txt", 5, true).unwrap();
+        let actions = core.handle_packet(&offer_pkt, now);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            HostAction::SendPeer(pkt) => {
+                let decoded = crate::file_transfer::decode_file_transfer_packet(pkt).unwrap();
+                assert_eq!(
+                    decoded,
+                    crate::file_transfer::FileTransferPacket::Cancel {
+                        file_id: "uvf_99".to_string()
+                    }
+                );
+            }
+            other => panic!("expected SendPeer cancel, got {:?}", other),
+        }
+        assert!(core.files.transfers.is_empty());
+    }
+
+    #[test]
+    fn test_bidirectional_remote_file_request_and_download() {
+        let layout = DisplayLayout {
+            width: 4,
+            height: 4,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 4,
+                bottom: 4,
+            }],
+        };
+        let mut core = HostCore::new("temp_pass", None, layout);
+        let temp_dir =
+            std::env::temp_dir().join(format!("ultradesk_host_pull_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let remote_src = temp_dir.join("remote_export.txt");
+        let expected_bytes = b"pulled file content from remote host".to_vec();
+        std::fs::write(&remote_src, &expected_bytes).unwrap();
+
+        let now = Instant::now();
+        let valid_payload = sample_login_payload("temp_pass", "2", 1);
+        let _ = core.handle_packet(&valid_payload, now);
+        let _ = core.approve(true);
+        let _ = core.handle_packet(b"17", now);
+
+        let mut controller_files =
+            crate::file_transfer::FileTransferManager::new(temp_dir.join("controller_dl"));
+        controller_files.auto_accept = true;
+
+        let req_pkt =
+            crate::file_transfer::encode_file_request(&remote_src.to_string_lossy(), true).unwrap();
+        let host_actions = core.handle_packet(&req_pkt, now);
+        assert_eq!(host_actions.len(), 2);
+        let offer_pkt = match &host_actions[0] {
+            HostAction::SendPeer(p) => p.clone(),
+            other => panic!("expected SendPeer offer, got {:?}", other),
+        };
+
+        let (_, ctrl_replies) = controller_files.handle_packet(&offer_pkt).unwrap().unwrap();
+        assert_eq!(ctrl_replies.len(), 1);
+        let accept_pkt = &ctrl_replies[0];
+
+        let chunk_actions = core.handle_packet(accept_pkt, now);
+        for act in chunk_actions {
+            if let HostAction::SendPeer(chunk_pkt) = act {
+                let _ = controller_files.handle_packet(&chunk_pkt).unwrap();
+            }
+        }
+
+        let completed = controller_files
+            .transfers
+            .values()
+            .find(|e| e.file_name == "remote_export.txt")
+            .unwrap();
+        assert_eq!(
+            completed.status,
+            crate::file_transfer::TransferStatus::Completed
+        );
+        assert_eq!(completed.buffer, expected_bytes);
+        assert!(completed.saved_path.is_some());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

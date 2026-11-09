@@ -137,6 +137,12 @@ struct FileActionRequest {
 }
 
 #[derive(Deserialize, Default)]
+struct FileReceiveRequest {
+    #[serde(default, alias = "file_path", alias = "path")]
+    remote_path: String,
+}
+
+#[derive(Deserialize, Default)]
 struct ChatSendRequest {
     #[serde(default)]
     text: String,
@@ -1075,6 +1081,28 @@ pub(crate) fn handle_http_client(
                         &mut stream,
                         200,
                         &json!({ "ok": true, "state": session.snapshot() }),
+                        keep_alive,
+                    ),
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
+                }
+            }
+            ("POST", "/files/receive") => {
+                let req: FileReceiveRequest = serde_json::from_slice(&body).unwrap_or_default();
+                match session.request_remote_file(&req.remote_path) {
+                    Ok(wire) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({
+                            "ok": true,
+                            "remote_path": req.remote_path.trim(),
+                            "bytes_sent": wire.len(),
+                            "state": session.snapshot()
+                        }),
                         keep_alive,
                     ),
                     Err(e) => write_json_response(

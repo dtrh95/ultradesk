@@ -111,6 +111,25 @@ import { FileTransferItem } from '../../../domain/models/session.model';
             {{ store.t('send') }}
           </button>
         </div>
+        <div class="row">
+          <input
+            type="text"
+            id="remoteFilePathInput"
+            class="mono"
+            [attr.placeholder]="store.t('remote_file_path_placeholder')"
+            [value]="remoteFilePathInput()"
+            (input)="onRemoteFilePathInput($event)"
+            (keydown.enter)="onReceiveRemotePath($event)"
+          />
+          <button
+            id="btnReceiveFile"
+            class="secondary"
+            type="button"
+            (click)="onReceiveRemotePath()"
+          >
+            {{ store.t('receive_remote_file') }}
+          </button>
+        </div>
         <div id="transferList" class="transfer-list">
           @if (store.fileTransfers().length === 0) {
             <div class="muted">{{ store.t('no_transfers') }}</div>
@@ -118,12 +137,22 @@ import { FileTransferItem } from '../../../domain/models/session.model';
             @for (tr of store.fileTransfers(); track tr.file_id) {
               <div class="transfer-item">
                 <div style="display: flex; justify-content: space-between">
-                  <strong>{{ tr.file_name }}</strong>
+                  <strong>
+                    {{
+                      tr.direction === 'receive' ? store.t('dir_receive') : store.t('dir_send')
+                    }}
+                    · {{ tr.file_name }}
+                  </strong>
                   <span class="muted">{{ tr.status }}</span>
                 </div>
                 <div class="progress">
                   <div [style.width.%]="transferPercent(tr)"></div>
                 </div>
+                @if (tr.direction === 'receive' && tr.saved_path) {
+                  <div class="muted mono" style="font-size: 11px; word-break: break-all">
+                    {{ tr.saved_path }}
+                  </div>
+                }
                 <div style="display: flex; justify-content: space-between; align-items: center">
                   <span class="muted">
                     {{ tr.transferred_bytes }}/{{ tr.file_size }} B ({{ transferPercent(tr) }}%)
@@ -253,6 +282,7 @@ export class ToolsPopoverComponent implements AfterViewInit {
 
   protected readonly chatInput = signal<string>('');
   protected readonly filePathInput = signal<string>('');
+  protected readonly remoteFilePathInput = signal<string>('');
   protected readonly unicodeInput = signal<string>('');
 
   ngAfterViewInit(): void {
@@ -343,6 +373,21 @@ export class ToolsPopoverComponent implements AfterViewInit {
 
   protected async onSendPath(): Promise<void> {
     await this.facade.sendFileByPath(this.filePathInput());
+  }
+
+  protected onRemoteFilePathInput(event: Event): void {
+    const target = event.target as HTMLInputElement | null;
+    this.remoteFilePathInput.set(target?.value ?? '');
+  }
+
+  protected async onReceiveRemotePath(event?: Event): Promise<void> {
+    event?.preventDefault();
+    const path = this.remoteFilePathInput().trim();
+    if (!path) {
+      return;
+    }
+    this.remoteFilePathInput.set('');
+    await this.facade.receiveRemoteFileByPath(path);
   }
 
   protected onUnicodeInput(event: Event): void {

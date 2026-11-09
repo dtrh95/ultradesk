@@ -13,6 +13,7 @@ pub const PACKET_FILE_ACCEPT: u8 = 14;
 pub const PACKET_FILE_CHUNK: u8 = 15;
 pub const PACKET_FILE_CANCEL: u8 = 16;
 pub const PACKET_FILE_ACK: u8 = 21;
+pub const PACKET_FILE_REQUEST: u8 = 23;
 
 pub const DEFAULT_FILE_CHUNK_SIZE: usize = 16_384;
 pub const MAX_FILE_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
@@ -26,7 +27,9 @@ pub fn is_utf16_string_packet(payload: &[u8]) -> bool {
         return true;
     }
     let prefix = decode_utf16le_lossy(&payload[..payload.len().min(16)]);
-    for code in ["12|||", "13|||", "14|||", "16|||", "21|||", "5|||", "33|||"] {
+    for code in [
+        "12|||", "13|||", "14|||", "16|||", "21|||", "23|||", "5|||", "33|||",
+    ] {
         if prefix.starts_with(code) {
             return true;
         }
@@ -35,17 +38,26 @@ pub fn is_utf16_string_packet(payload: &[u8]) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TransferDirection {
+    #[serde(alias = "Send")]
     Send,
+    #[serde(alias = "Receive")]
     Receive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TransferStatus {
+    #[serde(alias = "Offered")]
     Offered,
+    #[serde(alias = "Transferring")]
     Transferring,
+    #[serde(alias = "Completed")]
     Completed,
+    #[serde(alias = "Cancelled")]
     Cancelled,
+    #[serde(alias = "Failed")]
     Failed,
 }
 
@@ -74,6 +86,9 @@ pub enum FileTransferPacket {
     },
     Cancel {
         file_id: String,
+    },
+    Request {
+        remote_path: String,
     },
 }
 
@@ -178,6 +193,19 @@ pub fn encode_file_cancel(file_id: &str, modern: bool) -> Result<Vec<u8>, String
         encode_byte_array_fields(&[&[PACKET_FILE_CANCEL], file_id.as_bytes()])
     } else {
         let cmd = format!("16|||{}", file_id);
+        Ok(encode_senddata_string(&cmd, true))
+    }
+}
+
+pub fn encode_file_request(remote_path: &str, modern: bool) -> Result<Vec<u8>, String> {
+    let cleaned = remote_path.trim();
+    if cleaned.is_empty() {
+        return Err("Remote file path cannot be empty".to_string());
+    }
+    if modern {
+        encode_byte_array_fields(&[&[PACKET_FILE_REQUEST], cleaned.as_bytes()])
+    } else {
+        let cmd = format!("23|||{}", cleaned);
         Ok(encode_senddata_string(&cmd, true))
     }
 }
@@ -300,6 +328,12 @@ pub fn decode_file_transfer_packet(payload: &[u8]) -> Option<FileTransferPacket>
                             next_offset,
                         });
                     }
+                    PACKET_FILE_REQUEST if fields.len() >= 2 => {
+                        let remote_path = decode_text_field(&fields[1]).trim().to_string();
+                        if !remote_path.is_empty() {
+                            return Some(FileTransferPacket::Request { remote_path });
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -394,7 +428,7 @@ fn decode_raw_file_chunk_stream(payload: &[u8]) -> Option<FileTransferPacket> {
 
 fn parse_legacy_file_command(text: &str) -> Option<FileTransferPacket> {
     let trimmed = text.strip_prefix("|||").unwrap_or(text);
-    for code in ["12", "13", "14", "16", "21"] {
+    for code in ["12", "13", "14", "16", "21", "23"] {
         if let Some(rest) = trimmed.strip_prefix(code) {
             if !text.starts_with("|||") && !rest.starts_with("|||") {
                 continue;
@@ -435,6 +469,11 @@ fn parse_legacy_file_command(text: &str) -> Option<FileTransferPacket> {
                         .and_then(|s| s.parse::<u64>().ok())
                         .unwrap_or(0),
                 }),
+                "23" if !parts.is_empty() && !parts[0].trim().is_empty() => {
+                    Some(FileTransferPacket::Request {
+                        remote_path: parts[0].trim().to_string(),
+                    })
+                }
                 _ => None,
             };
         }
@@ -493,8 +532,10 @@ pub struct FileTransferManager {
     pub chat_messages: Vec<String>,
     pub download_dir: PathBuf,
     pub auto_accept: bool,
+    pub allow_remote_requests: bool,
     pub chunk_size: usize,
     pub modern_protocol: bool,
+    pub id_prefix: String,
     next_id: u64,
 }
 
@@ -509,13 +550,19 @@ impl Default for FileTransferManager {
 
 impl FileTransferManager {
     pub fn new(download_dir: PathBuf) -> Self {
+        Self::with_id_prefix(download_dir, "uvf_")
+    }
+
+    pub fn with_id_prefix(download_dir: PathBuf, id_prefix: &str) -> Self {
         Self {
             transfers: BTreeMap::new(),
             chat_messages: Vec::new(),
             download_dir,
             auto_accept: false,
+            allow_remote_requests: false,
             chunk_size: DEFAULT_FILE_CHUNK_SIZE,
             modern_protocol: true,
+            id_prefix: id_prefix.to_string(),
             next_id: 1,
         }
     }
@@ -528,7 +575,7 @@ impl FileTransferManager {
         if (data.len() as u64) > MAX_FILE_TRANSFER_BYTES {
             return Err("File size exceeds maximum transfer limit".to_string());
         }
-        let file_id = format!("uvf_{}", self.next_id);
+        let file_id = format!("{}{}", self.id_prefix, self.next_id);
         self.next_id += 1;
         let clean_name = sanitize_file_name(file_name);
         let file_size = data.len() as u64;
@@ -790,6 +837,13 @@ impl FileTransferManager {
                         entry.status = TransferStatus::Cancelled;
                     }
                 }
+            }
+            FileTransferPacket::Request { remote_path } => {
+                if !self.allow_remote_requests {
+                    return Err("Remote file requests are disabled".to_string());
+                }
+                let (_, offer_pkt) = self.offer_file_from_path(Path::new(remote_path))?;
+                replies.push(offer_pkt);
             }
         }
 

@@ -17,6 +17,7 @@ export interface FileTransferItem {
   readonly transferred_bytes: number;
   readonly direction: TransferDirection;
   readonly status: TransferStatus | string;
+  readonly saved_path: string | null;
 }
 
 export interface HostStatusSnapshot {
