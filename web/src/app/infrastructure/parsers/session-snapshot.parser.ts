@@ -2,6 +2,8 @@ import {
   ConnectionState,
   FileTransferItem,
   HostStatusSnapshot,
+  MacOsPermissionState,
+  MacOsPermissionStatus,
   MonitorRect,
   SavedRemote,
   SessionSnapshot,
@@ -66,6 +68,23 @@ function parseConnectionState(value: unknown): ConnectionState {
   return 'disconnected';
 }
 
+function parseMacOsPermissionStatus(value: unknown): MacOsPermissionStatus {
+  if (value === 'granted' || value === 'not_granted' || value === 'not_applicable') {
+    return value;
+  }
+  return 'not_applicable';
+}
+
+function parseMacOsPermissions(value: unknown): MacOsPermissionState | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  return {
+    screen_recording: parseMacOsPermissionStatus(value['screen_recording']),
+    accessibility: parseMacOsPermissionStatus(value['accessibility']),
+  };
+}
+
 function parseHostStatus(value: unknown): HostStatusSnapshot | null {
   if (!isRecord(value)) {
     return null;
@@ -89,6 +108,7 @@ function parseHostStatus(value: unknown): HostStatusSnapshot | null {
     monitors: parseMonitors(value['monitors']),
     selected_monitor: selectedMonitor,
     selected_monitors: parseNumberList(value['selected_monitors']),
+    macos_permissions: parseMacOsPermissions(value['macos_permissions']),
   };
 }
 

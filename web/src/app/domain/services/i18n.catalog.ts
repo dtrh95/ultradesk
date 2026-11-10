@@ -110,6 +110,13 @@ export const I18N = {
     update_applying: 'Đang áp dụng cập nhật...',
     update_applied: 'Đã hoàn tất cập nhật. Vui lòng khởi động lại ứng dụng.',
     update_up_to_date: 'Đang dùng phiên bản mới nhất',
+    macos_perm_title: 'Quyền hệ thống macOS (chỉ cần khi làm Host)',
+    macos_perm_screen: 'Ghi màn hình (Screen Recording)',
+    macos_perm_ax: 'Trợ năng điều khiển chuột/phím (Accessibility)',
+    macos_perm_granted: 'Đã cấp',
+    macos_perm_missing: 'Chưa cấp',
+    macos_perm_grant_btn: 'Cấp quyền',
+    macos_perm_settings_btn: 'Cài đặt',
   },
   en: {
     nav_connect: 'Connect',
@@ -220,6 +227,13 @@ export const I18N = {
     update_applying: 'Applying update...',
     update_applied: 'Update complete. Please restart UltraDesk.',
     update_up_to_date: 'You are on the latest version',
+    macos_perm_title: 'macOS Host Permissions (only required to share this Mac)',
+    macos_perm_screen: 'Screen Recording',
+    macos_perm_ax: 'Accessibility (Remote Mouse & Keyboard)',
+    macos_perm_granted: 'Granted',
+    macos_perm_missing: 'Not granted',
+    macos_perm_grant_btn: 'Grant',
+    macos_perm_settings_btn: 'Settings',
   },
 } as const;
 

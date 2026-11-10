@@ -161,6 +161,69 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
             </div>
           </div>
           <div id="hostStatusInfo" class="muted">{{ store.hostStatusInfoText() }}</div>
+          @if (store.showMacosPermissionBox()) {
+            <div id="macosPermissionsBox" class="approval-box">
+              <div class="field-label">{{ store.t('macos_perm_title') }}</div>
+              <div class="row" style="justify-content: space-between; align-items: center">
+                <span>{{ store.t('macos_perm_screen') }}</span>
+                <div class="row">
+                  <span class="badge">
+                    {{
+                      store.macosPermissions()?.screen_recording === 'granted'
+                        ? store.t('macos_perm_granted')
+                        : store.t('macos_perm_missing')
+                    }}
+                  </span>
+                  @if (store.macosPermissions()?.screen_recording === 'not_granted') {
+                    <button
+                      id="btnGrantScreenPerm"
+                      type="button"
+                      (click)="facade.requestMacOsPermission('screen_recording')"
+                    >
+                      {{ store.t('macos_perm_grant_btn') }}
+                    </button>
+                    <button
+                      id="btnOpenScreenSettings"
+                      class="secondary"
+                      type="button"
+                      (click)="facade.openMacOsPermissionSettings('screen_recording')"
+                    >
+                      {{ store.t('macos_perm_settings_btn') }}
+                    </button>
+                  }
+                </div>
+              </div>
+              <div class="row" style="justify-content: space-between; align-items: center">
+                <span>{{ store.t('macos_perm_ax') }}</span>
+                <div class="row">
+                  <span class="badge">
+                    {{
+                      store.macosPermissions()?.accessibility === 'granted'
+                        ? store.t('macos_perm_granted')
+                        : store.t('macos_perm_missing')
+                    }}
+                  </span>
+                  @if (store.macosPermissions()?.accessibility === 'not_granted') {
+                    <button
+                      id="btnGrantAxPerm"
+                      type="button"
+                      (click)="facade.requestMacOsPermission('accessibility')"
+                    >
+                      {{ store.t('macos_perm_grant_btn') }}
+                    </button>
+                    <button
+                      id="btnOpenAxSettings"
+                      class="secondary"
+                      type="button"
+                      (click)="facade.openMacOsPermissionSettings('accessibility')"
+                    >
+                      {{ store.t('macos_perm_settings_btn') }}
+                    </button>
+                  }
+                </div>
+              </div>
+            </div>
+          }
         </div>
 
         <div class="pane remote">

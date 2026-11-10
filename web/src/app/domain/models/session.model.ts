@@ -20,6 +20,14 @@ export interface FileTransferItem {
   readonly saved_path: string | null;
 }
 
+export type MacOsPermissionKind = 'screen_recording' | 'accessibility';
+export type MacOsPermissionStatus = 'granted' | 'not_granted' | 'not_applicable';
+
+export interface MacOsPermissionState {
+  readonly screen_recording: MacOsPermissionStatus;
+  readonly accessibility: MacOsPermissionStatus;
+}
+
 export interface HostStatusSnapshot {
   readonly host_id: string;
   readonly temp_password: string;
@@ -35,6 +43,7 @@ export interface HostStatusSnapshot {
   readonly monitors: readonly MonitorRect[];
   readonly selected_monitor: number | null;
   readonly selected_monitors: readonly number[];
+  readonly macos_permissions: MacOsPermissionState | null;
 }
 
 export type UpdateState =

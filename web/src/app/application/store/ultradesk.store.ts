@@ -161,6 +161,17 @@ export class UltraDeskStore {
     return translate(lang, 'host_status_info', { backend, mp }) + e2eSuffix;
   });
 
+  readonly macosPermissions = computed(
+    () => this.snapshot()?.host_status?.macos_permissions ?? null,
+  );
+  readonly showMacosPermissionBox = computed(() => {
+    const p = this.macosPermissions();
+    if (!p) {
+      return false;
+    }
+    return p.screen_recording === 'not_granted' || p.accessibility === 'not_granted';
+  });
+
   readonly audioStatsText = computed(() => `${this.snapshot()?.audio_chunks_received ?? 0} chunks`);
   readonly audioStatusText = computed(() => {
     const snap = this.snapshot();
