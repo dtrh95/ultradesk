@@ -1,5 +1,6 @@
-ultradesk-rust (1.0.6-1) unstable; urgency=medium
+ultradesk-rust (1.0.7-1) unstable; urgency=medium
 
+  * Fix GTK3 clipboard reentrancy, Nix sandbox cache fallback, Wayland/XWayland clipboard sync, and Arch PKGBUILD
   * Cross-distro and cross-OS auto-update engine, tasteskill 2.5 6-theme update popup (Confirm / Later), and remote-to-host file transfer.
   * Release UltraDesk (Rust Edition) 1.0.5 with bidirectional remote-to-host file transfer, remote file pull (PACKET_FILE_REQUEST), automated release script, and Homebrew formula support
   * Release UltraDesk (Rust Edition) 1.0.4 with RustCrypto (aes 0.9.4, cbc 0.2.1, cipher 0.5.2, des 0.9.0, md-5 0.11.0, sha2 0.11.1), x11rb 0.14.0, zstd 0.14.3, and Launchpad PPA build fixes
@@ -10,4 +11,4 @@ ultradesk-rust (1.0.6-1) unstable; urgency=medium
   * Support screen streaming, remote input, audio, clipboard sync, and file transfer
   * Add bilingual VI/EN portal and collapsible session toolbar
 
- -- Hieu Doan <dtrunghieu96@gmail.com>  Mon, 09 Nov 2026 17:41:22 +0700
+ -- Hieu Doan <dtrunghieu96@gmail.com>  Tue, 10 Nov 2026 15:31:25 +0700

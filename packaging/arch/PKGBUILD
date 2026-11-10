@@ -1,14 +1,15 @@
 pkgname=ultradesk-rust
-pkgver=1.0.6
+pkgver=1.0.7
 pkgrel=1
 pkgdesc="Remote desktop controller and host for Linux (Rust Edition)"
 arch=('x86_64')
-url="https://github.com/ultradesk/ultradesk-rust"
+url="https://github.com/dtrh95/ultradesk"
 license=('MIT')
 depends=(
   'gcc-libs'
   'openssl'
   'libxcb'
+  'zstd'
   'gtk3'
   'webkit2gtk-4.1'
   'libsoup3'
@@ -24,25 +25,26 @@ source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
+  cd "${srcdir}/ultradesk-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
+  cd "${srcdir}/ultradesk-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   make build
 }
 
 check() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
+  cd "${srcdir}/ultradesk-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
+  export ULTRADESK_DISABLE_SYSTEM_CLIPBOARD=1
   make check
 }
 
 package() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
+  cd "${srcdir}/ultradesk-${pkgver}"
   make install PREFIX=/usr DESTDIR="${pkgdir}"
 }

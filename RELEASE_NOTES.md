@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.6
+## UltraDesk (Rust Edition) v1.0.7
 
-Release **v1.0.6** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Cross-distro and cross-OS auto-update engine, tasteskill 2.5 6-theme update popup (Confirm / Later), and remote-to-host file transfer..
+Release **v1.0.7** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Fix GTK3 clipboard reentrancy, Nix sandbox cache fallback, Wayland/XWayland clipboard sync, and Arch PKGBUILD.
 
 ---
 
