@@ -7,7 +7,7 @@ import {
   ThemeMode,
   ToolTab,
 } from '../../domain/models/preferences.model';
-import { SavedRemote } from '../../domain/models/session.model';
+import { MacOsPermissionKind, SavedRemote } from '../../domain/models/session.model';
 import {
   computeNextCycledMonitorSelection,
   normalizeSelectedIndices,
@@ -532,6 +532,23 @@ export class UltraDeskSessionFacade {
     void this.http
       .postJson('/host/decline', {}, this.store.t('err_failed'))
       .catch((e: unknown) => this.showNotice(e, 'error'));
+  }
+
+  async requestMacOsPermission(kind: MacOsPermissionKind): Promise<void> {
+    try {
+      await this.http.postJson('/host/permissions/request', { kind }, this.store.t('err_failed'));
+      await this.refreshStatus();
+    } catch (e: unknown) {
+      this.showNotice(e, 'error');
+    }
+  }
+
+  async openMacOsPermissionSettings(kind: MacOsPermissionKind): Promise<void> {
+    try {
+      await this.http.postJson('/host/permissions/settings', { kind }, this.store.t('err_failed'));
+    } catch (e: unknown) {
+      this.showNotice(e, 'error');
+    }
   }
 
   async saveMasterPassword(password: string): Promise<void> {
