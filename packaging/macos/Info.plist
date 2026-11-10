@@ -30,8 +30,6 @@
   <string>UltraDesk needs Screen Recording permission to share your screen with remote partners.</string>
   <key>NSAccessibilityUsageDescription</key>
   <string>UltraDesk needs Accessibility permission to allow remote partners to control your mouse and keyboard.</string>
-  <key>NSMicrophoneUsageDescription</key>
-  <string>UltraDesk needs Microphone permission to stream audio during remote support sessions.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>UltraDesk uses the local network to discover and connect directly to nearby UltraDesk hosts over LAN.</string>
 </dict>
