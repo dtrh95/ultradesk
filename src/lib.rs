@@ -1035,6 +1035,22 @@ mod tests {
 
         let resp_host_status = http_get(&addr, "/host/status");
         assert!(resp_host_status.contains("\"running\":true"));
+        assert!(resp_host_status.contains("\"macos_permissions\":"));
+
+        let resp_perm_req = http_post(
+            &addr,
+            "/host/permissions/request",
+            "{\"kind\":\"screen_recording\"}",
+        );
+        assert!(resp_perm_req.contains("\"screen_recording\":"));
+        assert!(resp_perm_req.contains("\"accessibility\":"));
+
+        let resp_perm_settings = http_post(
+            &addr,
+            "/host/permissions/settings",
+            "{\"kind\":\"accessibility\"}",
+        );
+        assert!(resp_perm_settings.contains("\"ok\":"));
 
         let resp_host_stop = http_post(&addr, "/host/stop", "{}");
         assert!(resp_host_stop.contains("\"running\":false"));

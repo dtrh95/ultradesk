@@ -1264,6 +1264,26 @@ impl ControlSession {
         Ok(guard.host_session.status())
     }
 
+    pub fn host_request_macos_permission(
+        &self,
+        kind: crate::host::MacOsPermissionKind,
+    ) -> HostStatus {
+        let _ = crate::host::MacOsPermissionState::request(kind);
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::sync_state_fields(&mut guard);
+        guard.host_session.status()
+    }
+
+    pub fn host_open_macos_permission_settings(
+        &self,
+        kind: crate::host::MacOsPermissionKind,
+    ) -> Result<(&'static str, HostStatus), String> {
+        let pane = crate::host::MacOsPermissionState::open_settings(kind)?;
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::sync_state_fields(&mut guard);
+        Ok((pane, guard.host_session.status()))
+    }
+
     pub fn host_capture_image(
         &self,
         format: &str,
