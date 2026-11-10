@@ -2296,10 +2296,44 @@ struct MacCgPoint {
 }
 
 #[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MacCgSize {
+    width: f64,
+    height: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MacCgRect {
+    origin: MacCgPoint,
+    size: MacCgSize,
+}
+
+#[cfg(target_os = "macos")]
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayPixelsWide(display: u32) -> usize;
+    fn CGDisplayPixelsHigh(display: u32) -> usize;
+    fn CGGetActiveDisplayList(
+        max_displays: u32,
+        active_displays: *mut u32,
+        display_count: *mut u32,
+    ) -> i32;
+    fn CGDisplayBounds(display: u32) -> MacCgRect;
+    fn CGDisplayCreateImage(display: u32) -> *mut libc::c_void;
+    fn CGImageGetWidth(image: *const libc::c_void) -> usize;
+    fn CGImageGetHeight(image: *const libc::c_void) -> usize;
+    fn CGImageGetBytesPerRow(image: *const libc::c_void) -> usize;
+    fn CGImageGetBitsPerPixel(image: *const libc::c_void) -> usize;
+    fn CGImageGetBitmapInfo(image: *const libc::c_void) -> u32;
+    fn CGImageGetDataProvider(image: *const libc::c_void) -> *const libc::c_void;
+    fn CGDataProviderCopyData(provider: *const libc::c_void) -> *const libc::c_void;
+    fn CGImageRelease(image: *mut libc::c_void);
     fn CGEventCreateMouseEvent(
         source: *const libc::c_void,
         mouse_type: u32,
@@ -2350,47 +2384,203 @@ extern "C" {
         value_callbacks: *const libc::c_void,
     ) -> *mut libc::c_void;
     fn CFRelease(cf: *const libc::c_void);
+    fn CFDataGetBytePtr(the_data: *const libc::c_void) -> *const u8;
+    fn CFDataGetLength(the_data: *const libc::c_void) -> isize;
 }
 
-pub fn ensure_macos_host_permissions(prompt: bool) -> (bool, bool) {
-    #[cfg(target_os = "macos")]
-    {
-        static PROMPT_ONCE: std::sync::Once = std::sync::Once::new();
-        let allow_prompt = prompt && std::env::var_os("ULTRADESK_SKIP_MACOS_PROMPT").is_none();
-        let mut screen_ok = unsafe { CGPreflightScreenCaptureAccess() };
-        let mut ax_ok = unsafe { AXIsProcessTrusted() };
-        if allow_prompt && (!screen_ok || !ax_ok) {
-            PROMPT_ONCE.call_once(|| {
-                if !screen_ok {
-                    screen_ok = unsafe { CGRequestScreenCaptureAccess() };
-                }
-                if !ax_ok {
-                    unsafe {
-                        let keys = [kAXTrustedCheckOptionPrompt];
-                        let values = [kCFBooleanTrue];
-                        let dict = CFDictionaryCreate(
-                            std::ptr::null(),
-                            keys.as_ptr(),
-                            values.as_ptr(),
-                            1,
-                            &kCFTypeDictionaryKeyCallBacks as *const u8 as *const libc::c_void,
-                            &kCFTypeDictionaryValueCallBacks as *const u8 as *const libc::c_void,
-                        );
-                        if !dict.is_null() {
-                            ax_ok = AXIsProcessTrustedWithOptions(dict);
-                            CFRelease(dict);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacOsPermissionKind {
+    ScreenRecording,
+    Accessibility,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacOsPermissionStatus {
+    Granted,
+    NotGranted,
+    NotApplicable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacOsPermissionState {
+    pub supported: bool,
+    pub screen_recording: MacOsPermissionStatus,
+    pub accessibility: MacOsPermissionStatus,
+    pub can_stream: bool,
+    pub can_control: bool,
+}
+
+impl MacOsPermissionState {
+    pub fn preflight() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            let screen_ok = unsafe { CGPreflightScreenCaptureAccess() };
+            let ax_ok = unsafe { AXIsProcessTrusted() };
+            Self {
+                supported: true,
+                screen_recording: if screen_ok {
+                    MacOsPermissionStatus::Granted
+                } else {
+                    MacOsPermissionStatus::NotGranted
+                },
+                accessibility: if ax_ok {
+                    MacOsPermissionStatus::Granted
+                } else {
+                    MacOsPermissionStatus::NotGranted
+                },
+                can_stream: screen_ok,
+                can_control: ax_ok,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self {
+                supported: false,
+                screen_recording: MacOsPermissionStatus::NotApplicable,
+                accessibility: MacOsPermissionStatus::NotApplicable,
+                can_stream: true,
+                can_control: true,
+            }
+        }
+    }
+
+    pub fn request(kind: MacOsPermissionKind) -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            let allow_prompt = std::env::var_os("ULTRADESK_SKIP_MACOS_PROMPT").is_none();
+            if allow_prompt {
+                match kind {
+                    MacOsPermissionKind::ScreenRecording => {
+                        if unsafe { !CGPreflightScreenCaptureAccess() } {
+                            unsafe {
+                                let _ = CGRequestScreenCaptureAccess();
+                            }
+                        }
+                    }
+                    MacOsPermissionKind::Accessibility => {
+                        if unsafe { !AXIsProcessTrusted() } {
+                            unsafe {
+                                let keys = [kAXTrustedCheckOptionPrompt];
+                                let values = [kCFBooleanTrue];
+                                let dict = CFDictionaryCreate(
+                                    std::ptr::null(),
+                                    keys.as_ptr(),
+                                    values.as_ptr(),
+                                    1,
+                                    &kCFTypeDictionaryKeyCallBacks as *const u8
+                                        as *const libc::c_void,
+                                    &kCFTypeDictionaryValueCallBacks as *const u8
+                                        as *const libc::c_void,
+                                );
+                                if !dict.is_null() {
+                                    let _ = AXIsProcessTrustedWithOptions(dict);
+                                    CFRelease(dict);
+                                }
+                            }
                         }
                     }
                 }
-            });
+            }
+            Self::preflight()
         }
-        (screen_ok, ax_ok)
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = kind;
+            Self::preflight()
+        }
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = prompt;
-        (true, true)
+
+    pub fn open_settings(kind: MacOsPermissionKind) -> Result<&'static str, String> {
+        let pane = match kind {
+            MacOsPermissionKind::ScreenRecording => "Privacy_ScreenCapture",
+            MacOsPermissionKind::Accessibility => "Privacy_Accessibility",
+        };
+        #[cfg(target_os = "macos")]
+        {
+            if std::env::var_os("ULTRADESK_SKIP_MACOS_PROMPT").is_none() {
+                let url = format!(
+                    "x-apple.systempreferences:com.apple.preference.security?{}",
+                    pane
+                );
+                Command::new("/usr/bin/open")
+                    .arg(&url)
+                    .status()
+                    .map_err(|e| format!("failed to open macOS System Settings: {e}"))?;
+            }
+            Ok(pane)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(pane)
+        }
     }
+}
+
+pub fn ensure_macos_host_permissions(prompt: bool) -> (bool, bool) {
+    if !prompt {
+        let st = MacOsPermissionState::preflight();
+        (st.can_stream, st.can_control)
+    } else {
+        let _ = MacOsPermissionState::request(MacOsPermissionKind::ScreenRecording);
+        let st = MacOsPermissionState::request(MacOsPermissionKind::Accessibility);
+        (st.can_stream, st.can_control)
+    }
+}
+
+pub fn convert_cg_rgba_rows_to_rgb555(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    bytes_per_row: usize,
+    bitmap_info: u32,
+) -> Result<Vec<u8>, String> {
+    if width == 0 || height == 0 {
+        return Err("invalid zero image dimension".to_string());
+    }
+    if bytes_per_row < width * 4 {
+        return Err(format!(
+            "bytes_per_row ({bytes_per_row}) is smaller than width * 4 ({})",
+            width * 4
+        ));
+    }
+    let required_len = height.saturating_mul(bytes_per_row);
+    if src.len() < required_len {
+        return Err(format!(
+            "source buffer too short ({} < {required_len})",
+            src.len()
+        ));
+    }
+
+    let byte_order = bitmap_info & 0x7000;
+    let alpha_info = bitmap_info & 0x1F;
+    let is_argb = byte_order == 0x4000 && (alpha_info == 2 || alpha_info == 4 || alpha_info == 6);
+    let is_rgba = byte_order == 0x4000 && !is_argb;
+
+    let mut out = vec![0u8; width * height * 2];
+
+    for y in 0..height {
+        let row_start = y * bytes_per_row;
+        let row = &src[row_start..row_start + width * 4];
+        let dst_row = &mut out[y * width * 2..(y + 1) * width * 2];
+        for x in 0..width {
+            let px = &row[x * 4..(x + 1) * 4];
+            let (r, g, b) = if is_argb {
+                (px[1], px[2], px[3])
+            } else if is_rgba {
+                (px[0], px[1], px[2])
+            } else {
+                (px[2], px[1], px[0])
+            };
+            let word: u16 =
+                (((r as u16) >> 3) << 10) | (((g as u16) >> 3) << 5) | ((b as u16) >> 3);
+            dst_row[x * 2] = word as u8;
+            dst_row[x * 2 + 1] = (word >> 8) as u8;
+        }
+    }
+
+    Ok(out)
 }
 
 pub fn vk_to_macos_keycode(vk: u8) -> Option<u16> {
@@ -2489,49 +2679,39 @@ impl MacOsCapturer {
         if !cfg!(target_os = "macos") {
             return Err("not a macOS host".to_string());
         }
-        if !std::path::Path::new("/usr/sbin/screencapture").exists() {
-            return Err("screencapture binary not found".to_string());
-        }
-        let _ = ensure_macos_host_permissions(true);
-        if let Ok((w, h, _)) = Self::capture_png_rgb555() {
-            if w > 0 && h > 0 {
-                *shared_size.lock().unwrap() = (w, h);
-            }
+        #[cfg(target_os = "macos")]
+        {
+            let main_id = unsafe { CGMainDisplayID() };
+            let w = unsafe { CGDisplayPixelsWide(main_id) } as u32;
+            let h = unsafe { CGDisplayPixelsHigh(main_id) } as u32;
+            *shared_size.lock().unwrap() = (w.max(1), h.max(1));
         }
         Ok(Self { shared_size })
-    }
-
-    fn capture_png_rgb555() -> Result<(u32, u32, Vec<u8>), String> {
-        let tmp = std::env::temp_dir().join(format!(
-            "ultradesk_mac_cap_{}_{}.png",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
-        let status = Command::new("/usr/sbin/screencapture")
-            .args(["-x", "-t", "png"])
-            .arg(&tmp)
-            .status()
-            .map_err(|e| format!("screencapture launch failed: {e}"))?;
-        let bytes_res = std::fs::read(&tmp);
-        let _ = std::fs::remove_file(&tmp);
-        if !status.success() {
-            return Err("screencapture exited with non-zero status".to_string());
-        }
-        let bytes = bytes_res.map_err(|e| format!("failed reading screencapture output: {e}"))?;
-        parse_png_to_rgb555_top_down(&bytes)
     }
 }
 
 impl Capturer for MacOsCapturer {
     fn enumerate_displays(&mut self) -> Result<Vec<MonitorRect>, String> {
-        let (mut w, mut h) = *self.shared_size.lock().unwrap();
-        if w == 0 || h == 0 {
-            if let Ok((pw, ph, _)) = Self::capture_png_rgb555() {
-                w = pw;
-                h = ph;
-                *self.shared_size.lock().unwrap() = (w, h);
+        #[cfg(target_os = "macos")]
+        {
+            let mut displays = [0u32; 16];
+            let mut count = 0u32;
+            let res = unsafe { CGGetActiveDisplayList(16, displays.as_mut_ptr(), &mut count) };
+            if res == 0 && count > 0 {
+                let mut rects = Vec::with_capacity(count as usize);
+                for &d in &displays[..count as usize] {
+                    let bounds = unsafe { CGDisplayBounds(d) };
+                    rects.push(MonitorRect {
+                        left: bounds.origin.x as i32,
+                        top: bounds.origin.y as i32,
+                        right: (bounds.origin.x + bounds.size.width) as i32,
+                        bottom: (bounds.origin.y + bounds.size.height) as i32,
+                    });
+                }
+                return Ok(rects);
             }
         }
+        let (w, h) = *self.shared_size.lock().unwrap();
         if w > 0 && h > 0 {
             Ok(vec![MonitorRect {
                 left: 0,
@@ -2545,9 +2725,47 @@ impl Capturer for MacOsCapturer {
     }
 
     fn capture_screen(&mut self, rect: MonitorRect) -> Result<Vec<u8>, String> {
-        let (w, h, pixels) = Self::capture_png_rgb555()?;
-        *self.shared_size.lock().unwrap() = (w, h);
-        Ok(crop_or_resize_rgb555(&pixels, w as usize, h as usize, rect))
+        #[cfg(target_os = "macos")]
+        {
+            if unsafe { !CGPreflightScreenCaptureAccess() } {
+                return Err("macOS Screen Recording permission not granted".to_string());
+            }
+            let main_id = unsafe { CGMainDisplayID() };
+            let cg_img = unsafe { CGDisplayCreateImage(main_id) };
+            if cg_img.is_null() {
+                return Err("CGDisplayCreateImage returned null".to_string());
+            }
+            let w = unsafe { CGImageGetWidth(cg_img) };
+            let h = unsafe { CGImageGetHeight(cg_img) };
+            let bpr = unsafe { CGImageGetBytesPerRow(cg_img) };
+            let bitmap_info = unsafe { CGImageGetBitmapInfo(cg_img) };
+            let provider = unsafe { CGImageGetDataProvider(cg_img) };
+            if provider.is_null() {
+                unsafe { CGImageRelease(cg_img) };
+                return Err("CGImageGetDataProvider returned null".to_string());
+            }
+            let data_ref = unsafe { CGDataProviderCopyData(provider) };
+            if data_ref.is_null() {
+                unsafe { CGImageRelease(cg_img) };
+                return Err("CGDataProviderCopyData returned null".to_string());
+            }
+            let ptr = unsafe { CFDataGetBytePtr(data_ref) };
+            let len = unsafe { CFDataGetLength(data_ref) } as usize;
+            let raw_bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+            let converted = convert_cg_rgba_rows_to_rgb555(raw_bytes, w, h, bpr, bitmap_info);
+            unsafe {
+                CFRelease(data_ref);
+                CGImageRelease(cg_img);
+            }
+            let pixels = converted?;
+            *self.shared_size.lock().unwrap() = (w as u32, h as u32);
+            Ok(crop_or_resize_rgb555(&pixels, w, h, rect))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = rect;
+            Err("MacOsCapturer is not supported on this platform".to_string())
+        }
     }
 }
 
@@ -3174,7 +3392,7 @@ impl DesktopBackend {
         if cfg!(target_os = "macos") {
             if let Ok(capturer) = MacOsCapturer::probe(shared_size.clone()) {
                 return Self {
-                    name: "MacOsScreencaptureBackend",
+                    name: "MacOsCoreGraphicsBackend",
                     capturer: Box::new(capturer),
                     injector: Box::new(MacOsCommandInjector::new(true)),
                 };
@@ -3263,6 +3481,8 @@ pub struct HostStatus {
     pub e2e_cipher: String,
     #[serde(default)]
     pub e2e_fingerprint: String,
+    #[serde(default = "MacOsPermissionState::preflight")]
+    pub macos_permissions: MacOsPermissionState,
 }
 
 struct HostSessionInner {
@@ -3715,7 +3935,15 @@ impl HostSession {
     }
 
     fn run_lan_worker(&self, gen: u64, listener: TcpListener) {
-        let udp_disc = UdpSocket::bind(("0.0.0.0", DEFAULT_LAN_PORT)).ok();
+        let udp_disc = if cfg!(target_os = "macos") {
+            if std::env::var_os("ULTRADESK_MACOS_LAN_UDP").is_some() {
+                UdpSocket::bind(("0.0.0.0", DEFAULT_LAN_PORT)).ok()
+            } else {
+                None
+            }
+        } else {
+            UdpSocket::bind(("0.0.0.0", DEFAULT_LAN_PORT)).ok()
+        };
         if let Some(ref u) = udp_disc {
             let _ = u.set_nonblocking(true);
         }
@@ -4366,6 +4594,7 @@ impl HostSession {
             e2e_enabled: s.core.e2e.is_enabled(),
             e2e_cipher: s.core.e2e.cipher_name().to_string(),
             e2e_fingerprint: s.core.e2e.fingerprint().to_string(),
+            macos_permissions: MacOsPermissionState::preflight(),
         }
     }
 
@@ -4380,6 +4609,10 @@ impl HostSession {
     }
 
     pub fn approve(&self, allow_control: bool) -> Result<Vec<HostAction>, String> {
+        let _ = MacOsPermissionState::request(MacOsPermissionKind::ScreenRecording);
+        if allow_control {
+            let _ = MacOsPermissionState::request(MacOsPermissionKind::Accessibility);
+        }
         let mut s = self.inner.lock().unwrap();
         Self::refresh_display_layout(&mut s);
         let actions = s.core.approve(allow_control);
@@ -4395,6 +4628,9 @@ impl HostSession {
     }
 
     pub fn set_control_allowed(&self, allowed: bool) -> Result<Vec<HostAction>, String> {
+        if allowed {
+            let _ = MacOsPermissionState::request(MacOsPermissionKind::Accessibility);
+        }
         let mut s = self.inner.lock().unwrap();
         let actions = s.core.set_control_allowed(allowed);
         Self::record_actions(&mut s, &actions);
@@ -5297,6 +5533,32 @@ mod tests {
         assert_eq!(vk_to_macos_keycode(0x1b), Some(0x35));
         assert_eq!(vk_to_macos_keycode(0x5b), Some(0x37));
         let _ = ensure_macos_host_permissions(false);
+
+        let bgra_row = [
+            0u8, 128u8, 255u8, 255u8, 255u8, 0u8, 0u8, 255u8, 99u8, 99u8, 99u8, 99u8,
+        ];
+        let rgb555_bgra = convert_cg_rgba_rows_to_rgb555(&bgra_row, 2, 1, 12, 0x2002).unwrap();
+        assert_eq!(rgb555_bgra.len(), 4);
+        let p0 = u16::from_le_bytes([rgb555_bgra[0], rgb555_bgra[1]]);
+        let p1 = u16::from_le_bytes([rgb555_bgra[2], rgb555_bgra[3]]);
+        assert_eq!(p0, ((31u16) << 10) | ((16u16) << 5));
+        assert_eq!(p1, 31u16);
+
+        let argb_row = [255u8, 255u8, 128u8, 0u8, 255u8, 0u8, 0u8, 255u8];
+        let rgb555_argb = convert_cg_rgba_rows_to_rgb555(&argb_row, 2, 1, 8, 0x4002).unwrap();
+        assert_eq!(rgb555_argb, rgb555_bgra);
+
+        let perms = MacOsPermissionState::preflight();
+        let req_screen = MacOsPermissionState::request(MacOsPermissionKind::ScreenRecording);
+        assert_eq!(perms.supported, req_screen.supported);
+        assert_eq!(
+            MacOsPermissionState::open_settings(MacOsPermissionKind::ScreenRecording).unwrap(),
+            "Privacy_ScreenCapture"
+        );
+        assert_eq!(
+            MacOsPermissionState::open_settings(MacOsPermissionKind::Accessibility).unwrap(),
+            "Privacy_Accessibility"
+        );
     }
 
     #[test]

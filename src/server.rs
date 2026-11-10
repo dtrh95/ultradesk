@@ -176,6 +176,11 @@ struct MasterPasswordRequest {
     password: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct MacPermissionRequest {
+    kind: crate::host::MacOsPermissionKind,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct PreferencesRequest {
     #[serde(default)]
@@ -1257,6 +1262,61 @@ pub(crate) fn handle_http_client(
                         &mut stream,
                         200,
                         &json!({ "ok": true, "host": host }),
+                        keep_alive,
+                    ),
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e }),
+                        keep_alive,
+                    ),
+                }
+            }
+            ("POST", "/host/permissions/request") => {
+                let req: MacPermissionRequest = match serde_json::from_slice(&body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        write_json_response(
+                            &mut stream,
+                            400,
+                            &json!({ "ok": false, "error": format!("Invalid permission request JSON: {}", e) }),
+                            keep_alive,
+                        )?;
+                        if !keep_alive {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let host = session.host_request_macos_permission(req.kind);
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({ "ok": true, "host": host, "state": session.snapshot() }),
+                    keep_alive,
+                )
+            }
+            ("POST", "/host/permissions/settings") => {
+                let req: MacPermissionRequest = match serde_json::from_slice(&body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        write_json_response(
+                            &mut stream,
+                            400,
+                            &json!({ "ok": false, "error": format!("Invalid permission settings JSON: {}", e) }),
+                            keep_alive,
+                        )?;
+                        if !keep_alive {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                match session.host_open_macos_permission_settings(req.kind) {
+                    Ok((pane, host)) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "pane": pane, "host": host, "state": session.snapshot() }),
                         keep_alive,
                     ),
                     Err(e) => write_json_response(
