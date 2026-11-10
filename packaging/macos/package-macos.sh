@@ -43,7 +43,13 @@ fi
 
 sed "s|<string>1.0.7</string>|<string>${VERSION}</string>|g" packaging/macos/Info.plist > "${CONTENTS_DIR}/Info.plist"
 
-codesign --force --deep --entitlements packaging/macos/entitlements.plist --sign - "${APP_DIR}"
+SIGN_IDENTITY="${MACOS_SIGN_IDENTITY:--}"
+DESIGNATED_REQ='designated => identifier "io.github.ultradesk.UltraDesk"'
+if [ "${SIGN_IDENTITY}" = "-" ]; then
+  codesign --force --deep --entitlements packaging/macos/entitlements.plist -r="${DESIGNATED_REQ}" --sign - "${APP_DIR}"
+else
+  codesign --force --deep --options runtime --entitlements packaging/macos/entitlements.plist -r="${DESIGNATED_REQ}" --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+fi
 
 tar -czf "ultradesk-rust-v${VERSION}-${ARCH}-macos.app.tar.gz" -C "${BUILD_DIR}" "${APP_NAME}"
 
