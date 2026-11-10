@@ -5,6 +5,7 @@ pkgdesc="Remote desktop controller and host for Linux (Rust Edition)"
 arch=('x86_64')
 url="https://github.com/dtrh95/ultradesk"
 license=('MIT')
+options=('!lto')
 depends=(
   'gcc-libs'
   'openssl'
