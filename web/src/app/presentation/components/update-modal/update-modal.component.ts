@@ -21,7 +21,7 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
             <span class="update-target-chip">{{ updateStatus()?.install_target || 'Linux' }}</span>
           </h2>
           <div class="update-version-row">
-            <span class="current-ver">v{{ updateStatus()?.current_version || '1.0.7' }}</span>
+            <span class="current-ver">v{{ updateStatus()?.current_version || '1.0.8' }}</span>
             <span class="arrow">→</span>
             <span class="latest-ver">v{{ updateStatus()?.latest_version || '---' }}</span>
           </div>

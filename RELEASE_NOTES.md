@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.7
+## UltraDesk (Rust Edition) v1.0.8
 
-Release **v1.0.7** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Fix GTK3 clipboard reentrancy, Nix sandbox cache fallback, Wayland/XWayland clipboard sync, and Arch PKGBUILD.
+Release **v1.0.8** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Consolidate macOS TCC permission prompts, in-process CoreGraphics screen capture, and stable bundle ID signing.
 
 ---
 
@@ -27,6 +27,7 @@ Release **v1.0.7** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Fix GT
 - **Host (Screen Sharing) Mode**:
   - **X11 Backend**: Zero-copy MIT-SHM screen capture, RandR multi-monitor enumeration, and XTEST input injection.
   - **Wayland Backend**: Native `grim` screen capture + `/dev/uinput` virtual keyboard/mouse synthesis.
+  - **macOS Backend**: In-process CoreGraphics (`CGDisplayCreateImage`) screen capture, `CGEvent` input synthesis, consolidated JIT TCC permission onboarding, and bundle-identifier code signing.
   - Ephemeral 8-digit temporary password per session and optional persistent **Master Password** for unattended access.
   - Adaptive HopToDesk-inspired video QoS and dirty-tile diffing.
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 TARGET="${1:-aarch64-apple-darwin}"
 ARCH="${2:-arm64}"
-RAW_VERSION="${3:-v1.0.7}"
+RAW_VERSION="${3:-v1.0.8}"
 VERSION="${RAW_VERSION#v}"
 VERSION="${VERSION//\//-}"
 
@@ -41,7 +41,7 @@ if [ -f "${ICON_SRC}" ]; then
   rm -rf "${ICONSET_DIR}"
 fi
 
-sed "s|<string>1.0.7</string>|<string>${VERSION}</string>|g" packaging/macos/Info.plist > "${CONTENTS_DIR}/Info.plist"
+sed "s|<string>1.0.8</string>|<string>${VERSION}</string>|g" packaging/macos/Info.plist > "${CONTENTS_DIR}/Info.plist"
 
 SIGN_IDENTITY="${MACOS_SIGN_IDENTITY:--}"
 DESIGNATED_REQ='designated => identifier "io.github.ultradesk.UltraDesk"'

@@ -15,6 +15,7 @@ release:
 		exit 1; \
 	fi
 	./scripts/release.sh "$(VERSION)" $(if $(SUMMARY),"$(SUMMARY)",)
+	$(MAKE) build-web
 
 build-web:
 	cd web && npm run build

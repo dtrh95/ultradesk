@@ -204,7 +204,7 @@ function parseUpdateStatus(value: unknown): UpdateStatusSnapshot | null {
 
   return {
     state: parseUpdateState(value['state']),
-    current_version: asString(value['current_version'], '1.0.7'),
+    current_version: asString(value['current_version'], '1.0.8'),
     latest_version: latest,
     release_notes: notes,
     release_url: releaseUrl,

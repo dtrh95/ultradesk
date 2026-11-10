@@ -1,5 +1,5 @@
 Name:           ultradesk-rust
-Version:        1.0.7
+Version:        1.0.8
 Release:        1
 Summary:        Remote desktop controller and host for Linux (Rust Edition)
 License:        MIT
@@ -65,7 +65,8 @@ elif [ $1 -eq 2 ]; then
 fi
 
 %changelog
-* Tue Nov 10 2026 Hieu Doan <dtrunghieu96@gmail.com> - 1.0.7-1
+* Tue Nov 10 2026 Hieu Doan <dtrunghieu96@gmail.com> - 1.0.8-1
+- Consolidate macOS TCC permission prompts, in-process CoreGraphics screen capture, and stable bundle ID signing
 - Fix GTK3 clipboard reentrancy, Nix sandbox cache fallback, Wayland/XWayland clipboard sync, and Arch PKGBUILD
 - Cross-distro and cross-OS auto-update engine, tasteskill 2.5 6-theme update popup (Confirm / Later), and remote-to-host file transfer.
 - Release UltraDesk (Rust Edition) 1.0.5 with bidirectional remote-to-host file transfer, remote file pull (PACKET_FILE_REQUEST), automated release script, and Homebrew formula support
