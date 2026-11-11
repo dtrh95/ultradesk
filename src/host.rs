@@ -9,7 +9,7 @@ use crate::session::{detect_local_ip, RegistrationTransport, SessionTransport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, UdpSocket};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -148,6 +148,22 @@ pub fn parse_relay_notification_with_defaults(
     default_ips: &str,
     default_hosts: &str,
 ) -> Option<RelayNotification> {
+    parse_relay_notification_with_policy(text, default_ips, default_hosts, false)
+}
+
+pub fn parse_relay_notification_with_policy(
+    text: &str,
+    default_ips: &str,
+    default_hosts: &str,
+    allow_loopback: bool,
+) -> Option<RelayNotification> {
+    let is_allowed_ip = |ip: std::net::Ipv4Addr| {
+        crate::protocol::is_public_routable_ipv4(ip) || (allow_loopback && ip.is_loopback())
+    };
+    let is_allowed_host = |h: &str| {
+        crate::protocol::is_valid_hostname(h)
+            && (allow_loopback || !h.eq_ignore_ascii_case("localhost"))
+    };
     let parts: Vec<&str> = text.split(':').collect();
     if parts.is_empty() {
         return None;
@@ -155,14 +171,14 @@ pub fn parse_relay_notification_with_defaults(
     if parts[0] == "11" && parts.len() >= 4 {
         let relay_ip = parts[1].trim().to_string();
         let ip_addr = relay_ip.parse::<std::net::Ipv4Addr>().ok()?;
-        if ip_addr.is_unspecified() || ip_addr.is_broadcast() || ip_addr.is_multicast() {
+        if !is_allowed_ip(ip_addr) {
             return None;
         }
         let relay_host = if parts[3].trim().is_empty() {
             DEFAULT_REGISTRATION_HOST.to_string()
         } else {
             let candidate = parts[3].trim();
-            if !crate::protocol::is_valid_host_header_value(candidate) {
+            if !is_allowed_host(candidate) {
                 return None;
             }
             candidate.to_string()
@@ -200,14 +216,14 @@ pub fn parse_relay_notification_with_defaults(
         for (idx, ip_candidate) in ips.iter().enumerate() {
             let ip_trimmed = ip_candidate.trim();
             if let Ok(ip_addr) = ip_trimmed.parse::<std::net::Ipv4Addr>() {
-                if ip_addr.is_unspecified() || ip_addr.is_broadcast() || ip_addr.is_multicast() {
+                if !is_allowed_ip(ip_addr) {
                     continue;
                 }
                 let host_raw = hosts.get(idx).copied().unwrap_or("").trim();
                 let relay_host = if host_raw.is_empty() {
                     DEFAULT_REGISTRATION_HOST.to_string()
                 } else {
-                    if !crate::protocol::is_valid_host_header_value(host_raw) {
+                    if !is_allowed_host(host_raw) {
                         continue;
                     }
                     host_raw.to_string()
@@ -231,8 +247,11 @@ pub fn parse_relay_address(payload: &[u8]) -> Option<(u16, String)> {
         return None;
     }
     let port = parts[1].parse::<u16>().ok().filter(|&p| p != 0)?;
-    let ip = parts[2].parse::<std::net::Ipv4Addr>().ok()?.to_string();
-    Some((port, ip))
+    let ip_addr = parts[2].trim().parse::<std::net::Ipv4Addr>().ok()?;
+    if ip_addr.is_unspecified() || ip_addr.is_broadcast() || ip_addr.is_multicast() {
+        return None;
+    }
+    Some((port, ip_addr.to_string()))
 }
 
 pub fn encode_availability_reply(
@@ -364,6 +383,7 @@ pub fn verify_login_credentials(
 pub struct LoginThrottle {
     failures: u32,
     locked_until: Option<Instant>,
+    last_failure_at: Option<Instant>,
 }
 
 impl LoginThrottle {
@@ -372,6 +392,7 @@ impl LoginThrottle {
     }
 
     pub fn record_failure(&mut self, now: Instant) -> bool {
+        self.last_failure_at = Some(now);
         if self.locked_until.is_some_and(|until| now >= until) {
             self.locked_until = None;
             self.failures = 0;
@@ -390,11 +411,42 @@ impl LoginThrottle {
     pub fn record_success(&mut self) {
         self.failures = 0;
         self.locked_until = None;
+        self.last_failure_at = None;
     }
 
     pub fn remaining_lockout(&self, now: Instant) -> Option<Duration> {
         self.locked_until
             .and_then(|until| until.checked_duration_since(now))
+    }
+
+    pub fn is_expired(&self, now: Instant) -> bool {
+        if let Some(until) = self.locked_until {
+            now >= until
+        } else if let Some(last) = self.last_failure_at {
+            now.saturating_duration_since(last) >= LOCKOUT_DURATION
+        } else {
+            self.failures == 0
+        }
+    }
+
+    pub fn last_activity(&self) -> Option<Instant> {
+        self.locked_until.or(self.last_failure_at)
+    }
+}
+
+pub fn peer_throttle_key(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                v4.to_string()
+            } else if v6.is_loopback() {
+                "::1".to_string()
+            } else {
+                let s = v6.segments();
+                format!("v6:{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        }
     }
 }
 
@@ -729,14 +781,14 @@ impl HostCore {
     ) -> Self {
         let mut files = crate::file_transfer::FileTransferManager::default();
         files.id_prefix = "uvh_".to_string();
-        files.auto_accept = true;
-        files.allow_remote_requests = true;
+        files.auto_accept = false;
+        files.allow_remote_requests = false;
         Self {
             phase: HostPhase::None,
             temp_password: temp_password.to_string(),
             master_password_proof,
             auto_approve: false,
-            auto_approve_master: true,
+            auto_approve_master: crate::e2e::env_flag_enabled("ULTRADESK_UNATTENDED_MASTER"),
             throttle: LoginThrottle::default(),
             active_viewer: None,
             control_allowed: true,
@@ -773,6 +825,10 @@ impl HostCore {
     pub fn handle_packet(&mut self, payload: &[u8], now: Instant) -> Vec<HostAction> {
         let mut actions = Vec::new();
         if payload.starts_with(b"login:") {
+            if self.phase != HostPhase::None {
+                actions.push(HostAction::SendPeer(encode_host_auth_failed()));
+                return actions;
+            }
             if self.throttle.is_locked(now) {
                 actions.push(HostAction::SendPeer(encode_host_auth_failed()));
                 return actions;
@@ -812,28 +868,22 @@ impl HostCore {
             }
             self.used_nonces.push_back(login.nonce.clone());
 
-            let matched_proof_owned: String;
-            let matched_proof = if is_master && !login.custom_password_proof.is_empty() {
-                &login.custom_password_proof
-            } else if login
-                .e2e_offer
-                .as_deref()
-                .is_some_and(crate::e2e::offer_uses_derived_temp_secret)
+            let negotiated = if !is_master
+                && login
+                    .e2e_offer
+                    .as_deref()
+                    .is_some_and(crate::e2e::offer_uses_derived_temp_secret)
             {
-                matched_proof_owned =
-                    crate::e2e::derive_e2e_temp_secret(&login.nonce, &self.temp_password);
-                &matched_proof_owned
-            } else if !login.password_proof.is_empty() {
-                &login.password_proof
+                let derived = crate::e2e::derive_e2e_temp_secret(&login.nonce, &self.temp_password);
+                login.e2e_offer.as_deref().and_then(|offer_str| {
+                    crate::e2e::accept_viewer_offer_on_host(offer_str, &login.nonce, &derived)
+                })
             } else {
-                &login.custom_password_proof
+                None
             };
-            let negotiated = login.e2e_offer.as_deref().and_then(|offer_str| {
-                crate::e2e::accept_viewer_offer_on_host(offer_str, &login.nonce, matched_proof)
-            });
-
-            if self.phase == HostPhase::Streaming {
-                actions.push(HostAction::ReleaseAllInput);
+            if crate::e2e::env_flag_enabled("ULTRADESK_REQUIRE_E2E") && negotiated.is_none() {
+                actions.push(HostAction::SendPeer(encode_host_reject()));
+                return actions;
             }
 
             if self.auto_approve || (is_master && self.auto_approve_master) {
@@ -922,6 +972,7 @@ impl HostCore {
             self.active_viewer = None;
             self.waiting_ack = false;
             self.e2e = crate::e2e::E2eNegotiationState::Disabled;
+            self.files.reset_for_new_session();
             actions.push(HostAction::ReleaseAllInput);
             actions.push(HostAction::SessionEnded("Viewer disconnected".to_string()));
             return actions;
@@ -1057,6 +1108,7 @@ impl HostCore {
         self.phase = HostPhase::None;
         self.active_viewer = None;
         self.e2e = crate::e2e::E2eNegotiationState::Disabled;
+        self.files.reset_for_new_session();
         actions.push(HostAction::SendPeer(encode_host_reject()));
         actions.push(HostAction::SessionEnded("Session declined".to_string()));
         actions
@@ -1138,6 +1190,7 @@ impl HostCore {
         self.active_viewer = None;
         self.waiting_ack = false;
         self.e2e = crate::e2e::E2eNegotiationState::Disabled;
+        self.files.reset_for_new_session();
         actions.push(HostAction::ReleaseAllInput);
         actions.push(HostAction::SessionEnded(reason.to_string()));
         actions
@@ -1201,12 +1254,14 @@ impl Capturer for HeadlessCapturer {
 }
 
 pub struct HeadlessInjector {
+    #[cfg(test)]
     pub injected_packets: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl Default for HeadlessInjector {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
             injected_packets: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1220,11 +1275,14 @@ impl HeadlessInjector {
 
 impl Injector for HeadlessInjector {
     fn inject_event(&mut self, packet: &[u8]) -> Result<(), String> {
+        #[cfg(test)]
         self.injected_packets.lock().unwrap().push(packet.to_vec());
+        let _ = packet;
         Ok(())
     }
 
     fn release_all(&mut self) {
+        #[cfg(test)]
         self.injected_packets
             .lock()
             .unwrap()
@@ -1233,73 +1291,78 @@ impl Injector for HeadlessInjector {
 }
 
 pub struct X11CommandInjector {
+    #[cfg(test)]
     pub injected_packets: Arc<Mutex<Vec<Vec<u8>>>>,
     pub use_xdotool: bool,
+    tx: Option<std::sync::mpsc::SyncSender<Vec<String>>>,
 }
 
 impl X11CommandInjector {
     pub fn new(use_xdotool: bool) -> Self {
+        let tx = if use_xdotool {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<String>>(256);
+            std::thread::spawn(move || {
+                while let Ok(args) = rx.recv() {
+                    let _ = Command::new("xdotool").args(&args).status();
+                }
+            });
+            Some(tx)
+        } else {
+            None
+        };
         Self {
+            #[cfg(test)]
             injected_packets: Arc::new(Mutex::new(Vec::new())),
             use_xdotool,
+            tx,
         }
     }
 }
 
 impl Injector for X11CommandInjector {
     fn inject_event(&mut self, packet: &[u8]) -> Result<(), String> {
+        #[cfg(test)]
         self.injected_packets.lock().unwrap().push(packet.to_vec());
-        if !self.use_xdotool {
+        let Some(ref tx) = self.tx else {
             return Ok(());
-        }
+        };
         if let Some(evt) = decode_host_input(packet) {
-            match evt {
+            let args: Option<Vec<String>> = match evt {
                 HostInputEvent::Mouse {
                     msg, x, y, wheel, ..
                 } => match msg {
-                    0x0200 => {
-                        let _ = Command::new("xdotool")
-                            .args(["mousemove", &x.to_string(), &y.to_string()])
-                            .status();
-                    }
-                    0x0201 => {
-                        let _ = Command::new("xdotool").args(["mousedown", "1"]).status();
-                    }
-                    0x0202 => {
-                        let _ = Command::new("xdotool").args(["mouseup", "1"]).status();
-                    }
-                    0x0204 => {
-                        let _ = Command::new("xdotool").args(["mousedown", "3"]).status();
-                    }
-                    0x0205 => {
-                        let _ = Command::new("xdotool").args(["mouseup", "3"]).status();
-                    }
-                    0x0207 => {
-                        let _ = Command::new("xdotool").args(["mousedown", "2"]).status();
-                    }
-                    0x0208 => {
-                        let _ = Command::new("xdotool").args(["mouseup", "2"]).status();
-                    }
+                    0x0200 => Some(vec!["mousemove".to_string(), x.to_string(), y.to_string()]),
+                    0x0201 => Some(vec!["mousedown".to_string(), "1".to_string()]),
+                    0x0202 => Some(vec!["mouseup".to_string(), "1".to_string()]),
+                    0x0204 => Some(vec!["mousedown".to_string(), "3".to_string()]),
+                    0x0205 => Some(vec!["mouseup".to_string(), "3".to_string()]),
+                    0x0207 => Some(vec!["mousedown".to_string(), "2".to_string()]),
+                    0x0208 => Some(vec!["mouseup".to_string(), "2".to_string()]),
                     0x020A => {
                         let btn = if wheel >= 0 { "4" } else { "5" };
-                        let _ = Command::new("xdotool").args(["click", btn]).status();
+                        Some(vec!["click".to_string(), btn.to_string()])
                     }
-                    _ => {}
+                    _ => None,
                 },
                 HostInputEvent::Key { kind, vk, ch, .. } => {
                     if vk == VK_PACKET && (kind == KEY_DOWN || kind == SYS_KEY_DOWN) && ch >= 0x20 {
-                        if let Some(c) = char::from_u32(ch as u32) {
-                            let s = c.to_string();
-                            let _ = Command::new("xdotool").args(["type", "--", &s]).status();
-                        }
+                        char::from_u32(ch as u32).map(|c| {
+                            vec!["type".to_string(), "--".to_string(), c.to_string()]
+                        })
+                    } else {
+                        None
                     }
                 }
+            };
+            if let Some(cmd_args) = args {
+                let _ = tx.try_send(cmd_args);
             }
         }
         Ok(())
     }
 
     fn release_all(&mut self) {
+        #[cfg(test)]
         self.injected_packets
             .lock()
             .unwrap()
@@ -2770,6 +2833,7 @@ impl Capturer for MacOsCapturer {
 }
 
 pub struct MacOsCommandInjector {
+    #[cfg(test)]
     pub injected_packets: Arc<Mutex<Vec<Vec<u8>>>>,
     pub use_commands: bool,
 }
@@ -2777,6 +2841,7 @@ pub struct MacOsCommandInjector {
 impl MacOsCommandInjector {
     pub fn new(use_commands: bool) -> Self {
         Self {
+            #[cfg(test)]
             injected_packets: Arc::new(Mutex::new(Vec::new())),
             use_commands,
         }
@@ -2785,7 +2850,9 @@ impl MacOsCommandInjector {
 
 impl Injector for MacOsCommandInjector {
     fn inject_event(&mut self, packet: &[u8]) -> Result<(), String> {
+        #[cfg(test)]
         self.injected_packets.lock().unwrap().push(packet.to_vec());
+        let _ = packet;
         if !self.use_commands {
             return Ok(());
         }
@@ -2904,6 +2971,7 @@ impl Injector for MacOsCommandInjector {
     }
 
     fn release_all(&mut self) {
+        #[cfg(test)]
         self.injected_packets
             .lock()
             .unwrap()
@@ -3819,13 +3887,17 @@ impl HostSession {
 
     pub fn downloaded_file_bytes(&self, file_id: &str) -> Option<(String, Vec<u8>)> {
         let s = self.inner.lock().unwrap();
+        if let Some(res) = s.core.files.read_completed_download(file_id) {
+            return Some(res);
+        }
         let entry = s.core.files.transfers.get(file_id)?;
         if entry.direction == crate::file_transfer::TransferDirection::Send
-            && entry.saved_path.is_some()
+            && entry.saved_path.is_none()
+            && !entry.buffer.is_empty()
         {
-            return None;
+            return Some((entry.file_name.clone(), entry.buffer.clone()));
         }
-        Some((entry.file_name.clone(), entry.buffer.clone()))
+        None
     }
 
     pub fn offer_file_bytes(&self, file_name: &str, data: Vec<u8>) -> Result<String, String> {
@@ -3935,6 +4007,7 @@ impl HostSession {
     }
 
     fn run_lan_worker(&self, gen: u64, listener: TcpListener) {
+        let _ = listener.set_nonblocking(true);
         let udp_disc = if cfg!(target_os = "macos") {
             if std::env::var_os("ULTRADESK_MACOS_LAN_UDP").is_some() {
                 UdpSocket::bind(("0.0.0.0", DEFAULT_LAN_PORT)).ok()
@@ -3947,10 +4020,39 @@ impl HostSession {
         if let Some(ref u) = udp_disc {
             let _ = u.set_nonblocking(true);
         }
+
+        struct PendingLanPeer {
+            stream: TcpStream,
+            throttle_key: String,
+            wire_ip: String,
+            peer_port: u16,
+            accepted_at: Instant,
+            rx_frames: FrameStream,
+        }
+
+        struct ActiveLanPeer {
+            stream: TcpStream,
+            throttle_key: String,
+            wire_ip: String,
+            peer_port: u16,
+            rx_frames: FrameStream,
+            next_capture_at: Instant,
+        }
+
+        const MAX_PENDING_LAN_PEERS: usize = 16;
+        const PREAUTH_TIMEOUT: Duration = Duration::from_millis(1000);
+
+        let mut pending: Vec<PendingLanPeer> = Vec::new();
+        let mut active_peer: Option<ActiveLanPeer> = None;
+        let mut buf = [0u8; 65536];
+
         while self.is_worker_active(gen) {
+            let mut had_activity = false;
+
             if let Some(ref u) = udp_disc {
                 let mut disc_buf = [0u8; 256];
                 while let Ok((n, src)) = u.recv_from(&mut disc_buf) {
+                    had_activity = true;
                     if let Ok(txt) = std::str::from_utf8(&disc_buf[..n]) {
                         if let Some(queried) = txt.trim().strip_prefix("ULTRADESK_DISCOVER:") {
                             let (hid, did, lport) = {
@@ -3968,160 +4070,251 @@ impl HostSession {
                 }
             }
 
-            match listener.accept() {
-                Ok((mut stream, peer_addr)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_nodelay(true);
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(5)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                    let peer_ip = match peer_addr.ip() {
-                        std::net::IpAddr::V4(v4) => v4.to_string(),
-                        std::net::IpAddr::V6(_) => "127.0.0.1".to_string(),
-                    };
-                    let peer_port = peer_addr.port().max(1);
-                    let accepted_at = Instant::now();
-                    let mut authenticated = false;
-                    let mut rx_frames = FrameStream::new(false);
-                    let mut buf = [0u8; 65536];
-                    let mut next_capture_at = Instant::now();
-                    while self.is_worker_active(gen) {
-                        let mut disconnected = false;
-                        match stream.read(&mut buf) {
-                            Ok(0) => {
-                                disconnected = true;
-                            }
-                            Ok(n) => {
-                                for frame in rx_frames.feed(&buf[..n]) {
-                                    if let Ok(Some(pkt)) = decode_transport_body(&frame) {
-                                        if pkt.kind == "relay" || pkt.kind == "direct" {
-                                            if let Some(decoded) =
-                                                decode_peer_payload(&pkt.data, pkt.flag)
-                                            {
-                                                let can_process = if authenticated {
-                                                    true
+            while let Ok((stream, peer_addr)) = listener.accept() {
+                had_activity = true;
+                let _ = stream.set_nonblocking(true);
+                let _ = stream.set_nodelay(true);
+                let throttle_key = peer_throttle_key(peer_addr.ip());
+                let wire_ip = match peer_addr.ip() {
+                    std::net::IpAddr::V4(v4) => v4.to_string(),
+                    std::net::IpAddr::V6(v6) => v6
+                        .to_ipv4_mapped()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "127.0.0.1".to_string()),
+                };
+                let peer_port = peer_addr.port().max(1);
+                if pending.len() >= MAX_PENDING_LAN_PEERS {
+                    pending.remove(0);
+                }
+                pending.push(PendingLanPeer {
+                    stream,
+                    throttle_key,
+                    wire_ip,
+                    peer_port,
+                    accepted_at: Instant::now(),
+                    rx_frames: FrameStream::new(false),
+                });
+            }
+
+            let mut i = 0;
+            while i < pending.len() {
+                if pending[i].accepted_at.elapsed() >= PREAUTH_TIMEOUT {
+                    pending.swap_remove(i);
+                    continue;
+                }
+
+                let mut drop_peer = false;
+                let mut peer_authenticated = false;
+
+                match pending[i].stream.read(&mut buf) {
+                    Ok(0) => {
+                        drop_peer = true;
+                    }
+                    Ok(n) => {
+                        had_activity = true;
+                        let frames = pending[i].rx_frames.feed(&buf[..n]);
+                        for frame in frames {
+                            if let Ok(Some(pkt)) = decode_transport_body(&frame) {
+                                if pkt.kind == "relay" || pkt.kind == "direct" {
+                                    if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
+                                        if active_peer.is_some() {
+                                            if decoded.starts_with(b"login:") {
+                                                if let Ok(auth_fail_frame) = encode_relay_frame(
+                                                    &encode_host_auth_failed(),
+                                                    &pending[i].wire_ip,
+                                                    pending[i].peer_port,
+                                                    0,
+                                                ) {
+                                                    let _ = pending[i].stream.write_all(&auth_fail_frame);
+                                                }
+                                                drop_peer = true;
+                                                break;
+                                            }
+                                        } else {
+                                            let can_process = {
+                                                let s = self.inner.lock().unwrap();
+                                                !s.lan_viewer_active
+                                                    && s.core.phase == HostPhase::None
+                                                    && decoded.starts_with(b"login:")
+                                            };
+                                            if can_process {
+                                                let actions = self
+                                                    .handle_peer_payload_from_peer(
+                                                        &pending[i].throttle_key,
+                                                        &decoded,
+                                                    )
+                                                    .unwrap_or_default();
+                                                let authenticated = actions.iter().any(|a| {
+                                                    matches!(
+                                                        a,
+                                                        HostAction::PromptApproval(_)
+                                                            | HostAction::SessionStarted(_)
+                                                    )
+                                                });
+                                                if authenticated {
+                                                    peer_authenticated = true;
+                                                    break;
                                                 } else {
-                                                    let s = self.inner.lock().unwrap();
-                                                    !s.lan_viewer_active
-                                                        && s.core.phase == HostPhase::None
-                                                        && decoded.starts_with(b"login:")
-                                                };
-                                                if can_process {
-                                                    let actions = self
-                                                        .handle_peer_payload_from_peer(
-                                                            &peer_ip, &decoded,
-                                                        )
-                                                        .unwrap_or_default();
-                                                    if !authenticated
-                                                        && actions.iter().any(|a| {
-                                                            matches!(
-                                                                a,
-                                                                HostAction::PromptApproval(_)
-                                                                    | HostAction::SessionStarted(_)
-                                                            )
-                                                        })
-                                                    {
-                                                        authenticated = true;
+                                                    let rejected: Vec<Vec<u8>> = {
                                                         let mut s = self.inner.lock().unwrap();
-                                                        s.lan_viewer_active = true;
-                                                    } else if !authenticated {
-                                                        let rejected: Vec<Vec<u8>> = {
-                                                            let mut s = self.inner.lock().unwrap();
-                                                            if !s.lan_viewer_active
-                                                                && s.core.phase == HostPhase::None
-                                                            {
-                                                                std::mem::take(
-                                                                    &mut s.outbound_peer_packets,
-                                                                )
-                                                            } else {
-                                                                Vec::new()
-                                                            }
-                                                        };
-                                                        for pkt in rejected {
-                                                            if let Ok(frame) = encode_relay_frame(
-                                                                &pkt, &peer_ip, peer_port, 0,
-                                                            ) {
-                                                                let _ = stream.write_all(&frame);
-                                                            }
+                                                        if !s.lan_viewer_active
+                                                            && s.core.phase == HostPhase::None
+                                                        {
+                                                            std::mem::take(&mut s.outbound_peer_packets)
+                                                        } else {
+                                                            Vec::new()
+                                                        }
+                                                    };
+                                                    for p in rejected {
+                                                        if let Ok(f) = encode_relay_frame(
+                                                            &p,
+                                                            &pending[i].wire_ip,
+                                                            pending[i].peer_port,
+                                                            0,
+                                                        ) {
+                                                            let _ = pending[i].stream.write_all(&f);
                                                         }
                                                     }
+                                                    drop_peer = true;
+                                                    break;
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                            Err(ref e)
-                                if matches!(
-                                    e.kind(),
-                                    std::io::ErrorKind::WouldBlock
-                                        | std::io::ErrorKind::TimedOut
-                                        | std::io::ErrorKind::Interrupted
-                                ) => {}
-                            Err(_) => {
-                                disconnected = true;
-                            }
                         }
+                    }
+                    Err(ref e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(_) => {
+                        drop_peer = true;
+                    }
+                }
 
-                        if !authenticated && accepted_at.elapsed() >= Duration::from_secs(3) {
-                            break;
+                if peer_authenticated {
+                    let mut peer = pending.swap_remove(i);
+                    let _ = peer.stream.set_nonblocking(false);
+                    let _ = peer.stream.set_read_timeout(Some(Duration::from_millis(5)));
+                    let _ = peer.stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    let outbound: Vec<Vec<u8>> = {
+                        let mut s = self.inner.lock().unwrap();
+                        s.lan_viewer_active = true;
+                        std::mem::take(&mut s.outbound_peer_packets)
+                    };
+                    for pkt in outbound {
+                        if let Ok(frame) =
+                            encode_relay_frame(&pkt, &peer.wire_ip, peer.peer_port, 0)
+                        {
+                            let _ = peer.stream.write_all(&frame);
                         }
+                    }
+                    active_peer = Some(ActiveLanPeer {
+                        stream: peer.stream,
+                        throttle_key: peer.throttle_key,
+                        wire_ip: peer.wire_ip,
+                        peer_port: peer.peer_port,
+                        rx_frames: peer.rx_frames,
+                        next_capture_at: Instant::now(),
+                    });
+                    break;
+                } else if drop_peer {
+                    pending.swap_remove(i);
+                } else {
+                    i += 1;
+                }
+            }
 
-                        let should_capture = authenticated && {
-                            let s = self.inner.lock().unwrap();
-                            s.core.phase == HostPhase::Streaming
-                                && !s.core.waiting_ack
-                                && (s.capture_needed || Instant::now() >= next_capture_at)
-                        };
-                        if should_capture {
-                            let capture_start = Instant::now();
-                            let _ = self.step_capture();
-                            let interval = {
-                                let s = self.inner.lock().unwrap();
-                                s.core.qos.target_interval()
-                            };
-                            next_capture_at =
-                                Instant::now() + interval.saturating_sub(capture_start.elapsed());
-                        }
-
-                        let outbound: Vec<Vec<u8>> = {
-                            let mut s = self.inner.lock().unwrap();
-                            if authenticated {
-                                std::mem::take(&mut s.outbound_peer_packets)
-                            } else {
-                                Vec::new()
-                            }
-                        };
-                        for pkt in outbound {
-                            if let Ok(frame) = encode_relay_frame(&pkt, &peer_ip, peer_port, 0) {
-                                if stream.write_all(&frame).is_err() {
-                                    disconnected = true;
-                                    break;
+            if let Some(ref mut active) = active_peer {
+                let mut disconnected = false;
+                match active.stream.read(&mut buf) {
+                    Ok(0) => {
+                        disconnected = true;
+                    }
+                    Ok(n) => {
+                        had_activity = true;
+                        for frame in active.rx_frames.feed(&buf[..n]) {
+                            if let Ok(Some(pkt)) = decode_transport_body(&frame) {
+                                if pkt.kind == "relay" || pkt.kind == "direct" {
+                                    if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
+                                        let _ = self.handle_peer_payload_from_peer(
+                                            &active.throttle_key,
+                                            &decoded,
+                                        );
+                                    }
                                 }
                             }
                         }
+                    }
+                    Err(ref e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(_) => {
+                        disconnected = true;
+                    }
+                }
 
-                        if disconnected {
+                let should_capture = {
+                    let s = self.inner.lock().unwrap();
+                    s.core.phase == HostPhase::Streaming
+                        && !s.core.waiting_ack
+                        && (s.capture_needed || Instant::now() >= active.next_capture_at)
+                };
+                if should_capture {
+                    had_activity = true;
+                    let capture_start = Instant::now();
+                    let _ = self.step_capture();
+                    let interval = {
+                        let s = self.inner.lock().unwrap();
+                        s.core.qos.target_interval()
+                    };
+                    active.next_capture_at =
+                        Instant::now() + interval.saturating_sub(capture_start.elapsed());
+                }
+
+                let outbound: Vec<Vec<u8>> = {
+                    let mut s = self.inner.lock().unwrap();
+                    std::mem::take(&mut s.outbound_peer_packets)
+                };
+                for pkt in outbound {
+                    had_activity = true;
+                    if let Ok(frame) = encode_relay_frame(&pkt, &active.wire_ip, active.peer_port, 0)
+                    {
+                        if active.stream.write_all(&frame).is_err() {
+                            disconnected = true;
                             break;
                         }
                     }
-                    if authenticated {
-                        let mut s = self.inner.lock().unwrap();
-                        s.lan_viewer_active = false;
-                        let actions = s.core.end_session("LAN viewer disconnected");
-                        Self::record_actions(&mut s, &actions);
-                        s.outbound_peer_packets.clear();
-                    }
                 }
-                Err(ref e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    thread::sleep(Duration::from_millis(15));
+
+                if disconnected {
+                    let mut s = self.inner.lock().unwrap();
+                    s.lan_viewer_active = false;
+                    let actions = s.core.end_session("LAN viewer disconnected");
+                    Self::record_actions(&mut s, &actions);
+                    s.outbound_peer_packets.clear();
+                    active_peer = None;
                 }
-                Err(_) => break,
             }
+
+            if active_peer.is_none() && !had_activity {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        if active_peer.is_some() {
+            let mut s = self.inner.lock().unwrap();
+            s.lan_viewer_active = false;
+            let actions = s.core.end_session("LAN viewer disconnected");
+            Self::record_actions(&mut s, &actions);
+            s.outbound_peer_packets.clear();
         }
     }
 
@@ -4286,10 +4479,13 @@ impl HostSession {
                 match reg.receive_mode1_payload() {
                     Ok(payload) => {
                         let text = String::from_utf8_lossy(&payload);
-                        if let Some(notif) = parse_relay_notification_with_defaults(
+                        let allow_loopback =
+                            !use_tls && (reg_host == "127.0.0.1" || reg_host == "localhost");
+                        if let Some(notif) = parse_relay_notification_with_policy(
                             &text,
                             &reply.ping_list,
                             &reply.ping_host_name_list,
+                            allow_loopback,
                         ) {
                             if let Some((_, ref cur_notif, Some((pub_port, ref pub_ip)))) =
                                 active_relay
@@ -4653,10 +4849,22 @@ impl HostSession {
         bytes: &[u8],
     ) -> Result<Vec<HostAction>, String> {
         let mut s = self.inner.lock().unwrap();
+        let now = Instant::now();
         if bytes.starts_with(b"login:") {
             Self::refresh_display_layout(&mut s);
+            s.peer_throttles.retain(|_, t| !t.is_expired(now));
             if s.peer_throttles.len() >= 256 && !s.peer_throttles.contains_key(peer_key) {
-                s.peer_throttles.clear();
+                let evict_candidate = s
+                    .peer_throttles
+                    .iter()
+                    .filter(|(_, t)| !t.is_locked(now))
+                    .min_by_key(|(_, t)| t.last_activity())
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = evict_candidate {
+                    s.peer_throttles.remove(&k);
+                } else {
+                    return Ok(vec![HostAction::SendPeer(encode_host_auth_failed())]);
+                }
             }
             let peer_throttle = s
                 .peer_throttles
@@ -4664,13 +4872,13 @@ impl HostSession {
                 .or_default()
                 .clone();
             let saved_global = std::mem::replace(&mut s.core.throttle, peer_throttle);
-            let actions = s.core.handle_packet(bytes, Instant::now());
+            let actions = s.core.handle_packet(bytes, now);
             let updated_peer = std::mem::replace(&mut s.core.throttle, saved_global);
             s.peer_throttles.insert(peer_key.to_string(), updated_peer);
             Self::record_actions(&mut s, &actions);
             return Ok(actions);
         }
-        let actions = s.core.handle_packet(bytes, Instant::now());
+        let actions = s.core.handle_packet(bytes, now);
         Self::record_actions(&mut s, &actions);
         Ok(actions)
     }
@@ -5366,7 +5574,7 @@ mod tests {
         let temp_pw = "temp_pass";
         let proof = md5_hex_lower(format!("{}{}", nonce, temp_pw).as_bytes());
         let (offer_wire, viewer_offer_state) =
-            crate::e2e::create_viewer_offer(nonce, &proof, &"0".repeat(32));
+            crate::e2e::create_viewer_offer_for_password(nonce, temp_pw, "");
 
         let login_pkt = format!(
             "login:{nonce}:{proof}:1920:1080:7:15:15:30:16:111222333:E2E Viewer:1:{}:x:conn:2:45:0:0:{offer_wire}:6.6.133:0",
@@ -5414,10 +5622,10 @@ mod tests {
         assert_eq!(ctrl_plain, encode_host_control_permission(true));
         assert_eq!(viewer_e2e.cipher_mut().unwrap().rx_seqnum, 1);
 
-        let mut auto_core = HostCore::new(temp_pw, None, layout);
+        let mut auto_core = HostCore::new(temp_pw, None, layout.clone());
         auto_core.auto_approve = true;
         let (offer_wire_2, viewer_offer_2) =
-            crate::e2e::create_viewer_offer(nonce, &proof, &"0".repeat(32));
+            crate::e2e::create_viewer_offer_for_password(nonce, temp_pw, "");
         let login_pkt_2 = format!(
             "login:{nonce}:{proof}:1920:1080:7:15:15:30:16:111222333:E2E Viewer:1:{}:x:conn:2:45:0:0:{offer_wire_2}:6.6.133:0",
             "0".repeat(32)
@@ -5502,6 +5710,27 @@ mod tests {
             clip_acts,
             vec![HostAction::ClipboardReceived("secret clip".to_string())]
         );
+
+        let legacy_nonce = "99998888";
+        let legacy_proof = md5_hex_lower(format!("{legacy_nonce}{temp_pw}").as_bytes());
+        let (legacy_offer, _) = crate::e2e::create_viewer_offer(legacy_nonce, &legacy_proof, "");
+        let legacy_login = format!(
+            "login:{legacy_nonce}:{legacy_proof}:1920:1080:7:15:15:30:16:111222333:Legacy:1:{}:x:conn:2:45:0:0:{legacy_offer}:6.6.133:0",
+            "0".repeat(32)
+        )
+        .into_bytes();
+        let mut legacy_core = HostCore::new(temp_pw, None, layout);
+        legacy_core.auto_approve = true;
+        let legacy_actions = legacy_core.handle_packet(&legacy_login, now);
+        assert_eq!(legacy_core.phase, HostPhase::Starting);
+        assert!(!legacy_core.e2e.is_enabled());
+        let screen_init = match &legacy_actions[0] {
+            HostAction::SendPeer(p) => p.clone(),
+            _ => panic!("expected screen_init"),
+        };
+        let legacy_init_fields =
+            decode_byte_array_fields_checked(&screen_init, Some(11)).unwrap();
+        assert!(legacy_init_fields[3].is_empty());
     }
 
     #[test]
@@ -5688,15 +5917,12 @@ mod tests {
             .unwrap();
 
         let actions = core.handle_packet(&offer_pkt, now);
-        assert_eq!(actions.len(), 2);
-        let accept_pkt = match &actions[0] {
-            HostAction::SendPeer(p) => p.clone(),
-            other => panic!("expected SendPeer accept, got {:?}", other),
-        };
+        assert_eq!(actions.len(), 1);
         assert!(matches!(
-            &actions[1],
+            &actions[0],
             HostAction::FileTransferEvent(crate::file_transfer::FileTransferPacket::Offer { .. })
         ));
+        let accept_pkt = core.files.accept_incoming_offer(&file_id).unwrap();
 
         let (_, chunk_replies) = sender.handle_packet(&accept_pkt).unwrap().unwrap();
         assert!(!chunk_replies.is_empty());
@@ -5846,5 +6072,227 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_peer_throttles_saturation_preserves_locked_entries_and_ipv6_bucket() {
+        assert_eq!(
+            peer_throttle_key("192.0.2.1".parse().unwrap()),
+            "192.0.2.1"
+        );
+        assert_eq!(
+            peer_throttle_key("::ffff:192.0.2.1".parse().unwrap()),
+            "192.0.2.1"
+        );
+        assert_eq!(peer_throttle_key("::1".parse().unwrap()), "::1");
+        assert_eq!(
+            peer_throttle_key("2001:db8:abcd:1234::1".parse().unwrap()),
+            "v6:2001:db8:abcd:1234::/64"
+        );
+        assert_eq!(
+            peer_throttle_key("2001:db8:abcd:1234::ffff".parse().unwrap()),
+            "v6:2001:db8:abcd:1234::/64"
+        );
+
+        let layout = DisplayLayout {
+            width: 4,
+            height: 4,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 4,
+                bottom: 4,
+            }],
+        };
+        let session =
+            HostSession::new("goodpassword", None, layout, DesktopBackend::headless(4, 4));
+        let attacker_ip = "203.0.113.66";
+        let bad_login = b"login:00001111:00000000000000000000000000000000:1920:1080:7:15:15:30:16:999:Attacker:1:00000000000000000000000000000000:x:conn:2:45:0:0::6.6.133:0";
+
+        for _ in 0..5 {
+            let _ = session.handle_peer_payload_from_peer(attacker_ip, bad_login);
+        }
+        {
+            let s = session.inner.lock().unwrap();
+            assert!(s.peer_throttles.get(attacker_ip).unwrap().is_locked(Instant::now()));
+        }
+
+        for i in 0..300 {
+            let key = format!("198.51.100.{}", i);
+            let _ = session.handle_peer_payload_from_peer(&key, bad_login);
+        }
+
+        {
+            let s = session.inner.lock().unwrap();
+            let throttle = s.peer_throttles.get(attacker_ip);
+            assert!(throttle.is_some(), "attacker throttle should not be evicted");
+            assert!(throttle.unwrap().is_locked(Instant::now()), "attacker must remain locked");
+        }
+    }
+
+    #[test]
+    fn test_idle_preauth_lan_sockets_do_not_block_legitimate_viewer() {
+        let layout = DisplayLayout {
+            width: 4,
+            height: 4,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 4,
+                bottom: 4,
+            }],
+        };
+        let host =
+            HostSession::new("pass1234", None, layout, DesktopBackend::headless(4, 4));
+        host.set_auto_approve(true);
+        let status = host.start_with_endpoint("127.0.0.1", 1, false);
+        let port = status.lan_port;
+        assert!(port > 0);
+
+        let mut idle_sockets = Vec::new();
+        for _ in 0..4 {
+            let s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.set_nonblocking(true).unwrap();
+            idle_sockets.push(s);
+        }
+
+        let start = Instant::now();
+        let mut viewer = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        viewer
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let login_payload = sample_login_payload("pass1234", "2", 1);
+        let utf16le = |s: &str| -> Vec<u8> {
+            s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+        };
+        let frame = encode_relay_frame(
+            &utf16le(&String::from_utf8(login_payload).unwrap()),
+            "127.0.0.1",
+            12345,
+            1,
+        )
+        .unwrap();
+        viewer.write_all(&frame).unwrap();
+
+        let mut rx = FrameStream::new(false);
+        let mut buf = [0u8; 4096];
+        let mut authenticated = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match viewer.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for f in rx.feed(&buf[..n]) {
+                        if let Ok(Some(body)) = decode_transport_body(&f) {
+                            if body.kind == "relay" {
+                                authenticated = true;
+                                break;
+                            }
+                        }
+                    }
+                    if authenticated {
+                        break;
+                    }
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => break,
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let elapsed = start.elapsed();
+        host.stop();
+        drop(idle_sockets);
+        drop(viewer);
+
+        assert!(authenticated, "legitimate viewer should have authenticated");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "authentication took {:?}, expected < 500ms",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_auto_approve_master_false_by_default_prompts_approval() {
+        let layout = DisplayLayout {
+            width: 4,
+            height: 4,
+            virtual_left: 0,
+            virtual_top: 0,
+            monitors: vec![MonitorRect {
+                left: 0,
+                top: 0,
+                right: 4,
+                bottom: 4,
+            }],
+        };
+        let master_proof = compute_master_password_proof("mastersecret");
+        let mut core = HostCore::new("temppass", Some(master_proof.clone()), layout);
+        assert!(!core.auto_approve_master);
+
+        let nonce = "12345678";
+        let master_login_payload = format!(
+            "login:{nonce}:wrongproof:1920:1080:7:15:15:30:16:111222333:Master Viewer:1:{}:x:conn:2:45:0:0::6.6.133:0",
+            master_proof
+        );
+        let actions = core.handle_packet(master_login_payload.as_bytes(), Instant::now());
+        assert_eq!(core.phase, HostPhase::Approval);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], HostAction::PromptApproval(_)));
+    }
+
+    #[test]
+    fn test_relay_ip_and_host_validation() {
+        let good_legacy = "11:103.56.158.44:unused:relay1.ultraviewer.net";
+        assert!(parse_relay_notification(good_legacy).is_some());
+
+        let bad_ips = ["127.0.0.1", "10.0.0.1", "169.254.169.254", "100.64.0.1"];
+        for bad_ip in bad_ips {
+            let legacy = format!("11:{}:unused:relay1.ultraviewer.net", bad_ip);
+            assert!(
+                parse_relay_notification(&legacy).is_none(),
+                "expected {} to be rejected in legacy",
+                bad_ip
+            );
+
+            let modern = format!("17:tag:hash:{}:relay1.ultraviewer.net:0:-1:60:0:", bad_ip);
+            assert!(
+                parse_relay_notification(&modern).is_none(),
+                "expected {} to be rejected in modern",
+                bad_ip
+            );
+        }
+
+        assert!(
+            parse_relay_notification_with_policy("11:127.0.0.1:unused:localhost", "", "", true)
+                .is_some()
+        );
+        assert!(
+            parse_relay_notification_with_policy("11:127.0.0.1:unused:localhost", "", "", false)
+                .is_none()
+        );
+        assert!(
+            parse_relay_notification("11:103.56.158.44:unused:localhost").is_none()
+        );
+
+        let bad_host = "11:103.56.158.44:unused:evil..com";
+        assert!(parse_relay_notification(bad_host).is_none());
+
+        let modern_bad_host = "17:tag:hash:103.56.158.44:evil_host/path:0:-1:60:0:";
+        assert!(parse_relay_notification(modern_bad_host).is_none());
+
+        assert!(parse_relay_address(b"0:12345:0.0.0.0").is_none());
+        assert!(parse_relay_address(b"0:12345:255.255.255.255").is_none());
+        assert!(parse_relay_address(b"0:12345:224.0.0.1").is_none());
+        let cgnat_addr = b"0:12345:100.64.1.2";
+        assert_eq!(
+            parse_relay_address(cgnat_addr),
+            Some((12345, "100.64.1.2".to_string()))
+        );
     }
 }

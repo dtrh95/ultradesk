@@ -321,10 +321,12 @@ fn test_host_core_e2e_preserved_on_bad_login_manual_approval_clipboard_and_nonce
     )
     .into_bytes();
     let relogin_actions = core.handle_packet(&login2, now);
-    assert_eq!(core.phase, HostPhase::Approval);
-    assert!(relogin_actions
-        .iter()
-        .any(|a| matches!(a, HostAction::PromptApproval(_))));
+    assert_eq!(
+        relogin_actions,
+        vec![HostAction::SendPeer(encode_host_auth_failed())]
+    );
+    assert_eq!(core.phase, HostPhase::Streaming);
+    assert!(core.e2e.is_enabled());
 
     let bad_peer_login = b"login:99990000:00000000000000000000000000000000:1920:1080:7:15:15:30:16:999:Attacker:1:00000000000000000000000000000000:x:conn:2:45:0:0::6.6.133:0";
     for _ in 0..6 {
