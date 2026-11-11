@@ -2733,6 +2733,20 @@ impl ControlSession {
         Ok(msg)
     }
 
+    pub fn confirm_update_for_version(
+        &self,
+        expected_version: Option<&str>,
+    ) -> Result<String, String> {
+        let engine = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.update_engine.clone()
+        };
+        let status = engine.confirm_and_apply_for_version(expected_version)?;
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::sync_state_fields(&mut guard);
+        Ok(status.message.unwrap_or_default())
+    }
+
     pub fn dismiss_update(&self, version: Option<&str>) {
         let (engine, target_ver, creds_path) = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());

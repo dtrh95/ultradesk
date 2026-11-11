@@ -67,8 +67,14 @@ export class LocalPreferencesStorage {
           .filter((item) => typeof item['partner_id'] === 'string' && item['partner_id'].length > 0)
           .map((item) => ({
             partner_id: String(item['partner_id']),
-            password: typeof item['password'] === 'string' ? item['password'] : '',
+            password: '',
           }));
+        if (rawList.some((item) => isRecord(item) && 'password' in item)) {
+          localStorage.setItem(
+            'uv_saved_remotes_list',
+            JSON.stringify(savedRemotes.map((r) => ({ partner_id: r.partner_id }))),
+          );
+        }
       }
 
       const rawCreds: unknown = JSON.parse(localStorage.getItem('uv_saved_creds') || 'null');
@@ -76,9 +82,11 @@ export class LocalPreferencesStorage {
         const remember = rawCreds['remember'] !== false;
         savedCreds = {
           id: remember && typeof rawCreds['id'] === 'string' ? rawCreds['id'] : '',
-          pass: remember && typeof rawCreds['pass'] === 'string' ? rawCreds['pass'] : '',
           remember,
         };
+        if ('pass' in rawCreds) {
+          localStorage.setItem('uv_saved_creds', JSON.stringify(savedCreds));
+        }
       }
     } catch {
       void 0;
@@ -120,21 +128,22 @@ export class LocalPreferencesStorage {
 
   saveRemotesList(remotes: readonly SavedRemote[]): void {
     try {
-      localStorage.setItem('uv_saved_remotes_list', JSON.stringify(remotes));
+      localStorage.setItem(
+        'uv_saved_remotes_list',
+        JSON.stringify(remotes.map((r) => ({ partner_id: r.partner_id }))),
+      );
     } catch {
       void 0;
     }
   }
 
-  saveCredentials(id: string, pass: string, remember: boolean): void {
+  saveCredentials(id: string, remember: boolean): void {
     try {
       if (remember) {
-        localStorage.setItem('uv_saved_creds', JSON.stringify({ id, pass, remember: true }));
+        localStorage.setItem('uv_saved_creds', JSON.stringify({ id, remember: true }));
       } else {
-        localStorage.setItem(
-          'uv_saved_creds',
-          JSON.stringify({ id: '', pass: '', remember: false }),
-        );
+        localStorage.setItem('uv_saved_creds', JSON.stringify({ id: '', remember: false }));
+        localStorage.removeItem('uv_saved_remotes_list');
       }
     } catch {
       void 0;

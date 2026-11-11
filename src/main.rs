@@ -427,6 +427,9 @@ fn main() {
         .unwrap_or_else(|| DEFAULT_ZSTD_DICT.to_vec());
 
     let session = ControlSession::with_profiles(reg_profile, partner_profile, dict_bytes);
+    if args.no_gui || args.subcommand.is_some() {
+        session.set_clipboard_sync_mode(ultradesk_rust::clipboard::ClipboardSyncMode::Off);
+    }
     session.spawn_background_update_check();
 
     if args.auto_approve {
@@ -436,7 +439,9 @@ fn main() {
     }
 
     if args.subcommand.as_deref() == Some("mcp") {
-        let _ = session.host_start();
+        if args.auto_approve {
+            let _ = session.host_start();
+        }
         if !args.partner_id.trim().is_empty() {
             let _ = session.start_connect(&args.partner_id, &args.password);
         }
@@ -462,6 +467,9 @@ fn main() {
                 "UltraDesk MCP server listening on ws://{} and http://{}/mcp",
                 mcp_srv.bind_addr, mcp_srv.bind_addr
             );
+            if args.mcp_token.is_none() {
+                eprintln!("Ephemeral MCP token: {}", mcp_srv.auth_token());
+            }
             let shutdown = mcp_srv.shutdown.clone();
             let handle = mcp_srv.spawn(mcp_listener);
             while !shutdown.load(Ordering::SeqCst) {
@@ -502,6 +510,9 @@ fn main() {
                     "UltraDesk MCP server listening on ws://{} and http://{}/mcp",
                     mcp_srv.bind_addr, mcp_srv.bind_addr
                 );
+                if args.mcp_token.is_none() {
+                    eprintln!("Ephemeral MCP token: {}", mcp_srv.auth_token());
+                }
                 let mcp_shutdown = mcp_srv.shutdown.clone();
                 let handle = mcp_srv.spawn(mcp_listener);
                 mcp_bg = Some((mcp_shutdown, handle));
@@ -513,7 +524,7 @@ fn main() {
     }
 
     let viewer_path = find_asset_file("viewer.html");
-    let (portal, listener) =
+    let (mut portal, listener) =
         match PortalServer::bind(&args.host, args.port, session.clone(), viewer_path) {
             Ok(v) => v,
             Err(e) => {
@@ -522,6 +533,17 @@ fn main() {
             }
         };
 
+    portal.set_mcp_config(
+        args.mcp_enabled || args.mcp_port.is_some(),
+        args.mcp_token.clone(),
+    );
+
+    let boot_token = if !args.no_gui {
+        Some(portal.enable_gui_bootstrap())
+    } else {
+        None
+    };
+
     let bound_port = portal.port;
     let snap = session.snapshot();
     let pill = if snap.saved_toolbar_collapsed {
@@ -529,10 +551,14 @@ fn main() {
     } else {
         "expanded"
     };
-    let url = format!(
+    let public_url = format!(
         "http://{}/?theme={}&lang={}&pill={}",
         portal.bind_addr, snap.saved_theme, snap.saved_language, pill
     );
+    let mut url = public_url.clone();
+    if let Some(ref boot) = boot_token {
+        url.push_str(&format!("&bootstrap={}", boot));
+    }
     println!(
         "UltraDesk Controller core listening on http://127.0.0.1:{}",
         bound_port
@@ -575,7 +601,7 @@ fn main() {
             GuiLaunchOutcome::FallbackToBrowser(reason) => {
                 eprintln!(
                     "Native GUI unavailable ({}), falling back to default browser at {}",
-                    reason, url
+                    reason, public_url
                 );
                 browser_fallback_needed = true;
             }

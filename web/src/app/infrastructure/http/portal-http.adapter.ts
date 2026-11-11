@@ -59,8 +59,9 @@ export class PortalHttpAdapter {
     return this.postJson('/update/check', payload, 'Failed to check for updates');
   }
 
-  async confirmUpdate(): Promise<Record<string, unknown>> {
-    return this.postJson('/update/confirm', {}, 'Failed to confirm update');
+  async confirmUpdate(version?: string | null): Promise<Record<string, unknown>> {
+    const payload = version ? { version } : {};
+    return this.postJson('/update/confirm', payload, 'Failed to confirm update');
   }
 
   async dismissUpdate(version?: string | null): Promise<Record<string, unknown>> {
