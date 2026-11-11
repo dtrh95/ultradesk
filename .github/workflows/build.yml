@@ -41,7 +41,7 @@ jobs:
           apk add --no-cache build-base rust cargo rustfmt rust-clippy git openssl-dev libxcb-dev pkgconf python3 gtk+3.0-dev webkit2gtk-4.1-dev libsoup3-dev
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -59,8 +59,8 @@ jobs:
     name: Web UI lint and typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: '22'
           cache: 'npm'
