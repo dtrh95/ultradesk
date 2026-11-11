@@ -338,14 +338,35 @@ pub fn accept_viewer_offer_on_host_with_secret(
     Some((answer_str.into_bytes(), cipher))
 }
 
+pub(crate) fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum E2eChannelPolicy {
+    MandatoryLan,
+    OpportunisticInternet,
+}
+
+impl E2eChannelPolicy {
+    pub fn requires_e2e(self) -> bool {
+        if env_flag_enabled("ULTRADESK_REQUIRE_E2E") {
+            return true;
+        }
+        match self {
+            Self::MandatoryLan => !env_flag_enabled("ULTRADESK_ALLOW_PLAINTEXT_LAN"),
+            Self::OpportunisticInternet => false,
+        }
+    }
+}
+
 pub fn finalize_viewer_handshake(
     state: &E2eNegotiationState,
     field3: &[u8],
 ) -> Result<E2eNegotiationState, String> {
-    let require_e2e = std::env::var("ULTRADESK_REQUIRE_E2E")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    finalize_viewer_handshake_with_policy(state, field3, require_e2e)
+    finalize_viewer_handshake_with_policy(state, field3, env_flag_enabled("ULTRADESK_REQUIRE_E2E"))
 }
 
 pub fn finalize_viewer_handshake_with_policy(
@@ -360,7 +381,7 @@ pub fn finalize_viewer_handshake_with_policy(
                 public_key: viewer_pub,
                 nonce,
                 password_proof,
-                custom_password_proof,
+                custom_password_proof: _,
             },
     } = state
     else {
@@ -391,12 +412,9 @@ pub fn finalize_viewer_handshake_with_policy(
     let shared = x25519(secret_scalar, &host_pub)
         .ok_or_else(|| "rejected low-order X25519 public key".to_string())?;
 
-    let mut candidates = Vec::with_capacity(2);
+    let mut candidates = Vec::with_capacity(1);
     if !password_proof.is_empty() {
         candidates.push(password_proof.as_str());
-    }
-    if !custom_password_proof.is_empty() && custom_password_proof != password_proof {
-        candidates.push(custom_password_proof.as_str());
     }
     if candidates.is_empty() {
         candidates.push("");
@@ -884,14 +902,22 @@ mod tests {
         );
         assert_eq!(viewer_temp_established.cipher_name(), E2E_CIPHER_NAME);
 
-        let (answer_master, host_cipher_master) =
+        let (answer_master, _host_cipher_master) =
             accept_viewer_offer_on_host(&offer_wire, nonce, master_proof).unwrap();
-        let viewer_master_established =
-            finalize_viewer_handshake(&viewer_state, &answer_master).unwrap();
-        assert!(viewer_master_established.is_enabled());
+        assert!(finalize_viewer_handshake(&viewer_state, &answer_master).is_err());
+
+        let password = "temp_pass_for_test";
+        let derived = derive_e2e_temp_secret(nonce, password);
+        let (offer_pwd_wire, viewer_pwd_state) =
+            create_viewer_offer_for_password(nonce, password, master_proof);
+        let (answer_derived, host_cipher_derived) =
+            accept_viewer_offer_on_host(&offer_pwd_wire, nonce, &derived).unwrap();
+        let viewer_pwd_established =
+            finalize_viewer_handshake(&viewer_pwd_state, &answer_derived).unwrap();
+        assert!(viewer_pwd_established.is_enabled());
         assert_eq!(
-            viewer_master_established.fingerprint(),
-            host_cipher_master.fingerprint
+            viewer_pwd_established.fingerprint(),
+            host_cipher_derived.fingerprint
         );
 
         let (answer_mitm, _) =
