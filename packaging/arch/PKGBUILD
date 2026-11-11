@@ -22,10 +22,21 @@ makedepends=(
   'webkit2gtk-4.1'
   'libsoup3'
 )
+_source_sha256="${ULTRADESK_SOURCE_SHA256:-}"
+
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+if [ -n "${_source_sha256}" ]; then
+  sha256sums=("${_source_sha256}")
+else
+  sha256sums=('SKIP')
+fi
 
 prepare() {
+  if [ -z "${ULTRADESK_SOURCE_SHA256:-}" ] && [ "${ULTRADESK_ALLOW_UNVERIFIED_SOURCE:-0}" != "1" ]; then
+    echo "ERROR: ULTRADESK_SOURCE_SHA256 environment variable is required to verify source tarball integrity." >&2
+    echo "To allow unverified local builds, set ULTRADESK_ALLOW_UNVERIFIED_SOURCE=1." >&2
+    return 1
+  fi
   cd "${srcdir}/ultradesk-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"

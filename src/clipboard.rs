@@ -9,6 +9,13 @@ use std::process::{Command, Stdio};
 pub const PACKET_CLIPBOARD_SHORT: u8 = 5;
 pub const PACKET_CLIPBOARD_SYNC: u8 = 33;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardSyncMode {
+    Bidirectional,
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipboardMessage {
     pub client_id: i32,
@@ -24,15 +31,41 @@ pub struct ClipboardState {
     pub updates_received: u64,
 }
 
-impl Default for ClipboardState {
-    fn default() -> Self {
+impl ClipboardState {
+    pub fn new(sync_mode: ClipboardSyncMode) -> Self {
         Self {
             local_text: String::new(),
             remote_text: String::new(),
-            auto_sync_system: true,
+            auto_sync_system: matches!(sync_mode, ClipboardSyncMode::Bidirectional),
             updates_sent: 0,
             updates_received: 0,
         }
+    }
+
+    pub fn sync_mode(&self) -> ClipboardSyncMode {
+        if self.auto_sync_system {
+            ClipboardSyncMode::Bidirectional
+        } else {
+            ClipboardSyncMode::Off
+        }
+    }
+
+    pub fn set_sync_mode(&mut self, mode: ClipboardSyncMode) {
+        self.auto_sync_system = matches!(mode, ClipboardSyncMode::Bidirectional);
+    }
+
+    pub fn apply_remote_clipboard_update(&mut self, remote_text: &str, os_write_succeeded: bool) {
+        self.remote_text = remote_text.to_string();
+        self.updates_received += 1;
+        if !remote_text.is_empty() && os_write_succeeded {
+            self.local_text = remote_text.to_string();
+        }
+    }
+}
+
+impl Default for ClipboardState {
+    fn default() -> Self {
+        Self::new(ClipboardSyncMode::Bidirectional)
     }
 }
 
@@ -348,4 +381,58 @@ pub fn get_linux_system_clipboard() -> Option<String> {
         return Some(String::new());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clipboard_sync_mode_toggle() {
+        let mut state = ClipboardState::default();
+        assert_eq!(state.sync_mode(), ClipboardSyncMode::Bidirectional);
+        assert!(state.auto_sync_system);
+
+        state.set_sync_mode(ClipboardSyncMode::Off);
+        assert_eq!(state.sync_mode(), ClipboardSyncMode::Off);
+        assert!(!state.auto_sync_system);
+
+        state.set_sync_mode(ClipboardSyncMode::Bidirectional);
+        assert_eq!(state.sync_mode(), ClipboardSyncMode::Bidirectional);
+        assert!(state.auto_sync_system);
+    }
+
+    #[test]
+    fn test_clipboard_apply_remote_update_baseline_protection() {
+        let mut state = ClipboardState::default();
+        state.local_text = "local_baseline".to_string();
+
+        state.apply_remote_clipboard_update("", true);
+        assert_eq!(state.local_text, "local_baseline");
+        assert_eq!(state.remote_text, "");
+        assert_eq!(state.updates_received, 1);
+
+        state.apply_remote_clipboard_update("remote_attempt", false);
+        assert_eq!(state.local_text, "local_baseline");
+        assert_eq!(state.remote_text, "remote_attempt");
+        assert_eq!(state.updates_received, 2);
+
+        state.apply_remote_clipboard_update("remote_valid", true);
+        assert_eq!(state.local_text, "remote_valid");
+        assert_eq!(state.remote_text, "remote_valid");
+        assert_eq!(state.updates_received, 3);
+    }
+
+    #[test]
+    fn test_clipboard_sync_mode_serde() {
+        let json_bi = serde_json::to_string(&ClipboardSyncMode::Bidirectional).unwrap();
+        assert_eq!(json_bi, "\"bidirectional\"");
+        let de_bi: ClipboardSyncMode = serde_json::from_str(&json_bi).unwrap();
+        assert_eq!(de_bi, ClipboardSyncMode::Bidirectional);
+
+        let json_off = serde_json::to_string(&ClipboardSyncMode::Off).unwrap();
+        assert_eq!(json_off, "\"off\"");
+        let de_off: ClipboardSyncMode = serde_json::from_str(&json_off).unwrap();
+        assert_eq!(de_off, ClipboardSyncMode::Off);
+    }
 }

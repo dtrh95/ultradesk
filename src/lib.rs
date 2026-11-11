@@ -779,8 +779,12 @@ mod tests {
         let rx_entry = receiver.transfers.get(&file_id).unwrap();
         assert_eq!(rx_entry.direction, TransferDirection::Receive);
         assert_eq!(rx_entry.status, TransferStatus::Completed);
-        assert_eq!(rx_entry.buffer, payload_bytes);
+        assert!(rx_entry.buffer.is_empty());
         assert!(rx_entry.saved_path.is_some());
+        assert_eq!(
+            receiver.read_completed_download(&file_id).unwrap().1,
+            payload_bytes
+        );
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 

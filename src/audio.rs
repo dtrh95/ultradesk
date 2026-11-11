@@ -11,6 +11,10 @@ pub const PACKET_PC_G722: u8 = 43;
 pub const PACKET_MIC_SILENCE: u8 = 50;
 pub const PACKET_MIC_G722: u8 = 51;
 
+pub const MAX_G722_BODY_BYTES: usize = 64 * 1024;
+pub const MAX_AUDIO_PACKET_PCM_BYTES: usize = 256 * 1024;
+pub const MAX_AUDIO_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormReceiveResult {
     pub fields: Option<Vec<Vec<u8>>>,
@@ -414,8 +418,11 @@ pub fn decode_audio_packet(
             if body.len() < 4 {
                 return Err("Audio packet 42 requires a 4-byte silence length".to_string());
             }
-            let len = i32::from_le_bytes([body[0], body[1], body[2], body[3]]).max(0) as usize;
-            let capped = len.min(8 * 1024 * 1024);
+            let raw_len = i32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+            if raw_len < 0 || (raw_len as u64) > 16 * 1024 * 1024 {
+                return Err("Audio packet 42 has invalid silence length".to_string());
+            }
+            let capped = (raw_len as usize).min(MAX_AUDIO_PACKET_PCM_BYTES);
             Ok(Some(DecodedAudioPacket {
                 kind,
                 source: WaveSource::PcSound,
@@ -424,7 +431,13 @@ pub fn decode_audio_packet(
             }))
         }
         PACKET_PC_G722 => {
-            let pcm = pc_decoder.decode_to_bytes(body);
+            if body.len() > MAX_G722_BODY_BYTES {
+                return Err("Audio packet 43 G.722 body exceeds maximum size".to_string());
+            }
+            let mut pcm = pc_decoder.decode_to_bytes(body);
+            if pcm.len() > MAX_AUDIO_PACKET_PCM_BYTES {
+                pcm.truncate(MAX_AUDIO_PACKET_PCM_BYTES);
+            }
             Ok(Some(DecodedAudioPacket {
                 kind,
                 source: WaveSource::PcSound,
@@ -436,8 +449,11 @@ pub fn decode_audio_packet(
             if body.len() < 4 {
                 return Err("Audio packet 50 requires a 4-byte silence length".to_string());
             }
-            let len = i32::from_le_bytes([body[0], body[1], body[2], body[3]]).max(0) as usize;
-            let capped = len.min(8 * 1024 * 1024);
+            let raw_len = i32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+            if raw_len < 0 || (raw_len as u64) > 16 * 1024 * 1024 {
+                return Err("Audio packet 50 has invalid silence length".to_string());
+            }
+            let capped = (raw_len as usize).min(MAX_AUDIO_PACKET_PCM_BYTES);
             Ok(Some(DecodedAudioPacket {
                 kind,
                 source: WaveSource::Microphone,
@@ -446,7 +462,13 @@ pub fn decode_audio_packet(
             }))
         }
         PACKET_MIC_G722 => {
-            let pcm = mic_decoder.decode_to_bytes(body);
+            if body.len() > MAX_G722_BODY_BYTES {
+                return Err("Audio packet 51 G.722 body exceeds maximum size".to_string());
+            }
+            let mut pcm = mic_decoder.decode_to_bytes(body);
+            if pcm.len() > MAX_AUDIO_PACKET_PCM_BYTES {
+                pcm.truncate(MAX_AUDIO_PACKET_PCM_BYTES);
+            }
             Ok(Some(DecodedAudioPacket {
                 kind,
                 source: WaveSource::Microphone,
@@ -494,6 +516,7 @@ pub struct AudioBuffer {
     pub silence_chunks_received: u64,
     pub bytes_decoded: u64,
     pub max_chunks: usize,
+    pub total_queued_bytes: usize,
     chunks: VecDeque<(u64, Vec<u8>)>,
     pc_decoder: G722CodecState,
     mic_decoder: G722CodecState,
@@ -513,25 +536,55 @@ impl AudioBuffer {
             silence_chunks_received: 0,
             bytes_decoded: 0,
             max_chunks: max_chunks.max(8),
+            total_queued_bytes: 0,
             chunks: VecDeque::new(),
             pc_decoder: G722CodecState::new(),
             mic_decoder: G722CodecState::new(),
         }
     }
 
+    pub fn clear(&mut self) {
+        self.chunks.clear();
+        self.total_queued_bytes = 0;
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.clear();
+        }
+    }
+
+    pub fn queued_bytes(&self) -> usize {
+        self.total_queued_bytes
+    }
+
     pub fn ingest_packet(&mut self, payload: &[u8]) -> Result<Option<DecodedAudioPacket>, String> {
+        if !self.enabled {
+            self.clear();
+            return Ok(None);
+        }
         let decoded = decode_audio_packet(payload, &mut self.pc_decoder, &mut self.mic_decoder)?;
         if let Some(ref pkt) = decoded {
             self.chunks_received += 1;
             if pkt.is_silence {
                 self.silence_chunks_received += 1;
             }
-            self.bytes_decoded += pkt.pcm_s16le.len() as u64;
+            let pcm_len = pkt.pcm_s16le.len();
+            self.bytes_decoded += pcm_len as u64;
             let seq = self.chunks_received;
-            if self.chunks.len() >= self.max_chunks {
-                self.chunks.pop_front();
+            while !self.chunks.is_empty()
+                && (self.chunks.len() >= self.max_chunks
+                    || self.total_queued_bytes + pcm_len > MAX_AUDIO_BUFFER_BYTES)
+            {
+                if let Some((_, old_pcm)) = self.chunks.pop_front() {
+                    self.total_queued_bytes = self.total_queued_bytes.saturating_sub(old_pcm.len());
+                }
             }
-            self.chunks.push_back((seq, pkt.pcm_s16le.clone()));
+            if pcm_len <= MAX_AUDIO_BUFFER_BYTES {
+                self.total_queued_bytes += pcm_len;
+                self.chunks.push_back((seq, pkt.pcm_s16le.clone()));
+            }
         }
         Ok(decoded)
     }
@@ -554,5 +607,75 @@ impl AudioBuffer {
             AUDIO_BITS_PER_SAMPLE,
         );
         (max_seq, wav)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_muted_audio_buffer_ignores_and_clears() {
+        let mut buf = AudioBuffer::new(10);
+        let silence_pkt =
+            encode_audio_packet(WaveSource::PcSound, &100i32.to_le_bytes(), true).unwrap();
+        assert!(buf.ingest_packet(&silence_pkt).unwrap().is_some());
+        assert_eq!(buf.chunks.len(), 1);
+
+        buf.set_enabled(false);
+        assert_eq!(buf.chunks.len(), 0);
+        assert_eq!(buf.total_queued_bytes, 0);
+
+        let res = buf.ingest_packet(&silence_pkt).unwrap();
+        assert_eq!(res, None);
+        assert_eq!(buf.chunks.len(), 0);
+    }
+
+    #[test]
+    fn test_oversized_silence_packet_clamped_and_bogus_rejected() {
+        let mut pc_dec = G722CodecState::new();
+        let mut mic_dec = G722CodecState::new();
+
+        let huge_len = 10 * 1024 * 1024i32;
+        let huge_pkt =
+            encode_audio_packet(WaveSource::PcSound, &huge_len.to_le_bytes(), true).unwrap();
+        let decoded = decode_audio_packet(&huge_pkt, &mut pc_dec, &mut mic_dec)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.pcm_s16le.len(), MAX_AUDIO_PACKET_PCM_BYTES);
+
+        let bogus_len = -1i32;
+        let bogus_pkt =
+            encode_audio_packet(WaveSource::PcSound, &bogus_len.to_le_bytes(), true).unwrap();
+        assert!(decode_audio_packet(&bogus_pkt, &mut pc_dec, &mut mic_dec).is_err());
+
+        let gigantic_len = 50 * 1024 * 1024i32;
+        let gigantic_pkt =
+            encode_audio_packet(WaveSource::PcSound, &gigantic_len.to_le_bytes(), true).unwrap();
+        assert!(decode_audio_packet(&gigantic_pkt, &mut pc_dec, &mut mic_dec).is_err());
+    }
+
+    #[test]
+    fn test_oversized_g722_rejected() {
+        let mut pc_dec = G722CodecState::new();
+        let mut mic_dec = G722CodecState::new();
+
+        let oversized_body = vec![0u8; MAX_G722_BODY_BYTES + 1];
+        let pkt = encode_audio_packet(WaveSource::PcSound, &oversized_body, false).unwrap();
+        assert!(decode_audio_packet(&pkt, &mut pc_dec, &mut mic_dec).is_err());
+    }
+
+    #[test]
+    fn test_audio_buffer_bytes_cap_eviction() {
+        let mut buf = AudioBuffer::new(100);
+        let silence_len = (256 * 1024) as i32;
+        let pkt =
+            encode_audio_packet(WaveSource::PcSound, &silence_len.to_le_bytes(), true).unwrap();
+
+        for _ in 0..25 {
+            buf.ingest_packet(&pkt).unwrap();
+        }
+        assert!(buf.total_queued_bytes <= MAX_AUDIO_BUFFER_BYTES);
+        assert_eq!(buf.total_queued_bytes, 16 * 256 * 1024);
     }
 }

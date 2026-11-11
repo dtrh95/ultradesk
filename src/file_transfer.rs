@@ -18,6 +18,22 @@ pub const PACKET_FILE_REQUEST: u8 = 23;
 pub const DEFAULT_FILE_CHUNK_SIZE: usize = 16_384;
 pub const MAX_FILE_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_ACTIVE_TRANSFERS: usize = 64;
+pub const MAX_TERMINAL_TRANSFERS: usize = 64;
+pub const MAX_PENDING_REQUESTED_FILES: usize = 64;
+pub const MAX_CHAT_MESSAGE_BYTES: usize = 8 * 1024;
+pub const MAX_CHAT_HISTORY_MESSAGES: usize = 128;
+pub const MAX_CHAT_HISTORY_TOTAL_BYTES: usize = 256 * 1024;
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
 
 pub fn is_utf16_string_packet(payload: &[u8]) -> bool {
     if payload.len() < 6 || !payload.len().is_multiple_of(2) {
@@ -211,11 +227,12 @@ pub fn encode_file_request(remote_path: &str, modern: bool) -> Result<Vec<u8>, S
 }
 
 pub fn encode_chat_message(text: &str, modern: bool) -> Result<Vec<u8>, String> {
+    let bounded = truncate_utf8(text, MAX_CHAT_MESSAGE_BYTES);
     if modern {
-        let utf16 = encode_senddata_string(text, true);
+        let utf16 = encode_senddata_string(bounded, true);
         encode_byte_array_fields(&[&[PACKET_CHAT_MESSAGE, 0], &utf16])
     } else {
-        let cmd = format!("12|||{}", text);
+        let cmd = format!("12|||{}", bounded);
         Ok(encode_senddata_string(&cmd, true))
     }
 }
@@ -483,11 +500,16 @@ fn parse_legacy_file_command(text: &str) -> Option<FileTransferPacket> {
 
 pub fn sanitize_file_name(name: &str) -> String {
     let trimmed = name.trim().replace('\\', "/");
-    let base = trimmed.rsplit('/').next().unwrap_or("file.bin").trim();
-    if base.is_empty() || base == "." || base == ".." {
+    let raw_base = trimmed.rsplit('/').next().unwrap_or("file.bin").trim();
+    let sanitized: String = raw_base
+        .chars()
+        .filter(|&c| !c.is_control() && c != '"' && c != '\'' && c != '\\' && c != '/' && c != ';')
+        .collect();
+    let clean = sanitized.trim();
+    if clean.is_empty() || clean == "." || clean == ".." {
         "file.bin".to_string()
     } else {
-        base.to_string()
+        clean.to_string()
     }
 }
 
@@ -538,6 +560,7 @@ pub struct FileTransferManager {
     pub modern_protocol: bool,
     pub id_prefix: String,
     next_id: u64,
+    terminal_order: Vec<String>,
 }
 
 impl Default for FileTransferManager {
@@ -566,14 +589,188 @@ impl FileTransferManager {
             modern_protocol: true,
             id_prefix: id_prefix.to_string(),
             next_id: 1,
+            terminal_order: Vec::new(),
         }
+    }
+
+    pub fn push_chat_message(&mut self, text: String) {
+        let bounded = truncate_utf8(&text, MAX_CHAT_MESSAGE_BYTES).to_string();
+        self.chat_messages.push(bounded);
+        self.enforce_chat_limits();
+    }
+
+    fn enforce_chat_limits(&mut self) {
+        while self.chat_messages.len() > MAX_CHAT_HISTORY_MESSAGES {
+            self.chat_messages.remove(0);
+        }
+        let mut total_bytes: usize = self.chat_messages.iter().map(|m| m.len()).sum();
+        while total_bytes > MAX_CHAT_HISTORY_TOTAL_BYTES && !self.chat_messages.is_empty() {
+            let removed = self.chat_messages.remove(0);
+            total_bytes = total_bytes.saturating_sub(removed.len());
+        }
+    }
+
+    pub fn reset_for_new_session(&mut self) {
+        self.chat_messages.clear();
+        self.pending_requested_files.clear();
+        self.transfers.retain(|_, entry| {
+            !matches!(
+                entry.status,
+                TransferStatus::Offered | TransferStatus::Transferring
+            )
+        });
+        self.terminal_order
+            .retain(|id| self.transfers.contains_key(id));
     }
 
     pub fn record_requested_remote_path(&mut self, remote_path: &str) {
         let clean = sanitize_file_name(remote_path);
-        if !clean.is_empty() {
+        if !clean.is_empty() && clean != "file.bin" {
+            if self.pending_requested_files.len() >= MAX_PENDING_REQUESTED_FILES {
+                self.pending_requested_files.remove(0);
+            }
             self.pending_requested_files.push(clean);
         }
+    }
+
+    pub fn clear_pending_requests(&mut self) {
+        self.pending_requested_files.clear();
+    }
+
+    pub fn active_transfers_count(&self) -> usize {
+        self.transfers
+            .values()
+            .filter(|e| {
+                matches!(
+                    e.status,
+                    TransferStatus::Offered | TransferStatus::Transferring
+                )
+            })
+            .count()
+    }
+
+    pub fn terminal_transfers_count(&self) -> usize {
+        self.transfers
+            .values()
+            .filter(|e| {
+                matches!(
+                    e.status,
+                    TransferStatus::Completed
+                        | TransferStatus::Cancelled
+                        | TransferStatus::Failed
+                )
+            })
+            .count()
+    }
+
+    fn record_terminal(&mut self, file_id: &str) {
+        if !self.terminal_order.iter().any(|id| id == file_id) {
+            self.terminal_order.push(file_id.to_string());
+        }
+    }
+
+    fn evict_terminal_transfers_if_needed(&mut self) {
+        while self.terminal_transfers_count() >= MAX_TERMINAL_TRANSFERS {
+            let found_id = self.terminal_order.iter().find_map(|id| {
+                if let Some(e) = self.transfers.get(id) {
+                    if matches!(
+                        e.status,
+                        TransferStatus::Completed
+                            | TransferStatus::Cancelled
+                            | TransferStatus::Failed
+                    ) {
+                        return Some(id.clone());
+                    }
+                }
+                None
+            });
+            if let Some(old_id) = found_id {
+                self.terminal_order.retain(|id| id != &old_id);
+                self.transfers.remove(&old_id);
+            } else if let Some(old_id) = self.transfers.iter().find_map(|(k, e)| {
+                if matches!(
+                    e.status,
+                    TransferStatus::Completed
+                        | TransferStatus::Cancelled
+                        | TransferStatus::Failed
+                ) {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            }) {
+                self.terminal_order.retain(|id| id != &old_id);
+                self.transfers.remove(&old_id);
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn read_completed_download(&self, file_id: &str) -> Option<(String, Vec<u8>)> {
+        let entry = self.transfers.get(file_id)?;
+        if entry.direction != TransferDirection::Receive
+            || entry.status != TransferStatus::Completed
+        {
+            return None;
+        }
+        if !entry.buffer.is_empty() {
+            return Some((entry.file_name.clone(), entry.buffer.clone()));
+        }
+        let path_str = entry.saved_path.as_deref()?;
+        let path = Path::new(path_str);
+        let meta = fs::symlink_metadata(path).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_FILE_TRANSFER_BYTES {
+            return None;
+        }
+        let data = fs::read(path).ok()?;
+        Some((entry.file_name.clone(), data))
+    }
+
+    fn resolve_confined_request_path(&self, requested: &str) -> Result<PathBuf, String> {
+        let trimmed = requested.trim();
+        if trimmed.is_empty() || trimmed.contains('\0') {
+            return Err("Invalid requested file path".to_string());
+        }
+        let req_path = Path::new(trimmed);
+        for comp in req_path.components() {
+            if matches!(comp, std::path::Component::ParentDir) {
+                return Err("Path traversal is disallowed".to_string());
+            }
+        }
+        let _ = fs::create_dir_all(&self.download_dir);
+        let base_canonical = self
+            .download_dir
+            .canonicalize()
+            .map_err(|e| format!("Invalid download directory: {}", e))?;
+
+        let candidate = if req_path.is_absolute() {
+            req_path.to_path_buf()
+        } else {
+            self.download_dir.join(req_path)
+        };
+
+        let sym_meta = fs::symlink_metadata(&candidate)
+            .map_err(|e| format!("File not found or inaccessible: {}", e))?;
+        if sym_meta.file_type().is_symlink() || !sym_meta.is_file() {
+            return Err("Requested target is not a regular file".to_string());
+        }
+
+        let cand_canonical = candidate
+            .canonicalize()
+            .map_err(|e| format!("File not found or inaccessible: {}", e))?;
+
+        if !cand_canonical.starts_with(&base_canonical) {
+            return Err("Requested path escapes allowed directory".to_string());
+        }
+
+        let final_meta = fs::symlink_metadata(&cand_canonical)
+            .map_err(|e| format!("File inspection failed: {}", e))?;
+        if final_meta.file_type().is_symlink() || !final_meta.is_file() {
+            return Err("Requested target is not a regular file".to_string());
+        }
+
+        Ok(cand_canonical)
     }
 
     pub fn offer_file_bytes(
@@ -584,8 +781,17 @@ impl FileTransferManager {
         if (data.len() as u64) > MAX_FILE_TRANSFER_BYTES {
             return Err("File size exceeds maximum transfer limit".to_string());
         }
-        let file_id = format!("{}{}", self.id_prefix, self.next_id);
+        if self.active_transfers_count() >= MAX_ACTIVE_TRANSFERS {
+            return Err("Too many active file transfers".to_string());
+        }
+        self.evict_terminal_transfers_if_needed();
+
+        let mut file_id = format!("{}{}", self.id_prefix, self.next_id);
         self.next_id += 1;
+        while self.transfers.contains_key(&file_id) {
+            file_id = format!("{}{}", self.id_prefix, self.next_id);
+            self.next_id += 1;
+        }
         let clean_name = sanitize_file_name(file_name);
         let file_size = data.len() as u64;
         let packet = encode_file_offer(&file_id, &clean_name, file_size, self.modern_protocol)?;
@@ -640,7 +846,10 @@ impl FileTransferManager {
     pub fn cancel_transfer(&mut self, file_id: &str) -> Result<Vec<u8>, String> {
         if let Some(entry) = self.transfers.get_mut(file_id) {
             entry.status = TransferStatus::Cancelled;
+            entry.buffer.clear();
+            entry.buffer.shrink_to_fit();
         }
+        self.record_terminal(file_id);
         encode_file_cancel(file_id, self.modern_protocol)
     }
 
@@ -668,10 +877,14 @@ impl FileTransferManager {
             .remote_target_id
             .clone()
             .unwrap_or_else(|| file_id.to_string());
+        let mut completed = false;
         for _ in 0..max_chunks.max(1) {
             let offset = entry.transferred_bytes as usize;
             if offset >= entry.buffer.len() {
                 entry.status = TransferStatus::Completed;
+                entry.buffer.clear();
+                entry.buffer.shrink_to_fit();
+                completed = true;
                 break;
             }
             let end = (offset + chunk_sz).min(entry.buffer.len());
@@ -681,8 +894,14 @@ impl FileTransferManager {
             entry.transferred_bytes = end as u64;
             if entry.transferred_bytes >= entry.file_size {
                 entry.status = TransferStatus::Completed;
+                entry.buffer.clear();
+                entry.buffer.shrink_to_fit();
+                completed = true;
                 break;
             }
+        }
+        if completed {
+            self.record_terminal(file_id);
         }
         Ok(packets)
     }
@@ -733,21 +952,27 @@ impl FileTransferManager {
 
         match &pkt {
             FileTransferPacket::ChatMessage { text } => {
-                self.chat_messages.push(text.clone());
+                self.push_chat_message(text.clone());
             }
             FileTransferPacket::Offer {
                 file_id,
                 file_name,
                 file_size,
             } => {
+                if file_id.trim().is_empty() {
+                    return Err("File transfer ID cannot be empty".to_string());
+                }
+                if self.transfers.contains_key(file_id) {
+                    return Err(format!("File transfer ID collision: {}", file_id));
+                }
                 if *file_size > MAX_FILE_TRANSFER_BYTES {
                     return Err("Offered file size exceeds limit".to_string());
                 }
-                if self.transfers.len() >= MAX_ACTIVE_TRANSFERS
-                    && !self.transfers.contains_key(file_id)
-                {
+                if self.active_transfers_count() >= MAX_ACTIVE_TRANSFERS {
                     return Err("Too many active file transfers".to_string());
                 }
+                self.evict_terminal_transfers_if_needed();
+
                 let clean_name = sanitize_file_name(file_name);
                 let requested_match = self
                     .pending_requested_files
@@ -812,6 +1037,7 @@ impl FileTransferManager {
                 data,
             } => {
                 if let Some(key) = self.resolve_transfer_key(file_id) {
+                    let mut completed = false;
                     if let Some(entry) = self.transfers.get_mut(&key) {
                         if entry.direction != TransferDirection::Receive
                             || entry.status != TransferStatus::Transferring
@@ -842,8 +1068,14 @@ impl FileTransferManager {
                                 &entry.buffer,
                             ) {
                                 entry.saved_path = Some(saved.to_string_lossy().to_string());
+                                entry.buffer.clear();
+                                entry.buffer.shrink_to_fit();
                             }
+                            completed = true;
                         }
+                    }
+                    if completed {
+                        self.record_terminal(&key);
                     }
                 }
             }
@@ -851,18 +1083,214 @@ impl FileTransferManager {
                 if let Some(key) = self.resolve_transfer_key(file_id) {
                     if let Some(entry) = self.transfers.get_mut(&key) {
                         entry.status = TransferStatus::Cancelled;
+                        entry.buffer.clear();
+                        entry.buffer.shrink_to_fit();
                     }
+                    self.record_terminal(&key);
                 }
             }
             FileTransferPacket::Request { remote_path } => {
                 if !self.allow_remote_requests {
                     return Err("Remote file requests are disabled".to_string());
                 }
-                let (_, offer_pkt) = self.offer_file_from_path(Path::new(remote_path))?;
+                let confined = self.resolve_confined_request_path(remote_path)?;
+                let (_, offer_pkt) = self.offer_file_from_path(&confined)?;
                 replies.push(offer_pkt);
             }
         }
 
         Ok(Some((pkt, replies)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_file_name_hardened() {
+        assert_eq!(sanitize_file_name("hello\r\nworld.txt"), "helloworld.txt");
+        assert_eq!(sanitize_file_name("evil\0file.bin"), "evilfile.bin");
+        assert_eq!(sanitize_file_name("tab\tchar.txt"), "tabchar.txt");
+        assert_eq!(sanitize_file_name("quote\"test'.txt"), "quotetest.txt");
+        assert_eq!(sanitize_file_name("semicolon;inject.doc"), "semicoloninject.doc");
+        assert_eq!(sanitize_file_name(r"C:\Windows\System32\cmd.exe"), "cmd.exe");
+        assert_eq!(sanitize_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_file_name(".."), "file.bin");
+        assert_eq!(sanitize_file_name("."), "file.bin");
+        assert_eq!(sanitize_file_name(""), "file.bin");
+        assert_eq!(sanitize_file_name("\r\n\t;\"'"), "file.bin");
+        assert_eq!(sanitize_file_name("tài_liệu_hợp_đồng.pdf"), "tài_liệu_hợp_đồng.pdf");
+    }
+
+    #[test]
+    fn test_chat_message_bounded_and_history_eviction() {
+        let tmp_dir = std::env::temp_dir().join(format!("uv_ft_chat_{}", std::process::id()));
+        let mut mgr = FileTransferManager::new(tmp_dir.clone());
+
+        let big_msg = "A".repeat(MAX_CHAT_MESSAGE_BYTES + 500);
+        let encoded = encode_chat_message(&big_msg, false).unwrap();
+        let decoded = decode_file_transfer_packet(&encoded).unwrap();
+        if let FileTransferPacket::ChatMessage { text } = decoded {
+            assert_eq!(text.len(), MAX_CHAT_MESSAGE_BYTES);
+        } else {
+            panic!("Expected ChatMessage");
+        }
+
+        for i in 0..(MAX_CHAT_HISTORY_MESSAGES + 20) {
+            mgr.push_chat_message(format!("msg_{}", i));
+        }
+        assert_eq!(mgr.chat_messages.len(), MAX_CHAT_HISTORY_MESSAGES);
+        assert_eq!(mgr.chat_messages.first().unwrap(), "msg_20");
+        assert_eq!(
+            mgr.chat_messages.last().unwrap(),
+            &format!("msg_{}", MAX_CHAT_HISTORY_MESSAGES + 19)
+        );
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_reset_for_new_session() {
+        let tmp_dir = std::env::temp_dir().join(format!("uv_ft_reset_{}", std::process::id()));
+        let mut mgr = FileTransferManager::new(tmp_dir.clone());
+        mgr.push_chat_message("chat".to_string());
+        mgr.record_requested_remote_path("foo.txt");
+
+        let (fid, _) = mgr.offer_file_bytes("active.txt", b"active".to_vec()).unwrap();
+        assert_eq!(mgr.transfers.get(&fid).unwrap().status, TransferStatus::Offered);
+
+        let completed_fid = "comp1".to_string();
+        mgr.transfers.insert(
+            completed_fid.clone(),
+            FileTransferEntry {
+                file_id: completed_fid.clone(),
+                file_name: "comp.txt".to_string(),
+                file_size: 4,
+                transferred_bytes: 4,
+                direction: TransferDirection::Send,
+                status: TransferStatus::Completed,
+                saved_path: None,
+                remote_target_id: None,
+                buffer: Vec::new(),
+            },
+        );
+
+        mgr.reset_for_new_session();
+        assert!(mgr.chat_messages.is_empty());
+        assert!(mgr.pending_requested_files.is_empty());
+        assert!(!mgr.transfers.contains_key(&fid));
+        assert!(mgr.transfers.contains_key(&completed_fid));
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_offer_file_id_collision_rejected() {
+        let tmp_dir = std::env::temp_dir().join(format!("uv_ft_col_{}", std::process::id()));
+        let mut mgr = FileTransferManager::new(tmp_dir.clone());
+
+        let offer1 = encode_file_offer("collide_id", "test.bin", 100, true).unwrap();
+        assert!(mgr.handle_packet(&offer1).unwrap().is_some());
+
+        let offer2 = encode_file_offer("collide_id", "test2.bin", 200, true).unwrap();
+        let res = mgr.handle_packet(&offer2);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("collision"));
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_active_slots_accounting_and_terminal_eviction() {
+        let tmp_dir = std::env::temp_dir().join(format!("uv_ft_slots_{}", std::process::id()));
+        let mut mgr = FileTransferManager::new(tmp_dir.clone());
+
+        for i in 0..MAX_TERMINAL_TRANSFERS {
+            let fid = format!("term_{}", i);
+            mgr.transfers.insert(
+                fid.clone(),
+                FileTransferEntry {
+                    file_id: fid.clone(),
+                    file_name: format!("file_{}.bin", i),
+                    file_size: 10,
+                    transferred_bytes: 10,
+                    direction: TransferDirection::Receive,
+                    status: TransferStatus::Completed,
+                    saved_path: None,
+                    remote_target_id: None,
+                    buffer: Vec::new(),
+                },
+            );
+            mgr.record_terminal(&fid);
+        }
+        assert_eq!(mgr.terminal_transfers_count(), MAX_TERMINAL_TRANSFERS);
+        assert_eq!(mgr.active_transfers_count(), 0);
+
+        let offer = encode_file_offer("new_active", "new.bin", 10, true).unwrap();
+        assert!(mgr.handle_packet(&offer).unwrap().is_some());
+        assert_eq!(mgr.terminal_transfers_count(), MAX_TERMINAL_TRANSFERS - 1);
+        assert_eq!(mgr.active_transfers_count(), 1);
+        assert!(!mgr.transfers.contains_key("term_0"));
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_memory_release_and_disk_read_completed_download() {
+        let tmp_dir = std::env::temp_dir().join(format!("uv_ft_mem_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let mut mgr = FileTransferManager::new(tmp_dir.clone());
+        mgr.auto_accept = true;
+
+        let payload = b"critical test payload data";
+        let offer = encode_file_offer("mem_id", "payload.bin", payload.len() as u64, true).unwrap();
+        mgr.handle_packet(&offer).unwrap();
+
+        let chunk = encode_file_chunk("mem_id", 0, payload, true).unwrap();
+        mgr.handle_packet(&chunk).unwrap();
+
+        let entry = mgr.transfers.get("mem_id").unwrap();
+        assert_eq!(entry.status, TransferStatus::Completed);
+        assert!(entry.buffer.is_empty(), "RAM buffer must be released upon completion");
+        assert!(entry.saved_path.is_some());
+
+        let downloaded = mgr.read_completed_download("mem_id").unwrap();
+        assert_eq!(downloaded.0, "payload.bin");
+        assert_eq!(downloaded.1, payload);
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_file_request_directory_confinement() {
+        let tmp_dir = std::env::temp_dir().join(format!("uv_ft_req_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        let inside_file = tmp_dir.join("allowed.txt");
+        fs::write(&inside_file, b"allowed content").unwrap();
+
+        let mut mgr = FileTransferManager::new(tmp_dir.clone());
+        assert!(!mgr.allow_remote_requests);
+
+        let req_pkt = encode_file_request("allowed.txt", true).unwrap();
+        assert!(mgr.handle_packet(&req_pkt).is_err());
+
+        mgr.allow_remote_requests = true;
+
+        let (_, replies) = mgr.handle_packet(&req_pkt).unwrap().unwrap();
+        assert_eq!(replies.len(), 1);
+
+        let traversal_req = encode_file_request("../../etc/passwd", true).unwrap();
+        assert!(mgr.handle_packet(&traversal_req).is_err());
+
+        let abs_escape_req = encode_file_request("/etc/passwd", true).unwrap();
+        assert!(mgr.handle_packet(&abs_escape_req).is_err());
+
+        let nul_req = encode_file_request("allowed.txt\0something", true).unwrap();
+        assert!(mgr.handle_packet(&nul_req).is_err());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 }

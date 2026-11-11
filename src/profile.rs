@@ -41,11 +41,16 @@ pub struct ProfileManager {
 
 impl ProfileManager {
     pub fn from_xdg() -> Result<Self, String> {
-        let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        let base = match std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
             Some(x) => PathBuf::from(x),
             None => {
-                let home = std::env::var_os("HOME")
-                    .ok_or_else(|| "HOME environment variable is not set".to_string())?;
+                let home = std::env::var("HOME")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .ok_or_else(|| "HOME environment variable is not set or empty".to_string())?;
                 PathBuf::from(home).join(".config")
             }
         };
@@ -79,6 +84,9 @@ impl ProfileManager {
     }
 
     pub fn load_or_create_host(&self) -> Result<HostProfile, String> {
+        if self.config_dir.as_os_str().is_empty() {
+            return Err("Config directory is empty".to_string());
+        }
         make_private_dir(&self.config_dir)?;
         let path = self.config_dir.join(HOST_FILE);
         let stored = load_or_generate_stored(&path)?;
@@ -99,6 +107,9 @@ impl ProfileManager {
     }
 
     pub fn load_or_create_client(&self) -> Result<ClientProfile, String> {
+        if self.config_dir.as_os_str().is_empty() {
+            return Err("Config directory is empty".to_string());
+        }
         make_private_dir(&self.config_dir)?;
         let path = self.config_dir.join(CLIENT_FILE);
         let stored = load_or_generate_stored(&path)?;
@@ -116,6 +127,9 @@ impl ProfileManager {
     }
 
     pub fn set_master_password(&self, password: Option<&str>) -> Result<(), String> {
+        if self.config_dir.as_os_str().is_empty() {
+            return Err("Config directory is empty".to_string());
+        }
         make_private_dir(&self.config_dir)?;
         let file = self.config_dir.join(MASTER_PASSWORD_FILE);
         let Some(pw) = password else {
@@ -130,11 +144,38 @@ impl ProfileManager {
     }
 
     pub fn master_password_proof(&self) -> Result<Option<String>, String> {
+        if self.config_dir.as_os_str().is_empty() {
+            return Ok(None);
+        }
+        if verify_path_security(&self.config_dir).is_err() {
+            return Ok(None);
+        }
         let file = self.config_dir.join(MASTER_PASSWORD_FILE);
         if !file.exists() {
             return Ok(None);
         }
-        let text = fs::read_to_string(&file).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let meta = match fs::symlink_metadata(&file) {
+                Ok(m) => m,
+                Err(_) => return Ok(None),
+            };
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Ok(None);
+            }
+            let euid = unsafe { libc::geteuid() };
+            if meta.uid() != euid {
+                return Ok(None);
+            }
+            if (meta.mode() & 0o077) != 0 {
+                let _ = fs::set_permissions(&file, fs::Permissions::from_mode(0o600));
+            }
+        }
+        let text = match fs::read_to_string(&file) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
         let proof = text.trim();
         if proof.len() == 32 && proof.chars().all(|c| c.is_ascii_hexdigit()) {
             Ok(Some(proof.to_ascii_lowercase()))
@@ -438,8 +479,99 @@ pub fn default_computer_name() -> String {
     normalize_display_name(&env_name)
 }
 
+pub fn verify_path_security(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let euid = unsafe { libc::geteuid() };
+        let tmp_root = std::env::temp_dir();
+        let mut curr = PathBuf::new();
+        for comp in path.components() {
+            curr.push(comp);
+            if curr == Path::new("/")
+                || curr == Path::new("/tmp")
+                || curr == Path::new("/var/tmp")
+                || curr == tmp_root
+            {
+                continue;
+            }
+            let is_target = curr == path;
+            let under_tmp = curr.starts_with(&tmp_root)
+                || curr.starts_with("/tmp/")
+                || curr.starts_with("/var/tmp/");
+            if let Ok(meta) = fs::symlink_metadata(&curr) {
+                if is_target || under_tmp {
+                    if meta.file_type().is_symlink() || !meta.is_dir() {
+                        return Err(format!(
+                            "Refusing non-directory or symlink path: {}",
+                            curr.display()
+                        ));
+                    }
+                    if meta.uid() != euid {
+                        return Err(format!(
+                            "Refusing path {} owned by uid {} (expected {})",
+                            curr.display(),
+                            meta.uid(),
+                            euid
+                        ));
+                    }
+                } else {
+                    if meta.uid() != euid && meta.uid() != 0 {
+                        return Err(format!(
+                            "Refusing ancestor path {} owned by untrusted uid {}",
+                            curr.display(),
+                            meta.uid()
+                        ));
+                    }
+                    let mode = meta.mode();
+                    if (mode & 0o002) != 0 && (mode & 0o1000) == 0 {
+                        return Err(format!(
+                            "Refusing world-writable non-sticky ancestor path: {}",
+                            curr.display()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_or_generate_stored(path: &Path) -> Result<StoredProfile, String> {
+    if path.as_os_str().is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        verify_path_security(parent)?;
+    }
     if path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Err(format!(
+                    "Refusing non-file or symlink profile path {}",
+                    path.display()
+                ));
+            }
+            let euid = unsafe { libc::geteuid() };
+            if meta.uid() != euid {
+                return Err(format!(
+                    "Refusing profile path {} owned by uid {} (expected {})",
+                    path.display(),
+                    meta.uid(),
+                    euid
+                ));
+            }
+            if (meta.mode() & 0o077) != 0 {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         let meta = fs::metadata(path).map_err(|e| e.to_string())?;
         if meta.is_file() && meta.len() > 0 && meta.len() <= MAX_PROFILE_BYTES {
             if let Ok(content) = fs::read_to_string(path) {
@@ -462,32 +594,24 @@ fn load_or_generate_stored(path: &Path) -> Result<StoredProfile, String> {
 }
 
 pub fn make_private_dir(dir: &Path) -> Result<(), String> {
+    if dir.as_os_str().is_empty() {
+        return Err("Directory path cannot be empty".to_string());
+    }
+    verify_path_security(dir)?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    verify_path_security(dir)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let meta = fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            return Err(format!(
-                "Refusing non-directory or symlink config path {}",
-                dir.display()
-            ));
-        }
-        let euid = unsafe { libc::geteuid() };
-        if meta.uid() != euid {
-            return Err(format!(
-                "Refusing config directory {} owned by uid {} (expected {})",
-                dir.display(),
-                meta.uid(),
-                euid
-            ));
-        }
+        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 pub fn write_private_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
     if let Some(parent) = path.parent() {
         make_private_dir(parent)?;
     }
@@ -680,5 +804,55 @@ mod tests {
         assert_eq!(reloaded_host.master_password_proof, proof);
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_from_xdg_rejects_empty_home() {
+        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_home = std::env::var_os("HOME");
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", "");
+        let res = ProfileManager::from_xdg();
+        assert!(res.is_err());
+
+        std::env::set_var("HOME", "   ");
+        let res_ws = ProfileManager::from_xdg();
+        assert!(res_ws.is_err());
+
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn test_make_private_dir_rejects_empty_and_symlinks() {
+        assert!(make_private_dir(Path::new("")).is_err());
+
+        let base_tmp = std::env::temp_dir().join(format!("priv_dir_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base_tmp);
+        fs::create_dir_all(&base_tmp).unwrap();
+
+        let target_dir = base_tmp.join("real_dir");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        #[cfg(unix)]
+        {
+            let symlink_path = base_tmp.join("symlink_dir");
+            std::os::unix::fs::symlink(&target_dir, &symlink_path).unwrap();
+            let err = make_private_dir(&symlink_path);
+            assert!(err.is_err());
+
+            let mgr = ProfileManager::from_custom_dir(symlink_path);
+            assert!(mgr.load_or_create_host().is_err());
+            assert_eq!(mgr.master_password_proof().unwrap(), None);
+        }
+
+        let _ = fs::remove_dir_all(&base_tmp);
     }
 }
