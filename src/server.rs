@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::thread;
@@ -195,12 +195,32 @@ pub const MAX_HTTP_LINE_BYTES: usize = 8 * 1024;
 pub const MAX_HTTP_HEADERS: usize = 64;
 pub const MAX_HTTP_HEADER_BLOCK_BYTES: usize = 16 * 1024;
 
+pub const MAX_PORTAL_CLIENTS: usize = 32;
+
+struct ClientPermit(Arc<AtomicUsize>);
+
+impl Drop for ClientPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PortalHttpOptions {
+    pub bootstrap_token: Option<String>,
+    pub mcp_enabled: bool,
+    pub mcp_token: Option<String>,
+}
+
 pub struct PortalServer {
     pub bind_addr: String,
     pub port: u16,
     pub session: ControlSession,
     pub shutdown: Arc<AtomicBool>,
     pub viewer_token: String,
+    pub bootstrap_token: Option<String>,
+    pub mcp_enabled: bool,
+    pub mcp_token: Option<String>,
     viewer_path: Option<PathBuf>,
 }
 
@@ -226,38 +246,79 @@ impl PortalServer {
                 session,
                 shutdown: Arc::new(AtomicBool::new(false)),
                 viewer_token,
+                bootstrap_token: None,
+                mcp_enabled: false,
+                mcp_token: None,
                 viewer_path,
             },
             listener,
         ))
     }
 
+    pub fn enable_gui_bootstrap(&mut self) -> String {
+        let tok = crate::profile::generate_ephemeral_device_id().to_ascii_lowercase();
+        self.bootstrap_token = Some(tok.clone());
+        tok
+    }
+
+    pub fn set_mcp_config(&mut self, enabled: bool, token: Option<String>) {
+        self.mcp_enabled = enabled;
+        self.mcp_token = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    }
+
     pub fn spawn(self, listener: TcpListener) -> thread::JoinHandle<()> {
+        let active_clients = Arc::new(AtomicUsize::new(0));
         let _ = listener.set_nonblocking(true);
         thread::spawn(move || {
             while !self.shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => {
+                    Ok((mut stream, _)) => {
+                        if active_clients.load(Ordering::SeqCst) >= MAX_PORTAL_CLIENTS {
+                            let _ = write_http_response(
+                                &mut stream,
+                                503,
+                                "application/json; charset=utf-8",
+                                &[],
+                                b"{\"ok\":false,\"error\":\"Service Unavailable\"}",
+                                false,
+                            );
+                            continue;
+                        }
+                        active_clients.fetch_add(1, Ordering::SeqCst);
+                        let permit = ClientPermit(active_clients.clone());
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_nodelay(true);
                         let session = self.session.clone();
                         let viewer_path = self.viewer_path.clone();
                         let viewer_token = self.viewer_token.clone();
                         let bind_addr = self.bind_addr.clone();
+                        let opts = PortalHttpOptions {
+                            bootstrap_token: self.bootstrap_token.clone(),
+                            mcp_enabled: self.mcp_enabled,
+                            mcp_token: self.mcp_token.clone(),
+                        };
                         thread::spawn(move || {
-                            let _ = handle_http_client(
+                            let _permit = permit;
+                            let _ = handle_http_client_with_options(
                                 stream,
                                 session,
                                 viewer_path,
                                 &viewer_token,
                                 &bind_addr,
+                                &opts,
                             );
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1));
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        if self.shutdown.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
                 }
             }
         })
@@ -290,6 +351,7 @@ fn write_http_response(
         200 => "OK",
         202 => "Accepted",
         204 => "No Content",
+        302 => "Found",
         304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -299,11 +361,12 @@ fn write_http_response(
         415 => "Unsupported Media Type",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "OK",
     };
     let conn_val = if keep_alive { "keep-alive" } else { "close" };
     let mut header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: {}\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: frame-ancestors 'none'\r\nConnection: {}\r\n",
         status,
         reason,
         content_type,
@@ -339,14 +402,14 @@ fn write_json_response(
 }
 
 #[derive(Debug)]
-enum BoundedLineRead {
+pub(crate) enum BoundedLineRead {
     Line(String),
     Eof,
     TooLarge,
     IoError,
 }
 
-fn read_bounded_line<R: BufRead>(reader: &mut R, max_len: usize) -> BoundedLineRead {
+pub(crate) fn read_bounded_line<R: BufRead>(reader: &mut R, max_len: usize) -> BoundedLineRead {
     let mut buf = Vec::new();
     match reader
         .take((max_len + 1) as u64)
@@ -378,7 +441,7 @@ fn close_after_error_response<R: BufRead>(stream: &mut TcpStream, reader: &mut R
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-fn is_allowed_origin(origin: &str, bind_addr: &str) -> bool {
+pub(crate) fn is_allowed_origin(origin: &str, bind_addr: &str) -> bool {
     let trimmed = origin.trim();
     if trimmed.is_empty() {
         return true;
@@ -413,12 +476,72 @@ fn extract_cookie_token(cookie_header: &str) -> Option<&str> {
     None
 }
 
-pub(crate) fn handle_http_client(
+fn extract_host_from_address(addr: &str) -> &str {
+    let trimmed = addr.trim();
+    if trimmed.starts_with('[') {
+        if let Some(end) = trimmed.find(']') {
+            return &trimmed[..=end];
+        }
+    }
+    if trimmed == "::1" {
+        return "::1";
+    }
+    trimmed.split(':').next().unwrap_or(trimmed)
+}
+
+pub(crate) fn is_allowed_host_header(host_header: Option<&str>, bind_addr: &str) -> bool {
+    let Some(raw) = host_header else {
+        return false;
+    };
+    let host = extract_host_from_address(raw);
+    if host.is_empty() {
+        return false;
+    }
+    if host.eq_ignore_ascii_case("127.0.0.1")
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host == "[::1]"
+    {
+        return true;
+    }
+    let bind_host = extract_host_from_address(bind_addr);
+    if !bind_host.is_empty()
+        && bind_host != "0.0.0.0"
+        && bind_host != "::"
+        && bind_host != "[::]"
+        && (host.eq_ignore_ascii_case(bind_host)
+            || (host == "::1" && bind_host == "[::1]")
+            || (host == "[::1]" && bind_host == "::1"))
+    {
+        return true;
+    }
+    false
+}
+
+pub fn handle_http_client(
+    stream: TcpStream,
+    session: ControlSession,
+    viewer_path: Option<PathBuf>,
+    viewer_token: &str,
+    bind_addr: &str,
+) -> std::io::Result<()> {
+    handle_http_client_with_options(
+        stream,
+        session,
+        viewer_path,
+        viewer_token,
+        bind_addr,
+        &PortalHttpOptions::default(),
+    )
+}
+
+pub(crate) fn handle_http_client_with_options(
     mut stream: TcpStream,
     session: ControlSession,
     viewer_path: Option<PathBuf>,
     viewer_token: &str,
     bind_addr: &str,
+    opts: &PortalHttpOptions,
 ) -> std::io::Result<()> {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
@@ -470,6 +593,9 @@ pub(crate) fn handle_http_client(
         let mut sec_fetch_site: Option<String> = None;
         let mut x_viewer_token: Option<String> = None;
         let mut cookie_token: Option<String> = None;
+        let mut host_header: Option<String> = None;
+        let mut authorization_header: Option<String> = None;
+        let mut x_mcp_token: Option<String> = None;
         let mut header_read_err = false;
         let mut header_too_large = false;
         let mut header_count = 0usize;
@@ -515,6 +641,12 @@ pub(crate) fn handle_http_client(
                             if let Some(tok) = extract_cookie_token(val_trim) {
                                 cookie_token = Some(tok.to_string());
                             }
+                        } else if name_trim.eq_ignore_ascii_case("host") {
+                            host_header = Some(val_trim.to_string());
+                        } else if name_trim.eq_ignore_ascii_case("authorization") {
+                            authorization_header = Some(val_trim.to_string());
+                        } else if name_trim.eq_ignore_ascii_case("x-mcp-token") {
+                            x_mcp_token = Some(val_trim.to_string());
                         }
                     }
                 }
@@ -541,17 +673,14 @@ pub(crate) fn handle_http_client(
             _ => !is_http_10,
         };
 
-        if content_length > 32 * 1024 * 1024 {
+        if !is_allowed_host_header(host_header.as_deref(), bind_addr) {
             let _ = write_json_response(
                 &mut stream,
-                413,
-                &json!({ "ok": false, "error": "Payload too large" }),
+                403,
+                &json!({ "ok": false, "error": "Invalid or missing Host header" }),
                 false,
             );
-            break;
-        }
-        let mut body = vec![0u8; content_length];
-        if !body.is_empty() && reader.read_exact(&mut body).is_err() {
+            close_after_error_response(&mut stream, &mut reader);
             break;
         }
 
@@ -566,6 +695,7 @@ pub(crate) fn handle_http_client(
                     | "/ultraviewer-linux.png"
             )
         );
+
         if let Some(ref sfs) = sec_fetch_site {
             if !is_public_asset && sfs != "same-origin" && sfs != "none" {
                 let _ = write_json_response(
@@ -574,9 +704,11 @@ pub(crate) fn handle_http_client(
                     &json!({ "ok": false, "error": "Cross-site request blocked" }),
                     false,
                 );
+                close_after_error_response(&mut stream, &mut reader);
                 break;
             }
         }
+
         if let Some(ref orig) = origin_header {
             if !is_allowed_origin(orig, bind_addr) {
                 let _ = write_json_response(
@@ -585,26 +717,113 @@ pub(crate) fn handle_http_client(
                     &json!({ "ok": false, "error": "Origin not allowed" }),
                     false,
                 );
+                close_after_error_response(&mut stream, &mut reader);
                 break;
             }
         }
+
+        if matches!((method, path), ("GET", "/" | "/index.html" | "/viewer.html")) {
+            if let Some(ref expected_boot) = opts.bootstrap_token {
+                let already_authed = x_viewer_token
+                    .as_deref()
+                    .is_some_and(|t| crate::host::ct_eq(t, viewer_token))
+                    || cookie_token
+                        .as_deref()
+                        .is_some_and(|t| crate::host::ct_eq(t, viewer_token));
+                let boot_matches = query
+                    .get("bootstrap")
+                    .is_some_and(|b| crate::host::ct_eq(b, expected_boot));
+                if boot_matches {
+                    let mut remaining_pairs = Vec::new();
+                    for (k, v) in &query {
+                        if k != "bootstrap" {
+                            remaining_pairs.push(format!("{}={}", k, v));
+                        }
+                    }
+                    let loc = if remaining_pairs.is_empty() {
+                        "/".to_string()
+                    } else {
+                        format!("/?{}", remaining_pairs.join("&"))
+                    };
+                    let cookie_hdr = format!(
+                        "ultradesk_token={}; HttpOnly; SameSite=Strict; Path=/",
+                        viewer_token
+                    );
+                    let _ = write_http_response(
+                        &mut stream,
+                        302,
+                        "text/html; charset=utf-8",
+                        &[("Location", &loc), ("Set-Cookie", &cookie_hdr)],
+                        &[],
+                        keep_alive,
+                    );
+                    if !keep_alive {
+                        close_after_error_response(&mut stream, &mut reader);
+                        break;
+                    }
+                    continue;
+                } else if !already_authed {
+                    let _ = write_json_response(
+                        &mut stream,
+                        403,
+                        &json!({ "ok": false, "error": "Portal bootstrap required" }),
+                        false,
+                    );
+                    close_after_error_response(&mut stream, &mut reader);
+                    break;
+                }
+            }
+        }
+
+        if (path == "/mcp" || path == "/mcp/tools") && !opts.mcp_enabled {
+            let _ = write_json_response(
+                &mut stream,
+                404,
+                &json!({ "ok": false, "error": "MCP endpoint is disabled" }),
+                false,
+            );
+            close_after_error_response(&mut stream, &mut reader);
+            break;
+        }
+
         if !is_public_asset {
-            let token_ok = x_viewer_token
+            let mut auth_ok = x_viewer_token
                 .as_deref()
                 .is_some_and(|t| crate::host::ct_eq(t, viewer_token))
                 || cookie_token
                     .as_deref()
                     .is_some_and(|t| crate::host::ct_eq(t, viewer_token));
-            if !token_ok {
+            if !auth_ok && (path == "/mcp" || path == "/mcp/tools") && opts.mcp_enabled {
+                if let Some(ref mcp_tok) = opts.mcp_token {
+                    let bearer_match = authorization_header
+                        .as_deref()
+                        .and_then(|h| {
+                            h.strip_prefix("Bearer ")
+                                .or_else(|| h.strip_prefix("bearer "))
+                        })
+                        .map(str::trim)
+                        .is_some_and(|t| crate::host::ct_eq(t, mcp_tok));
+                    let x_mcp_match = x_mcp_token
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|t| crate::host::ct_eq(t, mcp_tok));
+                    if bearer_match || x_mcp_match {
+                        auth_ok = true;
+                    }
+                }
+            }
+            if !auth_ok {
                 let _ = write_json_response(
                     &mut stream,
                     401,
                     &json!({ "ok": false, "error": "Unauthorized viewer token" }),
                     false,
                 );
+                close_after_error_response(&mut stream, &mut reader);
                 break;
             }
         }
+
         if method == "POST" {
             let is_json = content_type
                 .as_deref()
@@ -614,13 +833,36 @@ pub(crate) fn handle_http_client(
                     &mut stream,
                     415,
                     &json!({ "ok": false, "error": "Content-Type must be application/json" }),
-                    keep_alive,
+                    false,
                 );
-                if !keep_alive {
-                    break;
-                }
-                continue;
+                close_after_error_response(&mut stream, &mut reader);
+                break;
             }
+        }
+
+        let max_body_bytes = match method {
+            "GET" => 0usize,
+            "POST" => match path {
+                "/files/send" => 32 * 1024 * 1024,
+                "/mcp" => 2 * 1024 * 1024,
+                _ => 64 * 1024,
+            },
+            _ => 0usize,
+        };
+        if content_length > max_body_bytes {
+            let _ = write_json_response(
+                &mut stream,
+                413,
+                &json!({ "ok": false, "error": "Payload too large" }),
+                false,
+            );
+            close_after_error_response(&mut stream, &mut reader);
+            break;
+        }
+
+        let mut body = vec![0u8; content_length];
+        if !body.is_empty() && reader.read_exact(&mut body).is_err() {
+            break;
         }
 
         let res = match (method, path) {
@@ -814,7 +1056,17 @@ pub(crate) fn handle_http_client(
             ("GET", "/files/download") => {
                 let file_id = query.get("file_id").cloned().unwrap_or_default();
                 if let Some((name, bytes)) = session.downloaded_file_bytes(&file_id) {
-                    let disp = format!("attachment; filename=\"{}\"", name.replace('"', ""));
+                    let sanitized = crate::file_transfer::sanitize_file_name(&name);
+                    let clean_name: String = sanitized
+                        .chars()
+                        .filter(|c| !c.is_control() && *c != '"' && *c != '\\' && *c != ';')
+                        .collect();
+                    let final_name = if clean_name.trim().is_empty() {
+                        "download.bin".to_string()
+                    } else {
+                        clean_name
+                    };
+                    let disp = format!("attachment; filename=\"{}\"", final_name);
                     write_http_response(
                         &mut stream,
                         200,
@@ -1331,8 +1583,28 @@ pub(crate) fn handle_http_client(
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body) {
                     if let Some(api_url) = val.get("api_url").and_then(serde_json::Value::as_str) {
                         let trimmed = api_url.trim();
-                        if crate::updater::is_loopback_update_url(trimmed) {
-                            session.set_update_api_url(trimmed.to_string());
+                        if !trimmed.is_empty() {
+                            let allow_override = (cfg!(test)
+                                || std::env::var("ULTRADESK_ALLOW_LOOPBACK_UPDATE_URL")
+                                    .ok()
+                                    .as_deref()
+                                    == Some("1"))
+                                && crate::updater::is_loopback_update_url(trimmed);
+                            if allow_override {
+                                session.set_update_api_url(trimmed.to_string());
+                            } else {
+                                let _ = write_json_response(
+                                    &mut stream,
+                                    403,
+                                    &json!({ "ok": false, "error": "Update API URL override is disabled" }),
+                                    keep_alive,
+                                );
+                                if !keep_alive {
+                                    close_after_error_response(&mut stream, &mut reader);
+                                    break;
+                                }
+                                continue;
+                            }
                         }
                     }
                 }
@@ -1351,20 +1623,42 @@ pub(crate) fn handle_http_client(
                     ),
                 }
             }
-            ("POST", "/update/confirm" | "/update/apply") => match session.confirm_update() {
-                Ok(msg) => write_json_response(
-                    &mut stream,
-                    200,
-                    &json!({ "ok": true, "message": msg, "update_status": session.update_snapshot() }),
-                    keep_alive,
-                ),
-                Err(e) => write_json_response(
-                    &mut stream,
-                    400,
-                    &json!({ "ok": false, "error": e, "update_status": session.update_snapshot() }),
-                    keep_alive,
-                ),
-            },
+            ("POST", "/update/confirm" | "/update/apply") => {
+                let ver = serde_json::from_slice::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("version")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    });
+                let Some(ver) = ver.filter(|v| !v.trim().is_empty()) else {
+                    let _ = write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": "Version is required for update confirmation" }),
+                        keep_alive,
+                    );
+                    if !keep_alive {
+                        close_after_error_response(&mut stream, &mut reader);
+                        break;
+                    }
+                    continue;
+                };
+                match session.confirm_update_for_version(Some(&ver)) {
+                    Ok(msg) => write_json_response(
+                        &mut stream,
+                        200,
+                        &json!({ "ok": true, "message": msg, "update_status": session.update_snapshot() }),
+                        keep_alive,
+                    ),
+                    Err(e) => write_json_response(
+                        &mut stream,
+                        400,
+                        &json!({ "ok": false, "error": e, "update_status": session.update_snapshot() }),
+                        keep_alive,
+                    ),
+                }
+            }
             ("POST", "/update/later" | "/update/dismiss") => {
                 let ver = if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body) {
                     val.get("version")
@@ -1424,4 +1718,81 @@ pub(crate) fn handle_http_client(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::ControlSession;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    #[test]
+    fn test_host_and_origin_gates() {
+        assert!(is_allowed_host_header(Some("127.0.0.1:8080"), "127.0.0.1:8080"));
+        assert!(is_allowed_host_header(Some("localhost:9000"), "127.0.0.1:9000"));
+        assert!(is_allowed_host_header(Some("[::1]:9333"), "127.0.0.1:9333"));
+        assert!(!is_allowed_host_header(Some("evil.com"), "127.0.0.1:8080"));
+        assert!(!is_allowed_host_header(Some("attacker.internal:8080"), "127.0.0.1:8080"));
+        assert!(!is_allowed_host_header(None, "127.0.0.1:8080"));
+
+        assert!(is_allowed_origin("http://127.0.0.1:8080", "127.0.0.1:8080"));
+        assert!(is_allowed_origin("http://localhost:3000", "127.0.0.1:8080"));
+        assert!(is_allowed_origin("http://[::1]:9000", "127.0.0.1:8080"));
+        assert!(!is_allowed_origin("http://evil.com", "127.0.0.1:8080"));
+        assert!(is_allowed_origin("", "127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn test_portal_bootstrap_and_mcp_gates() {
+        let session = ControlSession::new();
+        let (mut portal, listener) = PortalServer::bind("127.0.0.1", 0, session, None).unwrap();
+        let port = portal.port;
+        let boot = portal.enable_gui_bootstrap();
+        let shutdown = portal.shutdown.clone();
+        let handle = portal.spawn(listener);
+
+        let mut s1 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s1.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+        let mut r1 = String::new();
+        s1.read_to_string(&mut r1).unwrap();
+        assert!(r1.starts_with("HTTP/1.1 403 Forbidden"));
+
+        let mut s2 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req2 = format!("GET /?bootstrap={}&theme=dark HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", boot);
+        s2.write_all(req2.as_bytes()).unwrap();
+        let mut r2 = String::new();
+        s2.read_to_string(&mut r2).unwrap();
+        assert!(r2.starts_with("HTTP/1.1 302 Found"));
+        assert!(r2.contains("Location: /?theme=dark\r\n"));
+        assert!(r2.contains("Set-Cookie: ultradesk_token="));
+        assert!(r2.contains("SameSite=Strict"));
+
+        let mut s3 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s3.write_all(b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+        let mut r3 = String::new();
+        s3.read_to_string(&mut r3).unwrap();
+        assert!(r3.starts_with("HTTP/1.1 404 Not Found"));
+
+        let token = r2
+            .split("Set-Cookie: ultradesk_token=")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+
+        let mut s4 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req4 = format!(
+            "POST /api/test HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Viewer-Token: {}\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+            token
+        );
+        s4.write_all(req4.as_bytes()).unwrap();
+        let mut r4 = String::new();
+        s4.read_to_string(&mut r4).unwrap();
+        assert!(r4.starts_with("HTTP/1.1 415 Unsupported Media Type"));
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = handle.join();
+    }
 }

@@ -85,9 +85,6 @@ export class UltraDeskSessionFacade {
         if (hydrated.savedCreds.id) {
           this.store.partnerId.set(hydrated.savedCreds.id);
         }
-        if (hydrated.savedCreds.pass) {
-          this.store.partnerPass.set(hydrated.savedCreds.pass);
-        }
       }
     }
 
@@ -287,7 +284,10 @@ export class UltraDeskSessionFacade {
     this.store.rememberCreds.set(remember);
     const id = this.store.partnerId().trim();
     const pass = this.store.partnerPass().trim();
-    this.storage.saveCredentials(id, pass, remember);
+    this.storage.saveCredentials(id, remember);
+    if (!remember) {
+      this.store.savedRemotes.set([]);
+    }
     void this.http
       .postJson('/credentials', { id, pass, remember }, this.store.t('err_failed'))
       .catch(() => undefined);
@@ -301,7 +301,7 @@ export class UltraDeskSessionFacade {
       this.showNotice(this.store.t('err_missing_creds'), 'error');
       return;
     }
-    this.storage.saveCredentials(id, pass, remember);
+    this.storage.saveCredentials(id, remember);
     this.store.initiatingConnect.set(true);
     try {
       await this.http.postJson('/connect', { id, pass, remember }, this.store.t('err_failed'));
@@ -694,7 +694,8 @@ export class UltraDeskSessionFacade {
 
   async confirmUpdate(): Promise<void> {
     try {
-      const res = await this.http.confirmUpdate();
+      const targetVer = this.store.updateStatus()?.latest_version || null;
+      const res = await this.http.confirmUpdate(targetVer);
       await this.refreshStatus();
       if (typeof res['message'] === 'string' && res['message']) {
         this.showNotice(res['message'], 'info');
@@ -903,11 +904,7 @@ export class UltraDeskSessionFacade {
           }
         }
         if (this.store.partnerId() || this.store.partnerPass()) {
-          this.storage.saveCredentials(
-            this.store.partnerId(),
-            this.store.partnerPass(),
-            this.store.rememberCreds(),
-          );
+          this.storage.saveCredentials(this.store.partnerId(), this.store.rememberCreds());
         }
       }
 

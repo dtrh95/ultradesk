@@ -1,5 +1,8 @@
 use crate::input::InputEvent;
-use crate::server::{decode_base64, encode_base64};
+use crate::server::{
+    decode_base64, encode_base64, is_allowed_host_header, is_allowed_origin, read_bounded_line,
+    BoundedLineRead,
+};
 use crate::session::ControlSession;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -8,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::thread;
@@ -16,6 +19,49 @@ use std::time::Duration;
 
 pub const DEFAULT_MCP_PORT: u16 = 9333;
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+pub fn default_auto_target() -> &'static str {
+    "remote"
+}
+
+pub fn resolve_mcp_target(
+    raw: &str,
+    origin: McpTransportOrigin,
+    remote_connected: bool,
+) -> Result<bool, String> {
+    let trimmed = raw.trim();
+    match trimmed {
+        "remote" => {
+            if !remote_connected {
+                Err("Remote session is not connected".to_string())
+            } else {
+                Ok(false)
+            }
+        }
+        "host" => {
+            if origin == McpTransportOrigin::Network {
+                Err("Local host OS capture and input are disabled over network MCP; use stdio MCP".to_string())
+            } else {
+                Ok(true)
+            }
+        }
+        "auto" => {
+            if origin == McpTransportOrigin::Network {
+                if !remote_connected {
+                    Err("Remote session is not connected".to_string())
+                } else {
+                    Ok(false)
+                }
+            } else {
+                Ok(!remote_connected)
+            }
+        }
+        _ => Err(format!(
+            "Invalid target/source '{}': expected 'remote' or 'host'",
+            raw
+        )),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpTransportOrigin {
@@ -205,7 +251,7 @@ impl McpTool {
                         "type": "string",
                         "enum": ["auto", "remote", "host"],
                         "description": "Screen source: 'remote' for connected partner, 'host' for local desktop, or 'auto' (remote if connected, otherwise host).",
-                        "default": "auto"
+                        "default": "remote"
                     },
                     "format": {
                         "type": "string",
@@ -255,7 +301,7 @@ impl McpTool {
                     "target": {
                         "type": "string",
                         "enum": ["auto", "remote", "host"],
-                        "default": "auto"
+                        "default": "remote"
                     }
                 },
                 "required": ["x", "y"]
@@ -278,7 +324,7 @@ impl McpTool {
                     "target": {
                         "type": "string",
                         "enum": ["auto", "remote", "host"],
-                        "default": "auto"
+                        "default": "remote"
                     }
                 }
             }),
@@ -297,7 +343,7 @@ impl McpTool {
                     "target": {
                         "type": "string",
                         "enum": ["auto", "remote", "host"],
-                        "default": "auto"
+                        "default": "remote"
                     }
                 },
                 "required": ["start_x", "start_y", "end_x", "end_y"]
@@ -314,7 +360,7 @@ impl McpTool {
                     "target": {
                         "type": "string",
                         "enum": ["auto", "remote", "host"],
-                        "default": "auto"
+                        "default": "remote"
                     }
                 },
                 "required": ["delta"]
@@ -333,7 +379,7 @@ impl McpTool {
                     "target": {
                         "type": "string",
                         "enum": ["auto", "remote", "host"],
-                        "default": "auto"
+                        "default": "remote"
                     }
                 },
                 "required": ["text"]
@@ -361,7 +407,7 @@ impl McpTool {
                     "target": {
                         "type": "string",
                         "enum": ["auto", "remote", "host"],
-                        "default": "auto"
+                        "default": "remote"
                     }
                 }
             }),
@@ -475,6 +521,34 @@ impl McpTool {
             input_schema: self.input_schema(),
         }
     }
+}
+
+pub fn sanitized_mcp_snapshot(
+    session: &ControlSession,
+    origin: McpTransportOrigin,
+) -> Value {
+    let mut val = serde_json::to_value(session.snapshot()).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("saved_password".to_string(), json!(""));
+        if let Some(remotes) = obj.get_mut("saved_remotes").and_then(Value::as_array_mut) {
+            for item in remotes {
+                if let Some(r) = item.as_object_mut() {
+                    r.insert("password".to_string(), json!(""));
+                }
+            }
+        }
+        if origin == McpTransportOrigin::Network {
+            obj.insert("clipboard_local".to_string(), json!(""));
+            obj.insert("clipboard_remote".to_string(), json!(""));
+            if let Some(host) = obj.get_mut("host_status").and_then(Value::as_object_mut) {
+                host.insert("temp_password".to_string(), json!(""));
+            }
+        }
+    }
+    val
+}
+
+impl McpTool {
 
     pub fn execute(
         self,
@@ -482,10 +556,12 @@ impl McpTool {
         args: &Value,
         origin: McpTransportOrigin,
     ) -> Result<Vec<Value>, String> {
+        let snap = session.snapshot();
+        let remote_connected = snap.state == "connected" || snap.frames_received > 0;
         match self {
             Self::GetSessionStatus => {
-                let state = session.snapshot();
-                let text = serde_json::to_string_pretty(&state)
+                let val = sanitized_mcp_snapshot(session, origin);
+                let text = serde_json::to_string_pretty(&val)
                     .map_err(|e| format!("failed to serialize status: {}", e))?;
                 Ok(vec![json!({ "type": "text", "text": text })])
             }
@@ -504,6 +580,31 @@ impl McpTool {
                     .trim();
                 if partner_id.is_empty() || password.is_empty() {
                     return Err("partner_id and password are required".to_string());
+                }
+                if origin == McpTransportOrigin::Network {
+                    let lower = partner_id.to_ascii_lowercase();
+                    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+                    let is_loopback = compact == "127.0.0.1"
+                        || compact == "localhost"
+                        || compact == "::1"
+                        || compact == "[::1]"
+                        || compact == "0.0.0.0"
+                        || compact.starts_with("lan://127.")
+                        || compact.starts_with("lan://localhost")
+                        || compact.starts_with("lan://[::1]")
+                        || compact.starts_with("lan://0.0.0.0")
+                        || compact.starts_with("127.")
+                        || compact.starts_with("::ffff:127.");
+                    let host_id: String = session
+                        .host_status()
+                        .host_id
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect();
+                    let matches_self = !host_id.is_empty() && compact == host_id.to_ascii_lowercase();
+                    if is_loopback || matches_self {
+                        return Err("Loopback or self connection is disabled over network MCP".to_string());
+                    }
                 }
                 let remember = args
                     .get("remember")
@@ -534,20 +635,18 @@ impl McpTool {
                 })])
             }
             Self::TakeScreenshot => {
-                let source = args.get("source").and_then(Value::as_str).unwrap_or("auto");
+                let source = args
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or(default_auto_target());
                 let format = args.get("format").and_then(Value::as_str).unwrap_or("png");
                 let quality = args
                     .get("quality")
                     .and_then(Value::as_u64)
                     .unwrap_or(80)
                     .clamp(1, 100) as u8;
-                let snap = session.snapshot();
-                let use_remote = match source {
-                    "remote" => true,
-                    "host" => false,
-                    _ => snap.state == "connected" || snap.frames_received > 0,
-                };
-                let (mime, width, height, frame_ver, bytes, actual_source) = if use_remote {
+                let is_host = resolve_mcp_target(source, origin, remote_connected)?;
+                let (mime, width, height, frame_ver, bytes, actual_source) = if !is_host {
                     if format.eq_ignore_ascii_case("jpeg") || format.eq_ignore_ascii_case("jpg") {
                         let (ver, jpg) = session.jpeg_frame_versioned(quality)?;
                         ("image/jpeg", snap.width, snap.height, ver, jpg, "remote")
@@ -588,8 +687,25 @@ impl McpTool {
                 ])
             }
             Self::ListMonitors => {
-                let snap = session.snapshot();
+                if let Some(src) = args.get("source").or_else(|| args.get("target")).and_then(Value::as_str) {
+                    let _ = resolve_mcp_target(src, origin, remote_connected)?;
+                }
                 let host = session.host_status();
+                let host_part = if origin == McpTransportOrigin::Network {
+                    json!({
+                        "backend": host.backend_name,
+                        "monitors": Vec::<Value>::new(),
+                        "selected_monitor": Value::Null,
+                        "selected_monitors": Vec::<Value>::new()
+                    })
+                } else {
+                    json!({
+                        "backend": host.backend_name,
+                        "monitors": host.monitors,
+                        "selected_monitor": host.selected_monitor,
+                        "selected_monitors": host.selected_monitors
+                    })
+                };
                 let out = json!({
                     "remote": {
                         "width": snap.width,
@@ -600,12 +716,7 @@ impl McpTool {
                         "selected_monitor": snap.selected_monitor,
                         "selected_monitors": snap.selected_monitors
                     },
-                    "host": {
-                        "backend": host.backend_name,
-                        "monitors": host.monitors,
-                        "selected_monitor": host.selected_monitor,
-                        "selected_monitors": host.selected_monitors
-                    }
+                    "host": host_part
                 });
                 Ok(vec![json!({
                     "type": "text",
@@ -616,7 +727,7 @@ impl McpTool {
                 let target = args
                     .get("target")
                     .and_then(Value::as_str)
-                    .unwrap_or("remote");
+                    .unwrap_or(default_auto_target());
                 let index = args
                     .get("index")
                     .and_then(Value::as_u64)
@@ -628,7 +739,8 @@ impl McpTool {
                             .map(|v| v as usize)
                             .collect()
                     });
-                if target.eq_ignore_ascii_case("host") {
+                let is_host = resolve_mcp_target(target, origin, remote_connected)?;
+                if is_host {
                     let host = session.host_select_monitors(index, indices.as_deref());
                     Ok(vec![json!({
                         "type": "text",
@@ -662,14 +774,17 @@ impl McpTool {
                     .and_then(Value::as_i64)
                     .ok_or_else(|| "missing integer parameter 'y'".to_string())?
                     as i32;
-                let target = args.get("target").and_then(Value::as_str).unwrap_or("auto");
+                let target = args
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or(default_auto_target());
                 let evt = InputEvent {
                     event_type: "move".to_string(),
                     x,
                     y,
                     ..Default::default()
                 };
-                let routed = dispatch_input_to_target(session, target, evt)?;
+                let routed = dispatch_input_to_target(session, target, evt, origin, remote_connected)?;
                 Ok(vec![json!({
                     "type": "text",
                     "text": serde_json::to_string(&json!({
@@ -691,7 +806,10 @@ impl McpTool {
                     .get("action")
                     .and_then(Value::as_str)
                     .unwrap_or("click");
-                let target = args.get("target").and_then(Value::as_str).unwrap_or("auto");
+                let target = args
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or(default_auto_target());
                 if let (Some(x), Some(y)) = (
                     args.get("x").and_then(Value::as_i64),
                     args.get("y").and_then(Value::as_i64),
@@ -702,7 +820,7 @@ impl McpTool {
                         y: y as i32,
                         ..Default::default()
                     };
-                    dispatch_input_to_target(session, target, move_evt)?;
+                    dispatch_input_to_target(session, target, move_evt, origin, remote_connected)?;
                 }
                 let clicks = match action {
                     "double_click" => 2,
@@ -717,6 +835,8 @@ impl McpTool {
                                 down: true,
                                 ..Default::default()
                             },
+                            origin,
+                            remote_connected,
                         )?;
                         return Ok(vec![json!({
                             "type": "text",
@@ -738,6 +858,8 @@ impl McpTool {
                                 down: false,
                                 ..Default::default()
                             },
+                            origin,
+                            remote_connected,
                         )?;
                         return Ok(vec![json!({
                             "type": "text",
@@ -762,6 +884,8 @@ impl McpTool {
                             down: true,
                             ..Default::default()
                         },
+                        origin,
+                        remote_connected,
                     )?;
                     dispatch_input_to_target(
                         session,
@@ -772,6 +896,8 @@ impl McpTool {
                             down: false,
                             ..Default::default()
                         },
+                        origin,
+                        remote_connected,
                     )?;
                 }
                 Ok(vec![json!({
@@ -810,7 +936,10 @@ impl McpTool {
                     .and_then(Value::as_str)
                     .unwrap_or("left")
                     .to_string();
-                let target = args.get("target").and_then(Value::as_str).unwrap_or("auto");
+                let target = args
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or(default_auto_target());
                 dispatch_input_to_target(
                     session,
                     target,
@@ -820,6 +949,8 @@ impl McpTool {
                         y: start_y,
                         ..Default::default()
                     },
+                    origin,
+                    remote_connected,
                 )?;
                 dispatch_input_to_target(
                     session,
@@ -830,6 +961,8 @@ impl McpTool {
                         down: true,
                         ..Default::default()
                     },
+                    origin,
+                    remote_connected,
                 )?;
                 dispatch_input_to_target(
                     session,
@@ -840,6 +973,8 @@ impl McpTool {
                         y: end_y,
                         ..Default::default()
                     },
+                    origin,
+                    remote_connected,
                 )?;
                 let routed = dispatch_input_to_target(
                     session,
@@ -850,6 +985,8 @@ impl McpTool {
                         down: false,
                         ..Default::default()
                     },
+                    origin,
+                    remote_connected,
                 )?;
                 Ok(vec![json!({
                     "type": "text",
@@ -869,7 +1006,10 @@ impl McpTool {
                     .and_then(Value::as_i64)
                     .ok_or_else(|| "missing integer parameter 'delta'".to_string())?
                     as i32;
-                let target = args.get("target").and_then(Value::as_str).unwrap_or("auto");
+                let target = args
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or(default_auto_target());
                 if let (Some(x), Some(y)) = (
                     args.get("x").and_then(Value::as_i64),
                     args.get("y").and_then(Value::as_i64),
@@ -883,6 +1023,8 @@ impl McpTool {
                             y: y as i32,
                             ..Default::default()
                         },
+                        origin,
+                        remote_connected,
                     )?;
                 }
                 let routed = dispatch_input_to_target(
@@ -893,6 +1035,8 @@ impl McpTool {
                         delta,
                         ..Default::default()
                     },
+                    origin,
+                    remote_connected,
                 )?;
                 Ok(vec![json!({
                     "type": "text",
@@ -913,12 +1057,15 @@ impl McpTool {
                     .get("caps_lock")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                let target = args.get("target").and_then(Value::as_str).unwrap_or("auto");
-                let use_remote = resolve_target_is_remote(session, target);
-                let packets_sent = if use_remote {
-                    session.send_text(text, caps_lock)?
-                } else {
+                let target = args
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or(default_auto_target());
+                let is_host = resolve_mcp_target(target, origin, remote_connected)?;
+                let packets_sent = if is_host {
                     session.host_send_text(text, caps_lock)?
+                } else {
+                    session.send_text(text, caps_lock)?
                 };
                 Ok(vec![json!({
                     "type": "text",
@@ -926,7 +1073,7 @@ impl McpTool {
                         "ok": true,
                         "characters": text.chars().count(),
                         "packets_sent": packets_sent,
-                        "target": if use_remote { "remote" } else { "host" }
+                        "target": if is_host { "host" } else { "remote" }
                     })).unwrap_or_default()
                 })])
             }
@@ -946,7 +1093,10 @@ impl McpTool {
                 let alt = args.get("alt").and_then(Value::as_bool).unwrap_or(false);
                 let shift = args.get("shift").and_then(Value::as_bool).unwrap_or(false);
                 let meta = args.get("meta").and_then(Value::as_bool).unwrap_or(false);
-                let target = args.get("target").and_then(Value::as_str).unwrap_or("auto");
+                let target = args
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .unwrap_or(default_auto_target());
 
                 let mut modifiers = Vec::new();
                 if ctrl {
@@ -973,6 +1123,8 @@ impl McpTool {
                             system: m == 18 || alt,
                             ..Default::default()
                         },
+                        origin,
+                        remote_connected,
                     )?;
                 }
 
@@ -988,6 +1140,8 @@ impl McpTool {
                                 system: alt,
                                 ..Default::default()
                             },
+                            origin,
+                            remote_connected,
                         )?;
                         dispatch_input_to_target(
                             session,
@@ -999,6 +1153,8 @@ impl McpTool {
                                 system: alt,
                                 ..Default::default()
                             },
+                            origin,
+                            remote_connected,
                         )?
                     }
                     "down" => dispatch_input_to_target(
@@ -1011,6 +1167,8 @@ impl McpTool {
                             system: alt,
                             ..Default::default()
                         },
+                        origin,
+                        remote_connected,
                     )?,
                     "up" => dispatch_input_to_target(
                         session,
@@ -1022,6 +1180,8 @@ impl McpTool {
                             system: alt,
                             ..Default::default()
                         },
+                        origin,
+                        remote_connected,
                     )?,
                     other => return Err(format!("unsupported key action: {}", other)),
                 };
@@ -1037,6 +1197,8 @@ impl McpTool {
                             system: m == 18 || alt,
                             ..Default::default()
                         },
+                        origin,
+                        remote_connected,
                     )?;
                 }
 
@@ -1052,11 +1214,21 @@ impl McpTool {
             }
             Self::GetClipboard => {
                 let snap = session.snapshot();
+                let (local, remote) = if origin == McpTransportOrigin::Network {
+                    let rem = if snap.state == "connected" {
+                        snap.clipboard_remote
+                    } else {
+                        String::new()
+                    };
+                    (String::new(), rem)
+                } else {
+                    (snap.clipboard_local, snap.clipboard_remote)
+                };
                 Ok(vec![json!({
                     "type": "text",
                     "text": serde_json::to_string_pretty(&json!({
-                        "local_text": snap.clipboard_local,
-                        "remote_text": snap.clipboard_remote,
+                        "local_text": local,
+                        "remote_text": remote,
                         "updates_sent": snap.clipboard_updates_sent,
                         "updates_received": snap.clipboard_updates_received
                     })).unwrap_or_default()
@@ -1067,6 +1239,9 @@ impl McpTool {
                     .get("sync_from_system")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                if origin == McpTransportOrigin::Network && sync_from_system {
+                    return Err("Reading system clipboard is disabled over network MCP".to_string());
+                }
                 let text = if sync_from_system {
                     session.sync_from_system_clipboard()?
                 } else {
@@ -1223,6 +1398,9 @@ impl McpTool {
                     .get("action")
                     .and_then(Value::as_str)
                     .unwrap_or("status");
+                if origin == McpTransportOrigin::Network && action != "status" {
+                    return Err("Host mutation actions are disabled over network MCP".to_string());
+                }
                 let allow_control = args
                     .get("allow_control")
                     .and_then(Value::as_bool)
@@ -1240,7 +1418,13 @@ impl McpTool {
                         })])
                     }
                     "apply_update" | "confirm_update" => {
-                        let msg = session.confirm_update()?;
+                        let ver = args
+                            .get("version")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| "missing non-empty 'version' parameter".to_string())?;
+                        let msg = session.confirm_update_for_version(Some(ver))?;
                         Ok(vec![json!({
                             "type": "text",
                             "text": serde_json::to_string_pretty(&json!({
@@ -1270,7 +1454,7 @@ impl McpTool {
                     | "decline"
                     | "set_control"
                     | "set_master_password" => {
-                        let host = match action {
+                        let mut host = match action {
                             "status" => session.host_status(),
                             "start" => session.host_start(),
                             "stop" => session.host_stop(),
@@ -1283,6 +1467,9 @@ impl McpTool {
                             }
                             _ => unreachable!(),
                         };
+                        if origin == McpTransportOrigin::Network {
+                            host.temp_password = String::new();
+                        }
                         Ok(vec![json!({
                             "type": "text",
                             "text": serde_json::to_string_pretty(&host).unwrap_or_default()
@@ -1295,28 +1482,20 @@ impl McpTool {
     }
 }
 
-fn resolve_target_is_remote(session: &ControlSession, target: &str) -> bool {
-    match target {
-        "remote" => true,
-        "host" => false,
-        _ => {
-            let snap = session.snapshot();
-            snap.state == "connected" || snap.frames_received > 0
-        }
-    }
-}
-
 fn dispatch_input_to_target(
     session: &ControlSession,
     target: &str,
     event: InputEvent,
+    origin: McpTransportOrigin,
+    remote_connected: bool,
 ) -> Result<&'static str, String> {
-    if resolve_target_is_remote(session, target) {
-        session.send_input(event)?;
-        Ok("remote")
-    } else {
+    let is_host = resolve_mcp_target(target, origin, remote_connected)?;
+    if is_host {
         session.host_inject_input(event)?;
         Ok("host")
+    } else {
+        session.send_input(event)?;
+        Ok("remote")
     }
 }
 
@@ -1593,7 +1772,8 @@ fn handle_single_mcp_object(
             match uri {
                 "ultradesk://status" => {
                     let text =
-                        serde_json::to_string_pretty(&session.snapshot()).unwrap_or_default();
+                        serde_json::to_string_pretty(&sanitized_mcp_snapshot(session, origin))
+                            .unwrap_or_default();
                     Some(json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -1607,8 +1787,11 @@ fn handle_single_mcp_object(
                     }))
                 }
                 "ultradesk://host/status" => {
-                    let text =
-                        serde_json::to_string_pretty(&session.host_status()).unwrap_or_default();
+                    let mut host = session.host_status();
+                    if origin == McpTransportOrigin::Network {
+                        host.temp_password = String::new();
+                    }
+                    let text = serde_json::to_string_pretty(&host).unwrap_or_default();
                     Some(json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -1623,9 +1806,19 @@ fn handle_single_mcp_object(
                 }
                 "ultradesk://clipboard" => {
                     let snap = session.snapshot();
+                    let (local, remote) = if origin == McpTransportOrigin::Network {
+                        let rem = if snap.state == "connected" {
+                            snap.clipboard_remote
+                        } else {
+                            String::new()
+                        };
+                        (String::new(), rem)
+                    } else {
+                        (snap.clipboard_local, snap.clipboard_remote)
+                    };
                     let text = serde_json::to_string_pretty(&json!({
-                        "local_text": snap.clipboard_local,
-                        "remote_text": snap.clipboard_remote,
+                        "local_text": local,
+                        "remote_text": remote,
                         "updates_sent": snap.clipboard_updates_sent,
                         "updates_received": snap.clipboard_updates_received
                     }))
@@ -1645,10 +1838,16 @@ fn handle_single_mcp_object(
                 "ultradesk://screen/current.png" => {
                     let png = match session.png_frame_versioned() {
                         Ok((_, bytes)) => bytes,
-                        Err(_) => session
-                            .host_capture_image("png", 80)
-                            .map(|(_, _, b)| b)
-                            .unwrap_or_default(),
+                        Err(_) => {
+                            if origin == McpTransportOrigin::Network {
+                                Vec::new()
+                            } else {
+                                session
+                                    .host_capture_image("png", 80)
+                                    .map(|(_, _, b)| b)
+                                    .unwrap_or_default()
+                            }
+                        }
                     };
                     Some(json!({
                         "jsonrpc": "2.0",
@@ -1690,17 +1889,39 @@ fn handle_single_mcp_object(
     }
 }
 
+fn read_bounded_stdio_line<R: BufRead>(
+    reader: &mut R,
+    max_len: usize,
+) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    match reader.take((max_len + 1) as u64).read_until(b'\n', &mut buf) {
+        Ok(0) => Ok(None),
+        Ok(_) => {
+            if buf.len() > max_len && !buf.ends_with(b"\n") {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Line exceeds maximum length",
+                ))
+            } else {
+                Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub fn run_stdio_mcp_loop<R: BufRead, W: Write>(
     session: &ControlSession,
     mut reader: R,
     mut writer: W,
 ) -> std::io::Result<()> {
+    const MAX_STDIO_LINE_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_STDIO_BODY_BYTES: usize = 4 * 1024 * 1024;
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            break;
-        }
+        let line = match read_bounded_stdio_line(&mut reader, MAX_STDIO_LINE_BYTES)? {
+            Some(l) => l,
+            None => break,
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -1711,13 +1932,15 @@ pub fn run_stdio_mcp_loop<R: BufRead, W: Write>(
         {
             let content_len = len_str.trim().parse::<usize>().unwrap_or(0);
             loop {
-                let mut hdr_line = String::new();
-                let hn = reader.read_line(&mut hdr_line)?;
-                if hn == 0 || hdr_line == "\r\n" || hdr_line == "\n" {
+                let hdr_line = match read_bounded_stdio_line(&mut reader, 8192)? {
+                    Some(l) => l,
+                    None => break,
+                };
+                if hdr_line == "\r\n" || hdr_line == "\n" {
                     break;
                 }
             }
-            if content_len == 0 || content_len > 32 * 1024 * 1024 {
+            if content_len == 0 || content_len > MAX_STDIO_BODY_BYTES {
                 continue;
             }
             let mut payload = vec![0u8; content_len];
@@ -1816,13 +2039,14 @@ pub fn websocket_accept_key(client_key: &str) -> String {
     encode_base64(&sha1_digest(input.as_bytes()))
 }
 
-fn read_ws_frame<R: Read>(reader: &mut R) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+fn read_ws_frame<R: Read>(reader: &mut R) -> std::io::Result<Option<(bool, u8, Vec<u8>)>> {
     let mut header = [0u8; 2];
     match reader.read_exact(&mut header) {
         Ok(()) => {}
         Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
+    let fin = (header[0] & 0x80) != 0;
     let opcode = header[0] & 0x0F;
     let masked = (header[1] & 0x80) != 0;
     let mut payload_len = (header[1] & 0x7F) as usize;
@@ -1834,13 +2058,19 @@ fn read_ws_frame<R: Read>(reader: &mut R) -> std::io::Result<Option<(u8, Vec<u8>
         let mut ext = [0u8; 8];
         reader.read_exact(&mut ext)?;
         let len64 = u64::from_be_bytes(ext);
-        if len64 > 32 * 1024 * 1024 {
+        if len64 > 2 * 1024 * 1024 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "WebSocket frame exceeds 32 MiB limit",
+                "WebSocket frame exceeds 2 MiB limit",
             ));
         }
         payload_len = len64 as usize;
+    }
+    if payload_len > 2 * 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WebSocket frame exceeds 2 MiB limit",
+        ));
     }
     let mut mask_key = [0u8; 4];
     if masked {
@@ -1855,7 +2085,7 @@ fn read_ws_frame<R: Read>(reader: &mut R) -> std::io::Result<Option<(u8, Vec<u8>
             *byte ^= mask_key[i & 3];
         }
     }
-    Ok(Some((opcode, payload)))
+    Ok(Some((fin, opcode, payload)))
 }
 
 fn write_ws_frame<W: Write>(writer: &mut W, opcode: u8, payload: &[u8]) -> std::io::Result<()> {
@@ -1875,21 +2105,135 @@ fn write_ws_frame<W: Write>(writer: &mut W, opcode: u8, payload: &[u8]) -> std::
     writer.flush()
 }
 
+fn run_ws_mcp_loop<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &ControlSession,
+) -> std::io::Result<()> {
+    const MAX_WS_ACCUMULATED_BYTES: usize = 2 * 1024 * 1024;
+    let mut message_buf = Vec::new();
+    let mut current_opcode = 0u8;
+
+    while let Some((fin, opcode, payload)) = read_ws_frame(reader)? {
+        match opcode {
+            0x0 => {
+                if current_opcode == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Unexpected continuation frame",
+                    ));
+                }
+                if message_buf.len() + payload.len() > MAX_WS_ACCUMULATED_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "WebSocket message exceeds 2 MiB limit",
+                    ));
+                }
+                message_buf.extend_from_slice(&payload);
+                if fin {
+                    if let Some(resp) =
+                        handle_mcp_raw_json(session, &message_buf, McpTransportOrigin::Network)
+                    {
+                        let out = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec());
+                        write_ws_frame(writer, 0x1, &out)?;
+                    }
+                    message_buf.clear();
+                    current_opcode = 0;
+                }
+            }
+            0x1 | 0x2 => {
+                if !fin {
+                    current_opcode = opcode;
+                    message_buf.clear();
+                    if payload.len() > MAX_WS_ACCUMULATED_BYTES {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "WebSocket message exceeds 2 MiB limit",
+                        ));
+                    }
+                    message_buf.extend_from_slice(&payload);
+                } else if let Some(resp) =
+                    handle_mcp_raw_json(session, &payload, McpTransportOrigin::Network)
+                {
+                    let out = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec());
+                    write_ws_frame(writer, 0x1, &out)?;
+                }
+            }
+            0x8 => {
+                let _ = write_ws_frame(writer, 0x8, &[]);
+                break;
+            }
+            0x9 => {
+                write_ws_frame(writer, 0xA, &payload)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+const MAX_MCP_CLIENTS: usize = 32;
+const MAX_MCP_LINE_BYTES: usize = 8192;
+const MAX_MCP_HEADERS: usize = 64;
+const MAX_MCP_HEADER_BLOCK_BYTES: usize = 16384;
+
+struct McpClientPermit(Arc<AtomicUsize>);
+
+impl McpClientPermit {
+    fn try_acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
+        let mut cur = active.load(Ordering::SeqCst);
+        loop {
+            if cur >= MAX_MCP_CLIENTS {
+                return None;
+            }
+            match active.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Some(Self(Arc::clone(active))),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+}
+
+impl Drop for McpClientPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct McpServer {
     pub bind_addr: String,
     pub port: u16,
     pub session: ControlSession,
     pub shutdown: Arc<AtomicBool>,
-    pub auth_token: Option<String>,
+    pub auth_token: String,
 }
 
 impl McpServer {
+    pub fn auth_token(&self) -> &str {
+        &self.auth_token
+    }
+
     pub fn bind(
         host: &str,
         port: u16,
         session: ControlSession,
         auth_token: Option<String>,
     ) -> Result<(Self, TcpListener), String> {
+        let token = match auth_token {
+            Some(tok) => {
+                let trimmed = tok.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err("MCP auth token cannot be empty".to_string());
+                }
+                trimmed
+            }
+            None => crate::profile::generate_ephemeral_device_id().to_ascii_lowercase(),
+        };
         let listener = TcpListener::bind(format!("{}:{}", host, port))
             .map_err(|e| format!("Failed to bind MCP server on {}:{}: {}", host, port, e))?;
         let local_addr = listener
@@ -1903,7 +2247,7 @@ impl McpServer {
                 port: bound_port,
                 session,
                 shutdown: Arc::new(AtomicBool::new(false)),
-                auth_token: auth_token.filter(|t| !t.trim().is_empty()),
+                auth_token: token,
             },
             listener,
         ))
@@ -1911,37 +2255,53 @@ impl McpServer {
 
     pub fn spawn(self, listener: TcpListener) -> thread::JoinHandle<()> {
         let _ = listener.set_nonblocking(true);
+        let active_clients = Arc::new(AtomicUsize::new(0));
         thread::spawn(move || {
             while !self.shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        let permit = match McpClientPermit::try_acquire(&active_clients) {
+                            Some(p) => p,
+                            None => {
+                                let mut s = stream;
+                                let resp = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                                let _ = s.write_all(resp.as_bytes());
+                                let _ = s.flush();
+                                continue;
+                            }
+                        };
                         let _ = stream.set_nonblocking(false);
                         let _ = stream.set_nodelay(true);
                         let session = self.session.clone();
                         let token = self.auth_token.clone();
+                        let bind_addr = self.bind_addr.clone();
                         thread::spawn(move || {
-                            let _ = handle_mcp_tcp_client(stream, session, token.as_deref());
+                            let _permit = permit;
+                            let _ = handle_mcp_tcp_client(stream, session, &token, &bind_addr);
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        if self.shutdown.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
                 }
             }
         })
     }
 }
 
-fn check_mcp_token(headers: &BTreeMap<String, String>, expected: Option<&str>) -> bool {
-    let Some(expected_tok) = expected.filter(|s| !s.is_empty()) else {
-        return true;
-    };
-    if let Some(hdr) = headers
-        .get("x-mcp-token")
-        .or_else(|| headers.get("x-viewer-token"))
-    {
-        if crate::host::ct_eq(hdr.trim(), expected_tok) {
+fn check_mcp_token(headers: &BTreeMap<String, String>, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    if let Some(hdr) = headers.get("x-mcp-token") {
+        if crate::host::ct_eq(hdr.trim(), expected) {
             return true;
         }
     }
@@ -1951,7 +2311,7 @@ fn check_mcp_token(headers: &BTreeMap<String, String>, expected: Option<&str>) -
             .strip_prefix("Bearer ")
             .or_else(|| auth.trim().strip_prefix("bearer "))
             .unwrap_or(auth.trim());
-        if crate::host::ct_eq(bearer.trim(), expected_tok) {
+        if crate::host::ct_eq(bearer.trim(), expected) {
             return true;
         }
     }
@@ -1961,33 +2321,79 @@ fn check_mcp_token(headers: &BTreeMap<String, String>, expected: Option<&str>) -
 fn handle_mcp_tcp_client(
     mut stream: TcpStream,
     session: ControlSession,
-    auth_token: Option<&str>,
+    auth_token: &str,
+    bind_addr: &str,
 ) -> std::io::Result<()> {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
     let mut reader = BufReader::new(stream.try_clone()?);
 
-    let mut first_line = String::new();
-    if reader.read_line(&mut first_line)? == 0 {
-        return Ok(());
-    }
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    let request_line = match read_bounded_line(&mut reader, MAX_MCP_LINE_BYTES) {
+        BoundedLineRead::Line(l) => l,
+        _ => return Ok(()),
+    };
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
         return Ok(());
     }
     let method = parts[0];
 
     let mut headers = BTreeMap::new();
+    let mut header_count = 0usize;
+    let mut total_header_bytes = request_line.len();
+    let mut header_error = false;
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 || line == "\r\n" || line == "\n" {
-            break;
+        match read_bounded_line(&mut reader, MAX_MCP_LINE_BYTES) {
+            BoundedLineRead::Line(line) => {
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                header_count += 1;
+                total_header_bytes = total_header_bytes.saturating_add(line.len());
+                if header_count > MAX_MCP_HEADERS || total_header_bytes > MAX_MCP_HEADER_BLOCK_BYTES {
+                    header_error = true;
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':') {
+                    headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+                }
+            }
+            _ => {
+                header_error = true;
+                break;
+            }
         }
-        if let Some((k, v)) = line.split_once(':') {
-            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+    }
+
+    if header_error {
+        let resp = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        let _ = stream.write_all(resp.as_bytes());
+        return stream.flush();
+    }
+
+    let host_header = headers.get("host").map(|s| s.as_str());
+    if !is_allowed_host_header(host_header, bind_addr) {
+        let resp = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        let _ = stream.write_all(resp.as_bytes());
+        return stream.flush();
+    }
+
+    if let Some(sfs) = headers.get("sec-fetch-site") {
+        let sfs_lower = sfs.to_ascii_lowercase();
+        if sfs_lower != "same-origin" && sfs_lower != "none" {
+            let resp = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes());
+            return stream.flush();
+        }
+    }
+
+    if let Some(orig) = headers.get("origin") {
+        if !is_allowed_origin(orig, bind_addr) {
+            let resp = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes());
+            return stream.flush();
         }
     }
 
@@ -1997,8 +2403,8 @@ fn handle_mcp_tcp_client(
             "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
-        stream.write_all(resp.as_bytes())?;
-        stream.write_all(body)?;
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.write_all(body);
         return stream.flush();
     }
 
@@ -2016,40 +2422,47 @@ fn handle_mcp_tcp_client(
         );
         stream.write_all(handshake.as_bytes())?;
         stream.flush()?;
-        let _ = stream.set_read_timeout(None);
-        while let Some((opcode, payload)) = read_ws_frame(&mut reader)? {
-            match opcode {
-                0x1 | 0x2 => {
-                    if let Some(resp) =
-                        handle_mcp_raw_json(&session, &payload, McpTransportOrigin::Network)
-                    {
-                        let out = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec());
-                        write_ws_frame(&mut stream, 0x1, &out)?;
-                    }
-                }
-                0x8 => {
-                    let _ = write_ws_frame(&mut stream, 0x8, &[]);
-                    break;
-                }
-                0x9 => {
-                    write_ws_frame(&mut stream, 0xA, &payload)?;
-                }
-                _ => {}
-            }
-        }
-        return Ok(());
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+        return run_ws_mcp_loop(&mut reader, &mut stream, &session);
     }
 
-    let content_len = headers
-        .get("content-length")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
-    if content_len > 32 * 1024 * 1024 {
-        return Ok(());
-    }
-    let mut body = vec![0u8; content_len];
-    if content_len > 0 {
-        reader.read_exact(&mut body)?;
+    if method == "POST" {
+        let ct = headers.get("content-type").map(|s| s.as_str()).unwrap_or("");
+        if !ct.starts_with("application/json") {
+            let resp = "HTTP/1.1 415 Unsupported Media Type\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes());
+            return stream.flush();
+        }
+        let content_len = headers
+            .get("content-length")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        if content_len > 2 * 1024 * 1024 {
+            let resp = "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes());
+            return stream.flush();
+        }
+        let mut body = vec![0u8; content_len];
+        if content_len > 0 {
+            reader.read_exact(&mut body)?;
+        }
+        match handle_mcp_raw_json(&session, &body, McpTransportOrigin::Network) {
+            Some(resp) => {
+                let out = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec());
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    out.len()
+                );
+                stream.write_all(hdr.as_bytes())?;
+                stream.write_all(&out)?;
+                return stream.flush();
+            }
+            None => {
+                let hdr = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                stream.write_all(hdr.as_bytes())?;
+                return stream.flush();
+            }
+        }
     }
 
     if method == "GET" {
@@ -2070,25 +2483,121 @@ fn handle_mcp_tcp_client(
         return stream.flush();
     }
 
-    if method == "POST" {
-        match handle_mcp_raw_json(&session, &body, McpTransportOrigin::Network) {
-            Some(resp) => {
-                let out = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec());
-                let hdr = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    out.len()
-                );
-                stream.write_all(hdr.as_bytes())?;
-                stream.write_all(&out)?;
-                return stream.flush();
-            }
-            None => {
-                let hdr = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                stream.write_all(hdr.as_bytes())?;
-                return stream.flush();
-            }
-        }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::ControlSession;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    #[test]
+    fn test_resolve_mcp_target_semantics() {
+        assert!(resolve_mcp_target("remote", McpTransportOrigin::Stdio, false).is_err());
+        assert_eq!(
+            resolve_mcp_target("remote", McpTransportOrigin::Stdio, true).unwrap(),
+            false
+        );
+        assert_eq!(
+            resolve_mcp_target("remote", McpTransportOrigin::Network, true).unwrap(),
+            false
+        );
+        assert!(resolve_mcp_target("remote", McpTransportOrigin::Network, false).is_err());
+
+        assert!(resolve_mcp_target("host", McpTransportOrigin::Network, true).is_err());
+        assert!(resolve_mcp_target("host", McpTransportOrigin::Network, false).is_err());
+        assert_eq!(
+            resolve_mcp_target("host", McpTransportOrigin::Stdio, false).unwrap(),
+            true
+        );
+
+        assert!(resolve_mcp_target("auto", McpTransportOrigin::Network, false).is_err());
+        assert_eq!(
+            resolve_mcp_target("auto", McpTransportOrigin::Network, true).unwrap(),
+            false
+        );
+        assert_eq!(
+            resolve_mcp_target("auto", McpTransportOrigin::Stdio, false).unwrap(),
+            true
+        );
+        assert_eq!(
+            resolve_mcp_target("auto", McpTransportOrigin::Stdio, true).unwrap(),
+            false
+        );
+
+        assert!(resolve_mcp_target("invalid", McpTransportOrigin::Stdio, true).is_err());
     }
 
-    Ok(())
+    #[test]
+    fn test_mcp_security_redaction_and_network_restrictions() {
+        let session = ControlSession::new();
+        let _ = session.host_start();
+
+        let stdio_snap = sanitized_mcp_snapshot(&session, McpTransportOrigin::Stdio);
+        assert_eq!(stdio_snap["saved_password"], "");
+
+        let net_snap = sanitized_mcp_snapshot(&session, McpTransportOrigin::Network);
+        assert_eq!(net_snap["saved_password"], "");
+        assert_eq!(net_snap["clipboard_local"], "");
+        assert_eq!(net_snap["clipboard_remote"], "");
+        assert_eq!(net_snap["host_status"]["temp_password"], "");
+
+        let net_status = McpTool::ManageHost.execute(
+            &session,
+            &json!({ "action": "status" }),
+            McpTransportOrigin::Network,
+        ).unwrap();
+        let status_parsed: Value = serde_json::from_str(&net_status[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(status_parsed["temp_password"], "");
+
+        let net_start = McpTool::ManageHost.execute(
+            &session,
+            &json!({ "action": "start" }),
+            McpTransportOrigin::Network,
+        );
+        assert!(net_start.is_err());
+
+        let net_loopback = McpTool::ConnectRemote.execute(
+            &session,
+            &json!({ "partner_id": "127.0.0.1", "password": "dummy" }),
+            McpTransportOrigin::Network,
+        );
+        assert!(net_loopback.is_err());
+    }
+
+    #[test]
+    fn test_mcp_server_auth_and_host_validation() {
+        let session = ControlSession::new();
+        assert!(McpServer::bind("127.0.0.1", 0, session.clone(), Some("   ".to_string())).is_err());
+
+        let (server, listener) =
+            McpServer::bind("127.0.0.1", 0, session, Some("valid-token".to_string())).unwrap();
+        assert_eq!(server.auth_token(), "valid-token");
+        let port = server.port;
+        let shutdown = server.shutdown.clone();
+        let handle = server.spawn(listener);
+
+        let mut s1 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s1.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+        let mut r1 = String::new();
+        s1.read_to_string(&mut r1).unwrap();
+        assert!(r1.starts_with("HTTP/1.1 401 Unauthorized"));
+
+        let mut s2 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s2.write_all(b"GET / HTTP/1.1\r\nHost: evil.com\r\nAuthorization: Bearer valid-token\r\nConnection: close\r\n\r\n").unwrap();
+        let mut r2 = String::new();
+        s2.read_to_string(&mut r2).unwrap();
+        assert!(r2.starts_with("HTTP/1.1 403 Forbidden"));
+
+        let mut s3 = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s3.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer valid-token\r\nConnection: close\r\n\r\n").unwrap();
+        let mut r3 = String::new();
+        s3.read_to_string(&mut r3).unwrap();
+        assert!(r3.starts_with("HTTP/1.1 200 OK"));
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = handle.join();
+    }
 }
