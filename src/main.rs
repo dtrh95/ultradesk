@@ -232,7 +232,6 @@ fn find_asset_file(file_name: &str) -> Option<PathBuf> {
         })
         .unwrap_or_default();
     let candidates = [
-        PathBuf::from("/usr/share/ultradesk-rust").join(file_name),
         exe_share_asset,
         exe_bundle_asset,
         exe_dir_asset,

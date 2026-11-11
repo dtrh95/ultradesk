@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Prepare debian directory
         env:
@@ -65,7 +65,7 @@ jobs:
           sed -i "1s|([^)]*)|(${VER}-1~${MATRIX_CODENAME}1)|" debian/changelog
 
       - name: Build Debian DEB package
-        uses: jtdor/build-deb-action@v1
+        uses: jtdor/build-deb-action@473136f14a42a231124c1f7cefaedfe941203c38
         with:
           docker-image: ${{ matrix.distro }}
           buildpackage-opts: --build=binary --no-sign
@@ -119,14 +119,14 @@ jobs:
           fi
 
       - name: Upload Debian DEB artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: debian-deb-${{ matrix.codename }}
           path: debian/artifacts/*.deb
           retention-days: 3
 
       - name: Upload Debian APT repo artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: debian-apt-repo-${{ matrix.codename }}
           path: repo/
@@ -139,16 +139,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Download Debian DEB artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: debian-deb-*
           path: debs/
 
       - name: Download Debian APT repo slices
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: debian-apt-repo-*
           path: apt-slices/
@@ -178,14 +178,14 @@ jobs:
 
       - name: Attach Debian DEBs to GitHub Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3
         with:
           files: debs/**/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload merged Debian APT repository artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: merged-debian-apt-repo
           path: apt-repo/
