@@ -362,8 +362,9 @@ impl RegistrationTransport {
         let _ = raw.set_write_timeout(Some(self.timeout));
 
         self.channel = if use_tls {
-            let connector = build_tls_connector(self.original_certificate_policy)?;
-            let tls_domain = if allow_insecure_tls(self.original_certificate_policy) {
+            let insecure = allow_insecure_broker_tls();
+            let connector = build_tls_connector(insecure)?;
+            let tls_domain = if insecure {
                 TLS_TARGET_HOST
             } else {
                 host
@@ -555,8 +556,9 @@ impl SessionTransport {
         let _ = raw.set_write_timeout(Some(self.inner.timeout));
 
         self.inner.channel = if use_ssl {
-            let connector = build_tls_connector(self.inner.original_certificate_policy)?;
-            let tls_domain = if allow_insecure_tls(self.inner.original_certificate_policy) {
+            let insecure = allow_insecure_relay_tls(self.inner.original_certificate_policy);
+            let connector = build_tls_connector(insecure)?;
+            let tls_domain = if insecure {
                 TLS_TARGET_HOST
             } else if !http_hostname.is_empty() {
                 http_hostname
@@ -662,7 +664,19 @@ fn resolve_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("no address resolved for {}", target))
 }
 
-fn allow_insecure_tls(original_certificate_policy: bool) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsVerifyPolicy {
+    BrokerStrict,
+    RelayCompatible,
+}
+
+pub fn allow_insecure_broker_tls() -> bool {
+    std::env::var("ULTRADESK_INSECURE_BROKER_TLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+pub fn allow_insecure_relay_tls(original_certificate_policy: bool) -> bool {
     if std::env::var("ULTRADESK_STRICT_TLS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -672,9 +686,9 @@ fn allow_insecure_tls(original_certificate_policy: bool) -> bool {
     original_certificate_policy
 }
 
-fn build_tls_connector(original_certificate_policy: bool) -> Result<TlsConnector, String> {
+fn build_tls_connector(insecure: bool) -> Result<TlsConnector, String> {
     let mut builder = TlsConnector::builder();
-    if allow_insecure_tls(original_certificate_policy) {
+    if insecure {
         builder.danger_accept_invalid_certs(true);
         builder.danger_accept_invalid_hostnames(true);
     }
@@ -683,8 +697,28 @@ fn build_tls_connector(original_certificate_policy: bool) -> Result<TlsConnector
         .map_err(|e| format!("TLS connector build failed: {}", e))
 }
 
+fn truncate_chat_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        s
+    } else {
+        let mut idx = max_bytes;
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        &s[..idx]
+    }
+}
+
 fn find_crlf_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+pub fn e2e_channel_policy_for_target(partner_id: &str) -> crate::e2e::E2eChannelPolicy {
+    if partner_id.trim().starts_with("lan://") {
+        crate::e2e::E2eChannelPolicy::MandatoryLan
+    } else {
+        crate::e2e::E2eChannelPolicy::OpportunisticInternet
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -742,11 +776,22 @@ impl Default for SavedCredentials {
     }
 }
 
+fn valid_absolute_env_path(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key).and_then(|v| {
+        let trimmed = v.to_string_lossy().trim().to_string();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let p = PathBuf::from(trimmed);
+        p.is_absolute().then_some(p)
+    })
+}
+
 pub fn credentials_file_path() -> PathBuf {
-    let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        Some(x) => PathBuf::from(x),
-        None => match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-            Some(h) => PathBuf::from(h).join(".config"),
+    let base = match valid_absolute_env_path("XDG_CONFIG_HOME") {
+        Some(x) => x,
+        None => match valid_absolute_env_path("HOME") {
+            Some(h) => h.join(".config"),
             None => return crate::profile::fallback_private_config_dir().join("credentials.json"),
         },
     };
@@ -760,9 +805,8 @@ pub fn credentials_file_path() -> PathBuf {
     new_path
 }
 
-pub fn load_saved_credentials() -> SavedCredentials {
-    let path = credentials_file_path();
-    if let Ok(bytes) = fs::read(&path) {
+pub fn load_saved_credentials_from(path: &std::path::Path) -> SavedCredentials {
+    if let Ok(bytes) = fs::read(path) {
         if let Ok(mut creds) = serde_json::from_slice::<SavedCredentials>(&bytes) {
             if creds.theme.trim().is_empty() {
                 creds.theme = default_theme_mode();
@@ -791,12 +835,19 @@ pub fn load_saved_credentials() -> SavedCredentials {
     SavedCredentials::default()
 }
 
-pub fn save_credentials(creds: &SavedCredentials) -> Result<(), String> {
-    let path = credentials_file_path();
+pub fn load_saved_credentials() -> SavedCredentials {
+    load_saved_credentials_from(&credentials_file_path())
+}
+
+pub fn save_credentials_to(path: &std::path::Path, creds: &SavedCredentials) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(creds)
         .map_err(|e| format!("Failed to serialize credentials: {}", e))?;
-    crate::profile::write_private_bytes(&path, &json)
+    crate::profile::write_private_bytes(path, &json)
         .map_err(|e| format!("Failed to write credentials: {}", e))
+}
+
+pub fn save_credentials(creds: &SavedCredentials) -> Result<(), String> {
+    save_credentials_to(&credentials_file_path(), creds)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -963,7 +1014,9 @@ pub struct ControlSessionInner {
     pub outbound_queue: Vec<(Vec<u8>, bool, Option<InputEvent>)>,
     pub last_local_move_at: Option<Instant>,
     pub e2e: crate::e2e::E2eNegotiationState,
+    pub e2e_policy: crate::e2e::E2eChannelPolicy,
     pub update_engine: Arc<crate::updater::UpdateEngine>,
+    pub credentials_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -1058,9 +1111,9 @@ impl ControlSession {
             screen.layout.clone(),
             DesktopBackend::auto_detect(),
         );
-        host_session.set_auto_approve(true);
         let update_engine = Arc::new(crate::updater::UpdateEngine::new());
-        let saved_creds = load_saved_credentials();
+        let credentials_path = credentials_file_path();
+        let saved_creds = load_saved_credentials_from(&credentials_path);
         if let Some(ref dismissed) = saved_creds.dismissed_update_version {
             update_engine.set_dismissed_version(Some(dismissed.clone()));
         }
@@ -1086,7 +1139,9 @@ impl ControlSession {
             outbound_queue: Vec::new(),
             last_local_move_at: None,
             e2e: crate::e2e::E2eNegotiationState::Disabled,
+            e2e_policy: crate::e2e::E2eChannelPolicy::OpportunisticInternet,
             update_engine,
+            credentials_path,
         };
         Self::sync_state_fields(&mut inner);
         Self {
@@ -1356,13 +1411,16 @@ impl ControlSession {
 
     pub fn downloaded_file_bytes(&self, file_id: &str) -> Option<(String, Vec<u8>)> {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(res) = guard.files.read_completed_download(file_id) {
+            return Some(res);
+        }
         if let Some(entry) = guard.files.transfers.get(file_id) {
             if entry.direction == crate::file_transfer::TransferDirection::Send
-                && entry.saved_path.is_some()
+                && entry.saved_path.is_none()
+                && !entry.buffer.is_empty()
             {
-                return None;
+                return Some((entry.file_name.clone(), entry.buffer.clone()));
             }
-            return Some((entry.file_name.clone(), entry.buffer.clone()));
         }
         guard.host_session.downloaded_file_bytes(file_id)
     }
@@ -1425,12 +1483,19 @@ impl ControlSession {
             inner.state.cursor_png_base64 = cached_b64;
         }
         let (host_chats, host_clip) = inner.host_session.drain_auxiliary_events();
-        if !host_chats.is_empty() {
-            inner.files.chat_messages.extend(host_chats);
+        for msg in host_chats {
+            let bounded = truncate_chat_utf8(&msg, crate::file_transfer::MAX_CHAT_MESSAGE_BYTES);
+            inner.files.chat_messages.push(bounded.to_string());
+        }
+        if inner.files.chat_messages.len() > crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES {
+            let overflow = inner.files.chat_messages.len() - crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES;
+            inner.files.chat_messages.drain(0..overflow);
         }
         if let Some(clip_text) = host_clip {
             inner.clipboard.remote_text = clip_text.clone();
-            inner.clipboard.local_text = clip_text;
+            if !clip_text.is_empty() {
+                inner.clipboard.local_text = clip_text;
+            }
             inner.clipboard.updates_received += 1;
         }
         let hs = inner.host_session.status();
@@ -1503,7 +1568,7 @@ impl ControlSession {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         let decrypted_buf: Vec<u8>;
-        let payload: &[u8] = if payload == [1, 0, 0, 0, 22] {
+        let payload: &[u8] = if payload == [1, 0, 0, 0, 22] && !guard.e2e.is_enabled() {
             guard.e2e = crate::e2e::E2eNegotiationState::Disabled;
             payload
         } else if let Some(cipher) = guard.e2e.cipher_mut() {
@@ -1564,7 +1629,11 @@ impl ControlSession {
                     if let Ok((w, h)) = desktop_size_from_login(&fields) {
                         if matches!(guard.e2e, crate::e2e::E2eNegotiationState::Offered { .. }) {
                             let field3 = fields.get(3).map(Vec::as_slice).unwrap_or(&[]);
-                            match crate::e2e::finalize_viewer_handshake(&guard.e2e, field3) {
+                            match crate::e2e::finalize_viewer_handshake_with_policy(
+                                &guard.e2e,
+                                field3,
+                                guard.e2e_policy.requires_e2e(),
+                            ) {
                                 Ok(next_state) => {
                                     guard.e2e = next_state;
                                 }
@@ -1634,6 +1703,9 @@ impl ControlSession {
                 }
 
                 if kind == 48 && fields.len() > 1 {
+                    if !guard.login_acknowledged {
+                        return;
+                    }
                     let block_size = if fields[1].len() == 1 {
                         fields[1][0] as i32
                     } else if fields[1].len() == 2 {
@@ -1650,6 +1722,9 @@ impl ControlSession {
                 }
 
                 if kind == 1 && fields.len() == 11 {
+                    if !guard.login_acknowledged {
+                        return;
+                    }
                     match guard.screen.apply(&fields) {
                         Ok(applied) => {
                             guard.frames_applied += 1;
@@ -1670,6 +1745,9 @@ impl ControlSession {
                 }
 
                 if matches!(kind, 3 | 4 | 28) {
+                    if !guard.login_acknowledged {
+                        return;
+                    }
                     if let Ok(cmd) = decode_cursor_parts(&fields) {
                         if matches!(cmd, crate::cursor::CursorCommand::Position { .. })
                             && guard
@@ -1688,6 +1766,39 @@ impl ControlSession {
             }
         }
 
+        if let Some(clip_msg) = decode_clipboard_packet(payload) {
+            let should_write_os = guard.login_acknowledged
+                && guard.clipboard.auto_sync_system
+                && !clip_msg.text.is_empty()
+                && !clipboard_text_eq(&clip_msg.text, &guard.clipboard.remote_text);
+            if should_write_os {
+                let text = clip_msg.text.clone();
+                drop(guard);
+                let wrote_ok = set_linux_system_clipboard(&text);
+                let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.login_acknowledged {
+                    guard.clipboard.apply_remote_clipboard_update(&text, wrote_ok);
+                    guard.state.last_message = format!(
+                        "Clipboard synced from remote ({} chars)",
+                        text.len()
+                    );
+                    Self::sync_state_fields(&mut guard);
+                }
+            } else {
+                guard.clipboard.apply_remote_clipboard_update(&clip_msg.text, false);
+                guard.state.last_message = format!(
+                    "Clipboard synced from remote ({} chars)",
+                    clip_msg.text.len()
+                );
+                Self::sync_state_fields(&mut guard);
+            }
+            return;
+        }
+
+        if !guard.login_acknowledged {
+            return;
+        }
+
         if let Ok(Some(audio_pkt)) = guard.audio.ingest_packet(payload) {
             guard.state.last_message = format!(
                 "Audio packet kind={} ({} PCM bytes)",
@@ -1695,27 +1806,6 @@ impl ControlSession {
                 audio_pkt.pcm_s16le.len()
             );
             Self::sync_state_fields(&mut guard);
-            return;
-        }
-
-        if let Some(clip_msg) = decode_clipboard_packet(payload) {
-            let prev_remote = guard.clipboard.remote_text.clone();
-            let should_write_os = guard.login_acknowledged
-                && guard.clipboard.auto_sync_system
-                && !clip_msg.text.is_empty()
-                && !clipboard_text_eq(&clip_msg.text, &prev_remote);
-            guard.clipboard.remote_text = clip_msg.text.clone();
-            guard.clipboard.local_text = clip_msg.text.clone();
-            guard.clipboard.updates_received += 1;
-            guard.state.last_message = format!(
-                "Clipboard synced from remote ({} chars)",
-                clip_msg.text.len()
-            );
-            Self::sync_state_fields(&mut guard);
-            drop(guard);
-            if should_write_os {
-                let _ = set_linux_system_clipboard(&clip_msg.text);
-            }
             return;
         }
 
@@ -1767,7 +1857,7 @@ impl ControlSession {
 
     pub fn toggle_remote_sound(&self, enable: bool) -> Result<Vec<u8>, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.audio.enabled = enable;
+        guard.audio.set_enabled(enable);
         let payload = encode_sound_toggle_command(enable);
         Self::dispatch_payload(&mut guard, &payload, false, None)?;
         guard.state.last_message = if enable {
@@ -1777,6 +1867,12 @@ impl ControlSession {
         };
         Self::sync_state_fields(&mut guard);
         Ok(payload)
+    }
+
+    pub fn set_clipboard_sync_mode(&self, mode: crate::clipboard::ClipboardSyncMode) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clipboard.set_sync_mode(mode);
+        Self::sync_state_fields(&mut guard);
     }
 
     pub fn send_clipboard(&self, text: &str, sync_system: bool) -> Result<Vec<u8>, String> {
@@ -1898,13 +1994,18 @@ impl ControlSession {
 
     pub fn send_chat(&self, text: &str) -> Result<Vec<u8>, String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let bounded = truncate_chat_utf8(text, crate::file_transfer::MAX_CHAT_MESSAGE_BYTES);
         let modern = guard.files.modern_protocol;
-        let pkt = encode_chat_message(text, modern)?;
+        let pkt = encode_chat_message(bounded, modern)?;
         let is_utf16 = is_utf16_string_packet(&pkt);
-        guard.files.chat_messages.push(format!("Me: {}", text));
-        let _ = guard.host_session.send_chat(text);
+        guard.files.chat_messages.push(format!("Me: {}", bounded));
+        if guard.files.chat_messages.len() > crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES {
+            let overflow = guard.files.chat_messages.len() - crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES;
+            guard.files.chat_messages.drain(0..overflow);
+        }
+        let _ = guard.host_session.send_chat(bounded);
         Self::dispatch_payload(&mut guard, &pkt, is_utf16, None)?;
-        guard.state.last_message = format!("Sent chat message ({} chars)", text.len());
+        guard.state.last_message = format!("Sent chat message ({} chars)", bounded.len());
         Self::sync_state_fields(&mut guard);
         Ok(pkt)
     }
@@ -1917,7 +2018,11 @@ impl ControlSession {
     ) -> Result<(), String> {
         let cleaned_id: String = partner_id.chars().filter(|c| !c.is_whitespace()).collect();
         let cleaned_pass = password.trim().to_string();
-        let mut existing = load_saved_credentials();
+        let creds_path = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.credentials_path.clone()
+        };
+        let mut existing = load_saved_credentials_from(&creds_path);
         if remember && !cleaned_id.is_empty() {
             existing
                 .saved_remotes
@@ -1944,18 +2049,22 @@ impl ControlSession {
                 dismissed_update_version: existing.dismissed_update_version,
             }
         } else {
+            let mut remotes = existing.saved_remotes;
+            for r in &mut remotes {
+                r.password.clear();
+            }
             SavedCredentials {
                 partner_id: String::new(),
                 password: String::new(),
                 remember: false,
-                saved_remotes: existing.saved_remotes,
+                saved_remotes: remotes,
                 theme: existing.theme,
                 language: existing.language,
                 toolbar_collapsed: existing.toolbar_collapsed,
                 dismissed_update_version: existing.dismissed_update_version,
             }
         };
-        let _ = save_credentials(&creds);
+        let _ = save_credentials_to(&creds_path, &creds);
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.state.saved_partner_id = creds.partner_id;
         guard.state.saved_password = creds.password;
@@ -1994,7 +2103,11 @@ impl ControlSession {
             }
         }
 
-        let mut creds = load_saved_credentials();
+        let creds_path = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.credentials_path.clone()
+        };
+        let mut creds = load_saved_credentials_from(&creds_path);
         if let Some(t) = theme {
             creds.theme = t.to_string();
         }
@@ -2004,7 +2117,7 @@ impl ControlSession {
         if let Some(c) = toolbar_collapsed {
             creds.toolbar_collapsed = c;
         }
-        save_credentials(&creds)?;
+        save_credentials_to(&creds_path, &creds)?;
 
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.state.saved_theme = creds.theme;
@@ -2062,6 +2175,9 @@ impl ControlSession {
             guard.outbound_queue.clear();
             guard.login_acknowledged = false;
             guard.e2e = crate::e2e::E2eNegotiationState::Disabled;
+            guard.e2e_policy = e2e_channel_policy_for_target(partner_id);
+            guard.files.reset_for_new_session();
+            guard.audio.clear();
             guard.state.state = "connecting".to_string();
             guard.state.frames = 0;
             guard.state.error = None;
@@ -2086,6 +2202,8 @@ impl ControlSession {
         guard.login_acknowledged = false;
         guard.outbound_queue.clear();
         guard.e2e = crate::e2e::E2eNegotiationState::Disabled;
+        guard.files.reset_for_new_session();
+        guard.audio.clear();
         guard.state.state = "disconnected".to_string();
         guard.state.last_message = "Disconnected".to_string();
         Self::sync_state_fields(&mut guard);
@@ -2165,7 +2283,7 @@ impl ControlSession {
         if hs.running && hs.lan_port > 0 && (hs.host_id == pid || dev_id == pid) {
             return Some(("127.0.0.1".to_string(), hs.lan_port));
         }
-        discover_lan_peer_by_id(pid, Duration::from_millis(60))
+        None
     }
 
     fn establish_lan_session(
@@ -2186,11 +2304,23 @@ impl ControlSession {
         };
         let salt = random_digits(8);
         let auth = login_password_fields(&partner.password, partner.password_type, Some(&salt))?;
-        let (e2e_wire, e2e_state) = crate::e2e::create_viewer_offer_for_password(
-            &auth.salt,
-            &partner.password,
-            &auth.secondary,
-        );
+        let is_temp_pw = !partner.password.is_empty()
+            && partner.password.len() <= 8
+            && partner.password.chars().all(|c| c.is_ascii_digit());
+        let requires_e2e = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.e2e_policy.requires_e2e()
+        };
+        let (e2e_wire, e2e_state) = if !partner.password.is_empty() && (is_temp_pw || requires_e2e)
+        {
+            crate::e2e::create_viewer_offer_for_password(
+                &auth.salt,
+                &partner.password,
+                "",
+            )
+        } else {
+            (String::new(), crate::e2e::E2eNegotiationState::Disabled)
+        };
         let fields = vec![
             "".to_string(),
             "".to_string(),
@@ -2493,11 +2623,23 @@ impl ControlSession {
 
         let salt = random_digits(8);
         let auth = login_password_fields(&partner.password, partner.password_type, Some(&salt))?;
-        let (e2e_wire, e2e_state) = crate::e2e::create_viewer_offer_for_password(
-            &auth.salt,
-            &partner.password,
-            &auth.secondary,
-        );
+        let is_temp_pw = !partner.password.is_empty()
+            && partner.password.len() <= 8
+            && partner.password.chars().all(|c| c.is_ascii_digit());
+        let requires_e2e = {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.e2e_policy.requires_e2e()
+        };
+        let (e2e_wire, e2e_state) = if !partner.password.is_empty() && (is_temp_pw || requires_e2e)
+        {
+            crate::e2e::create_viewer_offer_for_password(
+                &auth.salt,
+                &partner.password,
+                "",
+            )
+        } else {
+            (String::new(), crate::e2e::E2eNegotiationState::Disabled)
+        };
         let token_or_offer = match route.partner_secret_token.as_deref() {
             Some(tok) if !tok.is_empty() => format!("{}|{}", tok, e2e_wire),
             _ => e2e_wire,
@@ -2592,17 +2734,17 @@ impl ControlSession {
     }
 
     pub fn dismiss_update(&self, version: Option<&str>) {
-        let (engine, target_ver) = {
+        let (engine, target_ver, creds_path) = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let v = version
                 .map(str::to_string)
                 .or_else(|| guard.update_engine.snapshot().latest_version);
-            (guard.update_engine.clone(), v)
+            (guard.update_engine.clone(), v, guard.credentials_path.clone())
         };
         engine.set_dismissed_version(target_ver.clone());
-        let mut creds = load_saved_credentials();
+        let mut creds = load_saved_credentials_from(&creds_path);
         creds.dismissed_update_version = target_ver;
-        let _ = save_credentials(&creds);
+        let _ = save_credentials_to(&creds_path, &creds);
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         Self::sync_state_fields(&mut guard);
     }
@@ -2632,5 +2774,214 @@ impl ControlSession {
             thread::sleep(Duration::from_millis(1200));
             let _ = session.check_for_updates();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_lan_endpoint_no_udp_broadcast_hijack() {
+        let session = ControlSession::new();
+        assert_eq!(session.resolve_lan_endpoint("99999999"), None);
+        assert_eq!(session.resolve_lan_endpoint("12345678"), None);
+        assert_eq!(
+            session.resolve_lan_endpoint("lan://127.0.0.1:5938"),
+            Some(("127.0.0.1".to_string(), 5938))
+        );
+        assert_eq!(
+            session.resolve_lan_endpoint("127.0.0.1:5938"),
+            Some(("127.0.0.1".to_string(), 5938))
+        );
+    }
+
+    #[test]
+    fn test_anti_downgrade_established_e2e_rejects_unencrypted_kind_22() {
+        let session = ControlSession::new();
+        let raw_kind_22 = [1, 0, 0, 0, 22];
+
+        session.handle_session_payload(&raw_kind_22);
+        assert_eq!(session.snapshot().state, "disconnected");
+        assert_eq!(session.snapshot().last_message, "Sai mật khẩu (Wrong Password)");
+
+        {
+            let mut guard = session.inner.lock().unwrap();
+            session.stop_flag.store(false, Ordering::SeqCst);
+            guard.state.state = "connected".to_string();
+            guard.login_acknowledged = true;
+            let cipher = crate::e2e::E2eSessionCipher::new(
+                &[7u8; 32],
+                "0102030405060708".to_string(),
+                crate::e2e::E2eRole::Viewer,
+            );
+            guard.e2e = crate::e2e::E2eNegotiationState::Established(cipher);
+        }
+
+        session.handle_session_payload(&raw_kind_22);
+        assert_eq!(session.snapshot().state, "disconnected");
+        assert_ne!(session.snapshot().last_message, "Sai mật khẩu (Wrong Password)");
+        {
+            let guard = session.inner.lock().unwrap();
+            assert!(!matches!(guard.e2e, crate::e2e::E2eNegotiationState::Disabled));
+        }
+    }
+
+    #[test]
+    fn test_e2e_policy_lan_mandatory_vs_numeric_opportunistic_and_mitm_abort() {
+        assert_eq!(
+            e2e_channel_policy_for_target("lan://127.0.0.1:5938"),
+            crate::e2e::E2eChannelPolicy::MandatoryLan
+        );
+        assert!(e2e_channel_policy_for_target("lan://127.0.0.1:5938").requires_e2e());
+        assert_eq!(
+            e2e_channel_policy_for_target("12345678"),
+            crate::e2e::E2eChannelPolicy::OpportunisticInternet
+        );
+        assert!(!e2e_channel_policy_for_target("12345678").requires_e2e());
+        assert_eq!(
+            e2e_channel_policy_for_target("192.168.1.50:5938"),
+            crate::e2e::E2eChannelPolicy::OpportunisticInternet
+        );
+
+        let plain_login_reply = encode_byte_array_fields(&[
+            &[0u8][..],
+            &1024i32.to_le_bytes()[..],
+            &768i32.to_le_bytes()[..],
+            &[][..],
+        ])
+        .unwrap();
+
+        let session_lan = ControlSession::new();
+        let (_offer_wire, offer_state) =
+            crate::e2e::create_viewer_offer_for_password("nonce1", "12345678", "");
+        {
+            let mut guard = session_lan.inner.lock().unwrap();
+            guard.e2e_policy = crate::e2e::E2eChannelPolicy::MandatoryLan;
+            guard.e2e = offer_state;
+        }
+        session_lan.handle_session_payload(&plain_login_reply);
+        assert_eq!(session_lan.snapshot().state, "disconnected");
+        assert_eq!(
+            session_lan.snapshot().last_message,
+            "Host did not provide required E2E handshake answer"
+        );
+
+        let session_win = ControlSession::new();
+        let (_offer_wire2, offer_state2) =
+            crate::e2e::create_viewer_offer_for_password("nonce2", "12345678", "");
+        {
+            let mut guard = session_win.inner.lock().unwrap();
+            guard.e2e_policy = crate::e2e::E2eChannelPolicy::OpportunisticInternet;
+            guard.e2e = offer_state2;
+        }
+        session_win.handle_session_payload(&plain_login_reply);
+        assert_eq!(session_win.snapshot().state, "connected");
+        assert_eq!(
+            session_win.inner.lock().unwrap().e2e,
+            crate::e2e::E2eNegotiationState::Disabled
+        );
+
+        let session_mitm = ControlSession::new();
+        let (_offer_wire3, offer_state3) =
+            crate::e2e::create_viewer_offer_for_password("nonce3", "12345678", "");
+        let forged_ans = format!(
+            "E2E1|{}|{}",
+            crate::e2e::hex_encode(&crate::e2e::x25519_basepoint(&[7u8; 32])),
+            "00".repeat(32)
+        );
+        let forged_login_reply = encode_byte_array_fields(&[
+            &[0u8][..],
+            &1024i32.to_le_bytes()[..],
+            &768i32.to_le_bytes()[..],
+            forged_ans.as_bytes(),
+        ])
+        .unwrap();
+        {
+            let mut guard = session_mitm.inner.lock().unwrap();
+            guard.e2e_policy = crate::e2e::E2eChannelPolicy::OpportunisticInternet;
+            guard.e2e = offer_state3;
+        }
+        session_mitm.handle_session_payload(&forged_login_reply);
+        assert_eq!(session_mitm.snapshot().state, "disconnected");
+        assert!(session_mitm.snapshot().error.is_some());
+    }
+
+    #[test]
+    fn test_pre_login_packets_ignored_when_login_not_acknowledged() {
+        let session = ControlSession::new();
+        {
+            let guard = session.inner.lock().unwrap();
+            assert!(!guard.login_acknowledged);
+            assert_eq!(guard.frames_applied, 0);
+            assert_eq!(guard.audio.chunks_received, 0);
+            assert_eq!(guard.clipboard.updates_received, 0);
+        }
+
+        let dummy_frame = encode_byte_array_fields(&[
+            &[1u8][..],
+            &[0u8][..],
+            &[0u8][..],
+            &[0u8][..],
+            &[0u8][..],
+            &[0u8][..],
+            &[0u8][..],
+            &[0u8][..],
+            &[0u8][..],
+            &[0u8][..],
+            &[0u8][..],
+        ])
+        .unwrap();
+        session.handle_session_payload(&dummy_frame);
+
+        let audio_pkt = crate::audio::encode_audio_packet(
+            crate::audio::WaveSource::PcSound,
+            &[0u8; 10],
+            false,
+        )
+        .unwrap();
+        session.handle_session_payload(&audio_pkt);
+
+        let clip_pkt = crate::clipboard::encode_clipboard_packet(1, "secret_clip").unwrap();
+        session.handle_session_payload(&clip_pkt);
+
+        {
+            let guard = session.inner.lock().unwrap();
+            assert_eq!(guard.frames_applied, 0);
+            assert_eq!(guard.audio.chunks_received, 0);
+            assert_eq!(guard.clipboard.local_text, "");
+        }
+    }
+
+    #[test]
+    fn test_update_saved_credentials_scrubs_passwords_when_remember_false() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ultradesk-creds-test-{}-{}",
+            std::process::id(),
+            random_digits(8)
+        ));
+        let temp_path = temp_dir.join("credentials.json");
+        let session = ControlSession::new();
+        {
+            let mut guard = session.inner.lock().unwrap();
+            guard.credentials_path = temp_path.clone();
+        }
+        session
+            .update_saved_credentials("12345678", "secret_pass", true)
+            .unwrap();
+        let creds = load_saved_credentials_from(&temp_path);
+        assert_eq!(creds.password, "secret_pass");
+        assert_eq!(creds.saved_remotes[0].password, "secret_pass");
+
+        session
+            .update_saved_credentials("12345678", "secret_pass", false)
+            .unwrap();
+        let creds = load_saved_credentials_from(&temp_path);
+        assert!(creds.password.is_empty());
+        assert!(!creds.remember);
+        for entry in &creds.saved_remotes {
+            assert!(entry.password.is_empty());
+        }
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

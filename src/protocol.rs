@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const DEFAULT_REGISTRATION_HOST: &str = "functions3.ultraviewer.net";
+pub const DEFAULT_SERVER_HOST: &str = DEFAULT_REGISTRATION_HOST;
 pub const TLS_TARGET_HOST: &str = "ultraviewer";
 pub const REGISTRATION_PASSWORD: &str = "\x05\x0a\x0f\x14\x19";
 
@@ -369,6 +370,53 @@ pub fn tile_sample_score(
     Ok((total - equal, total))
 }
 
+pub fn is_public_routable_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || (octets[0] == 169 && octets[1] == 254)
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || octets[0] == 0
+        || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        || octets[0] >= 240
+    {
+        return false;
+    }
+    true
+}
+
+pub fn is_valid_hostname(host: &str) -> bool {
+    let trimmed = host.trim();
+    if trimmed.is_empty() || trimmed.len() > 253 {
+        return false;
+    }
+    if !trimmed.is_ascii() || trimmed.contains(':') {
+        return false;
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-'))
+    {
+        return false;
+    }
+    if !trimmed.bytes().any(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
+    for label in trimmed.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn is_valid_host_header_value(host: &str) -> bool {
     let trimmed = host.trim();
     !trimmed.is_empty()
@@ -690,24 +738,25 @@ pub fn decode_target_route(payload: &[u8]) -> Result<TargetRoute, String> {
         Ok(val)
     };
     let tcp_server_hostname = if fields[14].trim().is_empty() {
-        "functions3.ultraviewer.net".to_string()
+        DEFAULT_SERVER_HOST.to_string()
     } else {
         let candidate = fields[14].trim();
-        if !is_valid_host_header_value(candidate) {
+        if !is_valid_hostname(candidate) {
             return Err("invalid tcp_server_hostname in route response".to_string());
         }
         candidate.to_string()
     };
+    if !is_valid_hostname(&tcp_server_hostname) {
+        return Err("invalid tcp_server_hostname in route response".to_string());
+    }
     let tcp_server_ip_addr = fields[11]
         .trim()
         .parse::<std::net::Ipv4Addr>()
         .map_err(|_| "invalid tcp_server_ip in route response".to_string())?;
-    if tcp_server_ip_addr.is_unspecified()
-        || tcp_server_ip_addr.is_broadcast()
-        || tcp_server_ip_addr.is_multicast()
-    {
+    if !is_public_routable_ipv4(tcp_server_ip_addr) {
         return Err("unroutable tcp_server_ip in route response".to_string());
     }
+    let tcp_server_ip = tcp_server_ip_addr.to_string();
     let partner_secret_token = fields
         .get(20)
         .filter(|s| !s.is_empty() && *s != "0")
@@ -726,8 +775,8 @@ pub fn decode_target_route(payload: &[u8]) -> Result<TargetRoute, String> {
         lan_port: parse_range(6, 0, 65535)? as u16,
         command_port: parse_range(7, 0, 65535)? as u16,
         computer_name_encoded: fields[8].clone(),
-        tcp_port: parse_range(9, 0, 65535)? as u16,
-        tcp_server_ip: fields[11].clone(),
+        tcp_port: parse_range(9, 1, 65535)? as u16,
+        tcp_server_ip,
         matched_custom_password: parse_range(12, -32768, 32767)? as i16,
         target_session_id: parse_range(13, -2_147_483_648, 2_147_483_647)? as i32,
         tcp_server_hostname,
@@ -1117,4 +1166,100 @@ pub fn parse_command_fields(text: &str) -> Vec<String> {
         return vec![text.to_string()];
     }
     text[3..].split("|||").map(|s| s.to_string()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_is_public_routable_ipv4() {
+        let blocked = [
+            "0.0.0.0",
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "192.0.0.1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "224.0.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+        ];
+        for ip_str in blocked {
+            let ip: Ipv4Addr = ip_str.parse().unwrap();
+            assert!(!is_public_routable_ipv4(ip), "expected {} to be blocked", ip_str);
+        }
+
+        let allowed = [
+            "103.56.158.44",
+            "198.51.100.22",
+            "192.0.2.10",
+            "203.0.113.1",
+            "1.1.1.1",
+            "8.8.8.8",
+        ];
+        for ip_str in allowed {
+            let ip: Ipv4Addr = ip_str.parse().unwrap();
+            assert!(is_public_routable_ipv4(ip), "expected {} to be allowed", ip_str);
+        }
+    }
+
+    #[test]
+    fn test_is_valid_hostname() {
+        assert!(is_valid_hostname("functions3.ultraviewer.net"));
+        assert!(is_valid_hostname("relay2.ultraviewer.net"));
+        assert!(is_valid_hostname("example.com"));
+
+        assert!(!is_valid_hostname("evil:8080"));
+        assert!(!is_valid_hostname("relay2.ultraviewer.net:443"));
+        assert!(!is_valid_hostname("127.0.0.1"));
+        assert!(!is_valid_hostname("103.56.158.44"));
+        assert!(!is_valid_hostname(""));
+        assert!(!is_valid_hostname("   "));
+        assert!(!is_valid_hostname("-bad.com"));
+        assert!(!is_valid_hostname("bad-.com"));
+        assert!(!is_valid_hostname("bad..com"));
+        assert!(!is_valid_hostname("bad host.com"));
+        assert!(!is_valid_hostname("bad\r\nhost.com"));
+    }
+
+    #[test]
+    fn test_decode_target_route_boundary_validation() {
+        let valid_payload = b"8:1:192.168.1.10:0:203.0.113.10:0:0:55002:hostB64:2112:0:103.56.158.44:0:1:functions3.ultraviewer.net:0:0:0:0:0:token-xyz:";
+        let route = decode_target_route(valid_payload).unwrap();
+        assert_eq!(route.tcp_server_ip, "103.56.158.44");
+        assert_eq!(route.tcp_port, 2112);
+        assert_eq!(route.public_port, 0);
+        assert_eq!(route.lan_port, 0);
+
+        let valid_doc_ip = b"8:1:192.168.1.10:0:203.0.113.10:55000:55001:55002:hostB64:2112:0:198.51.100.22:0:1:functions3.ultraviewer.net:0:0:0:0:0:token-xyz:";
+        assert!(decode_target_route(valid_doc_ip).is_ok());
+
+        let unroutable_ips = [
+            "127.0.0.1",
+            "10.0.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+        ];
+        for ip in unroutable_ips {
+            let raw = format!(
+                "8:1:192.168.1.10:0:203.0.113.10:55000:55001:55002:hostB64:2112:0:{}:0:1:functions3.ultraviewer.net:0:0:0:0:0:token-xyz:",
+                ip
+            );
+            assert!(decode_target_route(raw.as_bytes()).is_err(), "expected unroutable ip {} to fail", ip);
+        }
+
+        let tcp_port_zero = b"8:1:192.168.1.10:0:203.0.113.10:55000:55001:55002:hostB64:0:0:103.56.158.44:0:1:functions3.ultraviewer.net:0:0:0:0:0:token-xyz:";
+        assert!(decode_target_route(tcp_port_zero).is_err());
+
+        let invalid_hostname_ip = b"8:1:192.168.1.10:0:203.0.113.10:55000:55001:55002:hostB64:2112:0:103.56.158.44:0:1:127.0.0.1:0:0:0:0:0:token-xyz:";
+        assert!(decode_target_route(invalid_hostname_ip).is_err());
+    }
 }
