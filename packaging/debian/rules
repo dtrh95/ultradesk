@@ -6,8 +6,13 @@ export PATH := $(CARGO_HOME)/bin:$(PATH)
 
 ensure_rust_toolchain = \
 	mkdir -p -m 0700 "$(CARGO_HOME)" "$(RUSTUP_HOME)"; \
-	if ! command -v rustc >/dev/null 2>&1 || [ "$$(rustc -V | sed -E 's/rustc [0-9]+\.([0-9]+)\..*/\1/')" -lt 90 ]; then \
-		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path; \
+	if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; then \
+		echo "ERROR: rustc and cargo must be installed in the build environment" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$(rustc -V | sed -E 's/rustc [0-9]+\.([0-9]+)\..*/\1/')" -lt 90 ]; then \
+		echo "ERROR: rustc version >= 1.90 is required (found $$(rustc -V))" >&2; \
+		exit 1; \
 	fi
 
 %:

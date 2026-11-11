@@ -15,7 +15,7 @@ on:
         default: true
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: publish-ubuntu-${{ github.ref }}
@@ -138,6 +138,8 @@ jobs:
     name: Publish Ubuntu DEBs & APT Repo
     needs: [build-ubuntu-deb]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 

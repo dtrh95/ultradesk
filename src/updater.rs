@@ -387,6 +387,8 @@ pub struct UpdateStatusSnapshot {
     pub state: UpdateState,
     pub current_version: String,
     pub latest_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_version: Option<String>,
     pub release_notes: Option<String>,
     pub release_url: Option<String>,
     pub download_progress_pct: Option<u8>,
@@ -401,6 +403,8 @@ pub struct UpdateStatusSnapshot {
     pub message: Option<String>,
 }
 
+pub type UpdateStatus = UpdateStatusSnapshot;
+
 impl Default for UpdateStatusSnapshot {
     fn default() -> Self {
         let t = InstallTarget::detect_current();
@@ -408,6 +412,7 @@ impl Default for UpdateStatusSnapshot {
             state: UpdateState::Idle,
             current_version: CURRENT_VERSION.to_string(),
             latest_version: None,
+            available_version: None,
             release_notes: None,
             release_url: None,
             download_progress_pct: None,
@@ -478,7 +483,7 @@ pub fn resolve_private_update_cache_dir(
     }
     let fallback_base = crate::profile::fallback_private_config_dir();
     let _ = crate::profile::make_private_dir(&fallback_base);
-    let fallback = fallback_base.join("ultradesk-rust").join("updates");
+    let fallback = fallback_base.join("updates");
     let _ = crate::profile::make_private_dir(&fallback);
     fallback
 }
@@ -487,6 +492,12 @@ pub fn get_private_update_cache_dir() -> PathBuf {
     let xdg = env::var("XDG_CACHE_HOME").ok();
     let home = env::var("HOME").ok();
     resolve_private_update_cache_dir(xdg.as_deref(), home.as_deref())
+}
+
+pub fn ensure_private_update_cache_dir() -> Result<PathBuf, String> {
+    let dir = get_private_update_cache_dir();
+    crate::profile::make_private_dir(&dir)?;
+    Ok(dir)
 }
 
 enum TransportStream {
@@ -1070,6 +1081,7 @@ impl UpdateEngine {
             let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::UpToDate;
             st.latest_version = Some(remote_ver.to_string());
+            st.available_version = Some(remote_ver.to_string());
             st.release_notes = Some(body.to_string());
             st.release_url = release_url;
             return Ok(st.clone());
@@ -1150,6 +1162,7 @@ impl UpdateEngine {
         let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
         st.state = UpdateState::Available;
         st.latest_version = Some(remote_ver.to_string());
+        st.available_version = Some(remote_ver.to_string());
         st.release_notes = Some(body.to_string());
         st.release_url = release_url;
         st.asset_name = if !plan.asset.name.is_empty() {
@@ -1170,6 +1183,14 @@ impl UpdateEngine {
     }
 
     pub fn confirm_and_apply(&self) -> Result<String, String> {
+        let status = self.confirm_and_apply_for_version(None)?;
+        Ok(status.message.unwrap_or_default())
+    }
+
+    pub fn confirm_and_apply_for_version(
+        &self,
+        expected_version: Option<&str>,
+    ) -> Result<UpdateStatus, String> {
         {
             let st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(
@@ -1178,24 +1199,55 @@ impl UpdateEngine {
             ) {
                 return Err("An update operation is already in progress".to_string());
             }
+            if let Some(exp_ver) = expected_version {
+                let avail = st
+                    .available_version
+                    .as_deref()
+                    .or(st.latest_version.as_deref());
+                match avail {
+                    Some(a) if a == exp_ver => {}
+                    Some(a) => {
+                        return Err(format!(
+                            "Expected update version '{}' does not match available version '{}'",
+                            exp_ver, a
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "Expected update version '{}', but no update is currently available",
+                            exp_ver
+                        ));
+                    }
+                }
+            }
         }
 
-        let res = self.confirm_and_apply_inner();
+        let res = self.confirm_and_apply_inner(expected_version);
         if let Err(ref e) = res {
             let mut st = self.status.lock().unwrap_or_else(|e| e.into_inner());
             st.state = UpdateState::Error;
             st.error = Some(e.clone());
+            return Err(e.clone());
         }
-        res
+        Ok(self.snapshot())
     }
 
-    fn confirm_and_apply_inner(&self) -> Result<String, String> {
+    fn confirm_and_apply_inner(&self, expected_version: Option<&str>) -> Result<String, String> {
         let plan = {
             let cached = self.cached_plan.lock().unwrap_or_else(|e| e.into_inner());
             cached.clone().ok_or_else(|| {
                 "No update available to confirm. Check for updates first.".to_string()
             })?
         };
+
+        if let Some(exp_ver) = expected_version {
+            if plan.version != exp_ver {
+                return Err(format!(
+                    "Expected update version '{}' does not match plan version '{}'",
+                    exp_ver, plan.version
+                ));
+            }
+        }
 
         if plan.asset.download_url.is_empty() || plan.asset.download_url == plan.release_url {
             let msg = match &plan.target {
@@ -1231,6 +1283,21 @@ impl UpdateEngine {
         }
 
         let safe_asset_name = sanitize_asset_filename(&plan.asset.name)?;
+        let expected_sha256 = match plan.asset.expected_sha256.as_deref() {
+            Some(exp) if exp.len() == 64 && exp.chars().all(|c| c.is_ascii_hexdigit()) => exp,
+            Some(_) => {
+                return Err(format!(
+                    "Invalid SHA-256 digest format for update asset '{}'",
+                    safe_asset_name
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "Refusing update: no expected SHA-256 checksum found for asset '{}'",
+                    safe_asset_name
+                ));
+            }
+        };
         let api_is_loopback = is_loopback_update_url(&self.api_url());
         validate_redirect_or_fetch_url(api_is_loopback, &plan.asset.download_url)?;
 
@@ -1242,8 +1309,7 @@ impl UpdateEngine {
             st.error = None;
         }
 
-        let cache_dir = get_private_update_cache_dir();
-        crate::profile::make_private_dir(&cache_dir)?;
+        let cache_dir = ensure_private_update_cache_dir()?;
         let staged_file = cache_dir.join(&safe_asset_name);
 
         let mut progress_fn = |downloaded: u64, total: Option<u64>| {
@@ -1273,17 +1339,15 @@ impl UpdateEngine {
             ));
         }
 
-        if let Some(ref exp) = plan.asset.expected_sha256 {
-            let mut hasher = Sha256::new();
-            hasher.update(&resp.body);
-            let hash_bytes: [u8; 32] = hasher.finalize().into();
-            let calculated: String = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            if !calculated.eq_ignore_ascii_case(exp) {
-                return Err(format!(
-                    "SHA-256 verification failed for '{}'! Expected {}, computed {}",
-                    safe_asset_name, exp, calculated
-                ));
-            }
+        let mut hasher = Sha256::new();
+        hasher.update(&resp.body);
+        let hash_bytes: [u8; 32] = hasher.finalize().into();
+        let calculated: String = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        if !calculated.eq_ignore_ascii_case(expected_sha256) {
+            return Err(format!(
+                "SHA-256 verification failed for '{}'! Expected {}, computed {}",
+                safe_asset_name, expected_sha256, calculated
+            ));
         }
 
         crate::profile::write_private_bytes(&staged_file, &resp.body)
@@ -1445,61 +1509,37 @@ impl UpdateEngine {
                 let is_pacman_pkg = pkg_path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.ends_with(".pkg.tar.zst"))
+                    .map(|n| n.ends_with(".pkg.tar.zst") || n.ends_with(".pkg.tar.xz"))
                     .unwrap_or(false);
-                if is_pacman_pkg {
-                    if is_root {
-                        let status = Command::new("pacman")
-                            .args(["-U", "--noconfirm", "--"])
-                            .arg(pkg_path)
-                            .status()
-                            .map_err(|e| format!("Failed to spawn pacman: {}", e))?;
-                        if !status.success() {
-                            return Err(format!("pacman exited with status {}", status));
-                        }
-                        Ok("Arch Linux package installed successfully".to_string())
-                    } else if has_display && has_pkexec {
-                        let status = Command::new("pkexec")
-                            .args(["pacman", "-U", "--noconfirm", "--"])
-                            .arg(pkg_path)
-                            .status()
-                            .map_err(|e| format!("Failed to spawn pkexec pacman: {}", e))?;
-                        if !status.success() {
-                            return Err(format!("pkexec pacman exited with status {}", status));
-                        }
-                        Ok("Arch Linux package installed successfully via pkexec".to_string())
-                    } else {
-                        Ok(format!(
-                            "Update package downloaded and verified at {}. Install with: sudo pacman -U {}",
-                            pkg_path.display(),
-                            pkg_path.display()
-                        ))
-                    }
-                } else if is_root {
-                    let status = Command::new("tar")
-                        .args(["--zstd", "-xf"])
+                if !is_pacman_pkg {
+                    return Err(format!(
+                        "Refusing unmanaged root extraction. Package '{}' is not an Arch package (.pkg.tar.zst/.pkg.tar.xz). Build or install with pacman or your AUR helper.",
+                        pkg_path.display()
+                    ));
+                }
+                if is_root {
+                    let status = Command::new("pacman")
+                        .args(["-U", "--noconfirm", "--"])
                         .arg(pkg_path)
-                        .args(["-C", "/"])
                         .status()
-                        .map_err(|e| format!("Failed to extract Arch tar.zst archive: {}", e))?;
+                        .map_err(|e| format!("Failed to spawn pacman: {}", e))?;
                     if !status.success() {
-                        return Err(format!("tar --zstd exited with status {}", status));
+                        return Err(format!("pacman exited with status {}", status));
                     }
-                    Ok("Arch Linux archive installed successfully".to_string())
+                    Ok("Arch Linux package installed successfully".to_string())
                 } else if has_display && has_pkexec {
                     let status = Command::new("pkexec")
-                        .args(["tar", "--zstd", "-xf"])
+                        .args(["pacman", "-U", "--noconfirm", "--"])
                         .arg(pkg_path)
-                        .args(["-C", "/"])
                         .status()
-                        .map_err(|e| format!("Failed to spawn pkexec tar: {}", e))?;
+                        .map_err(|e| format!("Failed to spawn pkexec pacman: {}", e))?;
                     if !status.success() {
-                        return Err(format!("pkexec tar exited with status {}", status));
+                        return Err(format!("pkexec pacman exited with status {}", status));
                     }
-                    Ok("Arch Linux archive installed successfully via pkexec".to_string())
+                    Ok("Arch Linux package installed successfully via pkexec".to_string())
                 } else {
                     Ok(format!(
-                        "Update archive downloaded and verified at {}. Install with: sudo tar --zstd -xf {} -C /",
+                        "Update package downloaded and verified at {}. Install with: sudo pacman -U {}",
                         pkg_path.display(),
                         pkg_path.display()
                     ))
@@ -1520,8 +1560,8 @@ impl UpdateEngine {
                     pkg_name.ends_with(".tar.gz") || pkg_name.ends_with(".tgz") || is_gzip;
 
                 let exe_bytes = if is_tar_gz {
-                    let extract_dir = get_private_update_cache_dir()
-                        .join(format!("extract-{}", std::process::id()));
+                    let cache_dir = ensure_private_update_cache_dir()?;
+                    let extract_dir = cache_dir.join(format!("extract-{}", std::process::id()));
                     let _ = fs::remove_dir_all(&extract_dir);
                     crate::profile::make_private_dir(&extract_dir)?;
                     let status = Command::new("tar")
@@ -2011,5 +2051,98 @@ Connection: close
 
         let nix_dir = resolve_private_update_cache_dir(None, Some("/homeless-shelter"));
         assert!(crate::profile::make_private_dir(&nix_dir).is_ok());
+    }
+
+    #[test]
+    fn test_arch_pkg_rejects_unmanaged_tar_root_extraction() {
+        let engine = UpdateEngine::with_target_and_url(
+            InstallTarget::ArchPkg {
+                arch: "x86_64".into(),
+            },
+            "http://127.0.0.1/releases".to_string(),
+        );
+        let plan = ReleasePlan {
+            version: "1.0.0".to_string(),
+            release_notes: String::new(),
+            release_url: String::new(),
+            asset: ReleaseAssetMeta {
+                name: "ultradesk-rust-v1.0.0-x86_64-archlinux.tar.zst".to_string(),
+                download_url: "http://127.0.0.1/archive.tar.zst".to_string(),
+                expected_sha256: Some(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_string(),
+                ),
+                size_bytes: 100,
+            },
+            target: InstallTarget::ArchPkg {
+                arch: "x86_64".into(),
+            },
+        };
+        let bad_pkg = Path::new("/tmp/ultradesk-rust-v1.0.0-x86_64-archlinux.tar.zst");
+        let res = engine.execute_install_strategy(&plan, bad_pkg);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Refusing unmanaged root extraction"));
+    }
+
+    #[test]
+    fn test_confirm_and_apply_version_mismatch_and_missing_sha256() {
+        let engine = UpdateEngine::with_target_and_url(
+            InstallTarget::DebianDeb {
+                codename: "bookworm".into(),
+                arch: "amd64".into(),
+            },
+            "http://127.0.0.1/releases".to_string(),
+        );
+
+        let res = engine.confirm_and_apply_for_version(Some("9.9.9"));
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("no update is currently available"));
+
+        let plan_without_sha = ReleasePlan {
+            version: "9.9.9".to_string(),
+            release_notes: String::new(),
+            release_url: "http://127.0.0.1/rel".to_string(),
+            asset: ReleaseAssetMeta {
+                name: "ultradesk.deb".to_string(),
+                download_url: "http://127.0.0.1/deb".to_string(),
+                expected_sha256: None,
+                size_bytes: 10,
+            },
+            target: InstallTarget::DebianDeb {
+                codename: "bookworm".into(),
+                arch: "amd64".into(),
+            },
+        };
+        *engine.cached_plan.lock().unwrap() = Some(plan_without_sha);
+        engine.status.lock().unwrap().available_version = Some("9.9.9".to_string());
+
+        let res_mismatch = engine.confirm_and_apply_for_version(Some("1.0.0"));
+        assert!(res_mismatch.is_err());
+        assert!(res_mismatch.unwrap_err().contains("does not match available version"));
+
+        let res_no_sha = engine.confirm_and_apply_for_version(Some("9.9.9"));
+        assert!(res_no_sha.is_err());
+        assert!(res_no_sha.unwrap_err().contains("no expected SHA-256 checksum found"));
+    }
+
+    #[test]
+    fn test_fallback_parent_symlink_rejection() {
+        let base_tmp = std::env::temp_dir().join(format!("updater_symlink_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base_tmp);
+        fs::create_dir_all(&base_tmp).unwrap();
+
+        let real_target = base_tmp.join("real");
+        fs::create_dir_all(&real_target).unwrap();
+
+        #[cfg(unix)]
+        {
+            let symlink_parent = base_tmp.join("symlink_parent");
+            std::os::unix::fs::symlink(&real_target, &symlink_parent).unwrap();
+            let updates_child = symlink_parent.join("updates");
+            let res = crate::profile::make_private_dir(&updates_child);
+            assert!(res.is_err());
+        }
+
+        let _ = fs::remove_dir_all(&base_tmp);
     }
 }

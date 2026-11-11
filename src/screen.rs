@@ -1,11 +1,19 @@
 use crate::protocol::atlas_layout;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::{ExtendedColorType, ImageEncoder, ImageFormat};
+use image::{ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat};
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
 pub const RGB555_DICT_BYTES: &[u8] = include_bytes!("../8bit.dat");
+pub const MAX_MONITORS: usize = 16;
+pub const MIN_MONITOR_COORD: i32 = -65536;
+pub const MAX_MONITOR_COORD: i32 = 65536;
+pub const MAX_DISPLAY_WIDTH: u32 = 16384;
+pub const MAX_DISPLAY_HEIGHT: u32 = 8192;
+pub const MAX_DISPLAY_PIXELS: u64 = 32 * 1024 * 1024;
+pub const MAX_CACHED_TILE_DIM: i32 = 512;
+pub const MAX_TILE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 static RGB555_LUT_STORAGE: OnceLock<[u32; 32768]> = OnceLock::new();
 static RGB555_STATIC_DICT: OnceLock<zstd::dict::DecoderDictionary<'static>> = OnceLock::new();
@@ -108,12 +116,12 @@ pub struct MonitorRect {
 impl MonitorRect {
     #[inline]
     pub fn width(&self) -> u32 {
-        (self.right - self.left).max(0) as u32
+        ((self.right as i64 - self.left as i64).max(0)) as u32
     }
 
     #[inline]
     pub fn height(&self) -> u32 {
-        (self.bottom - self.top).max(0) as u32
+        ((self.bottom as i64 - self.top as i64).max(0)) as u32
     }
 }
 
@@ -131,11 +139,13 @@ impl DisplayLayout {
         let (width, height) = desktop_size_from_login(fields).ok()?;
         let mut virtual_left = if fields.len() > 9 && fields[9].len() == 4 {
             i32::from_le_bytes([fields[9][0], fields[9][1], fields[9][2], fields[9][3]])
+                .clamp(MIN_MONITOR_COORD, MAX_MONITOR_COORD)
         } else {
             0
         };
         let mut virtual_top = if fields.len() > 10 && fields[10].len() == 4 {
             i32::from_le_bytes([fields[10][0], fields[10][1], fields[10][2], fields[10][3]])
+                .clamp(MIN_MONITOR_COORD, MAX_MONITOR_COORD)
         } else {
             0
         };
@@ -144,6 +154,9 @@ impl DisplayLayout {
             let text = String::from_utf8_lossy(&fields[8]);
             let trimmed = text.trim_matches('\0');
             for entry in trimmed.split('|') {
+                if monitors.len() >= MAX_MONITORS {
+                    break;
+                }
                 let entry = entry.trim();
                 if entry.is_empty() {
                     continue;
@@ -156,7 +169,13 @@ impl DisplayLayout {
                         coords[2].parse::<i32>(),
                         coords[3].parse::<i32>(),
                     ) {
-                        if right > left && bottom > top {
+                        if (MIN_MONITOR_COORD..=MAX_MONITOR_COORD).contains(&left)
+                            && (MIN_MONITOR_COORD..=MAX_MONITOR_COORD).contains(&top)
+                            && (MIN_MONITOR_COORD..=MAX_MONITOR_COORD).contains(&right)
+                            && (MIN_MONITOR_COORD..=MAX_MONITOR_COORD).contains(&bottom)
+                            && (right as i64) > (left as i64)
+                            && (bottom as i64) > (top as i64)
+                        {
                             monitors.push(MonitorRect {
                                 left,
                                 top,
@@ -173,11 +192,15 @@ impl DisplayLayout {
             virtual_top = virtual_top.min(m.top);
         }
         if monitors.is_empty() {
+            let r = (virtual_left as i64 + width as i64)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            let b = (virtual_top as i64 + height as i64)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
             monitors.push(MonitorRect {
                 left: virtual_left,
                 top: virtual_top,
-                right: virtual_left + width as i32,
-                bottom: virtual_top + height as i32,
+                right: r,
+                bottom: b,
             });
         }
         Some(DisplayLayout {
@@ -218,11 +241,15 @@ impl DisplayLayout {
 
     pub fn active_bounds(&self, selection: &MonitorSelection) -> MonitorRect {
         let indices = self.selected_indices(selection);
+        let full_r = (self.virtual_left as i64 + self.width as i64)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let full_b = (self.virtual_top as i64 + self.height as i64)
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         let full = MonitorRect {
             left: self.virtual_left,
             top: self.virtual_top,
-            right: self.virtual_left + self.width as i32,
-            bottom: self.virtual_top + self.height as i32,
+            right: full_r,
+            bottom: full_b,
         };
         if indices.is_empty() || indices.len() >= self.monitors.len() {
             return full;
@@ -239,12 +266,16 @@ impl DisplayLayout {
                 bottom = bottom.max(m.bottom);
             }
         }
-        if right > left && bottom > top {
+        if (right as i64) > (left as i64) && (bottom as i64) > (top as i64) {
+            let max_w = (self.width as i64).min(MAX_DISPLAY_WIDTH as i64);
+            let max_h = (self.height as i64).min(MAX_DISPLAY_HEIGHT as i64);
+            let bounded_right = left as i64 + (right as i64 - left as i64).min(max_w);
+            let bounded_bottom = top as i64 + (bottom as i64 - top as i64).min(max_h);
             MonitorRect {
                 left,
                 top,
-                right,
-                bottom,
+                right: bounded_right.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                bottom: bounded_bottom.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
             }
         } else {
             full
@@ -693,11 +724,9 @@ pub fn desktop_size_from_login(fields: &[Vec<u8>]) -> Result<(u32, u32), String>
     }
     let width = i32::from_le_bytes([fields[1][0], fields[1][1], fields[1][2], fields[1][3]]);
     let height = i32::from_le_bytes([fields[2][0], fields[2][1], fields[2][2], fields[2][3]]);
-    if width <= 0
-        || width > 8192
-        || height <= 0
-        || height > 8192
-        || (width as i64) * (height as i64) > 32 * 1024 * 1024
+    if !(1..=16384).contains(&width)
+        || !(1..=8192).contains(&height)
+        || (width as u64) * (height as u64) > MAX_DISPLAY_PIXELS
     {
         return Err("partner desktop dimensions outside allocation limit".to_string());
     }
@@ -710,6 +739,7 @@ pub struct RGB555Screen {
     pub decoder: ZstdDictionaryDecoder,
     pub cache: Vec<(i32, RgbBuffer)>,
     pub cache_limit: usize,
+    pub cache_bytes: usize,
     pub block_size: i32,
     pub version: u64,
     pub layout: DisplayLayout,
@@ -749,6 +779,7 @@ impl RGB555Screen {
             decoder,
             cache: Vec::new(),
             cache_limit: cache_limit.max(1),
+            cache_bytes: 0,
             block_size: block_size.max(1),
             version: 1,
             layout,
@@ -757,6 +788,10 @@ impl RGB555Screen {
             cached_bmp: None,
             cached_png: None,
         }
+    }
+
+    pub fn cache_bytes(&self) -> usize {
+        self.cache_bytes
     }
 
     pub fn set_monitor_selection(&mut self, selection: MonitorSelection) {
@@ -773,8 +808,8 @@ impl RGB555Screen {
         }
         if indices.len() == 1 {
             if let Some(m) = self.layout.monitors.get(indices[0]) {
-                let crop_x = (m.left - self.layout.virtual_left).max(0) as u32;
-                let crop_y = (m.top - self.layout.virtual_top).max(0) as u32;
+                let crop_x = ((m.left as i64 - self.layout.virtual_left as i64).max(0)) as u32;
+                let crop_y = ((m.top as i64 - self.layout.virtual_top as i64).max(0)) as u32;
                 let crop_w = m.width().min(self.canvas.width.saturating_sub(crop_x));
                 let crop_h = m.height().min(self.canvas.height.saturating_sub(crop_y));
                 if crop_w > 0 && crop_h > 0 {
@@ -784,22 +819,28 @@ impl RGB555Screen {
             return Cow::Borrowed(&self.canvas);
         }
         let bounds = self.layout.active_bounds(&self.monitor_selection);
-        let bw = bounds.width();
-        let bh = bounds.height();
+        let bw = bounds.width().min(self.canvas.width);
+        let bh = bounds.height().min(self.canvas.height);
         if bw == 0 || bh == 0 {
+            return Cow::Borrowed(&self.canvas);
+        }
+        let Some(px_count) = (bw as usize).checked_mul(bh as usize) else {
+            return Cow::Borrowed(&self.canvas);
+        };
+        if px_count.checked_mul(4).is_none() {
             return Cow::Borrowed(&self.canvas);
         }
         let mut out = RgbBuffer::new(bw, bh);
         for idx in indices {
             if let Some(m) = self.layout.monitors.get(idx) {
-                let src_x = (m.left - self.layout.virtual_left).max(0) as u32;
-                let src_y = (m.top - self.layout.virtual_top).max(0) as u32;
+                let src_x = ((m.left as i64 - self.layout.virtual_left as i64).max(0)) as u32;
+                let src_y = ((m.top as i64 - self.layout.virtual_top as i64).max(0)) as u32;
                 let cw = m.width().min(self.canvas.width.saturating_sub(src_x));
                 let ch = m.height().min(self.canvas.height.saturating_sub(src_y));
                 if cw > 0 && ch > 0 {
                     let tile = self.canvas.crop(src_x, src_y, cw, ch);
-                    let dst_x = (m.left - bounds.left).max(0) as u32;
-                    let dst_y = (m.top - bounds.top).max(0) as u32;
+                    let dst_x = ((m.left as i64 - bounds.left as i64).max(0)) as u32;
+                    let dst_y = ((m.top as i64 - bounds.top as i64).max(0)) as u32;
                     out.paste(&tile, dst_x, dst_y);
                 }
             }
@@ -952,6 +993,9 @@ impl RGB555Screen {
             let y = i16::from_le_bytes([chunk[2], chunk[3]]) as i32;
             let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
             let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
+            if w <= 0 || h <= 0 || w > MAX_CACHED_TILE_DIM || h > MAX_CACHED_TILE_DIM {
+                return Err("cache rectangle outside canvas".to_string());
+            }
             check_bounds(x, y, w, h, self.canvas.width, self.canvas.height)?;
         }
 
@@ -1043,12 +1087,32 @@ impl RGB555Screen {
         }
 
         if !fields[7].is_empty() || !fields[8].is_empty() {
-            let decoded = image::load_from_memory_with_format(&fields[7], ImageFormat::Jpeg)
+            let mut reader = image::ImageReader::new(std::io::Cursor::new(&fields[7]))
+                .with_guessed_format()
+                .map_err(|e| format!("invalid JPEG atlas: {}", e))?;
+            if reader.format().is_none() {
+                reader.set_format(ImageFormat::Jpeg);
+            }
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(MAX_DISPLAY_WIDTH);
+            limits.max_image_height = Some(MAX_DISPLAY_HEIGHT);
+            limits.max_alloc = Some(128 * 1024 * 1024);
+            reader.limits(limits);
+
+            let decoder = reader
+                .into_decoder()
+                .map_err(|e| format!("invalid JPEG atlas: {}", e))?;
+            let (aw, ah) = decoder.dimensions();
+            if aw == 0 || ah == 0 || (aw as u64) * (ah as u64) > MAX_DISPLAY_PIXELS {
+                return Err("JPEG atlas outside allocation policy".to_string());
+            }
+
+            let decoded = image::DynamicImage::from_decoder(decoder)
                 .map_err(|e| format!("invalid JPEG atlas: {}", e))?;
             let rgb_img = decoded.to_rgb8();
             let aw = rgb_img.width();
             let ah = rgb_img.height();
-            if (aw as u64) * (ah as u64) > 32 * 1024 * 1024 {
+            if aw == 0 || ah == 0 || (aw as u64) * (ah as u64) > MAX_DISPLAY_PIXELS {
                 return Err("JPEG atlas outside allocation policy".to_string());
             }
             let mut flipped = RgbBuffer::new(aw, ah);
@@ -1121,17 +1185,47 @@ impl RGB555Screen {
             let w = i16::from_le_bytes([chunk[4], chunk[5]]) as i32;
             let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
             let key = i32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
-            if !self.cache.iter().any(|(k, _)| *k == key) {
-                let cw = (w as u32).min(self.canvas.width.saturating_sub(x as u32));
-                let ch = (h as u32).min(self.canvas.height.saturating_sub(y as u32));
-                if cw > 0 && ch > 0 {
-                    let tile = self.canvas.crop(x as u32, y as u32, cw, ch);
-                    self.cache.push((key, tile));
-                }
+
+            if w <= 0 || h <= 0 || w > MAX_CACHED_TILE_DIM || h > MAX_CACHED_TILE_DIM || x < 0 || y < 0 {
+                continue;
+            }
+            let cw = (w as u32).min(self.canvas.width.saturating_sub(x as u32));
+            let ch = (h as u32).min(self.canvas.height.saturating_sub(y as u32));
+            if cw == 0 || ch == 0 {
+                continue;
+            }
+            let tile_bytes = (cw as usize) * (ch as usize) * 3;
+            if tile_bytes > MAX_TILE_CACHE_BYTES {
+                continue;
+            }
+
+            if let Some(pos) = self.cache.iter().position(|(k, _)| *k == key) {
+                let (_, old_tile) = self.cache.remove(pos);
+                self.cache_bytes = self.cache_bytes.saturating_sub(old_tile.pixels.len());
+            }
+
+            while !self.cache.is_empty()
+                && (self.cache.len() >= self.cache_limit
+                    || self.cache_bytes + tile_bytes > MAX_TILE_CACHE_BYTES)
+            {
+                let (_, evicted) = self.cache.remove(0);
+                self.cache_bytes = self.cache_bytes.saturating_sub(evicted.pixels.len());
+            }
+
+            if self.cache.len() < self.cache_limit
+                && self.cache_bytes + tile_bytes <= MAX_TILE_CACHE_BYTES
+            {
+                let tile = self.canvas.crop(x as u32, y as u32, cw, ch);
+                self.cache_bytes += tile.pixels.len();
+                self.cache.push((key, tile));
             }
         }
-        while self.cache.len() > self.cache_limit {
-            self.cache.remove(0);
+        while self.cache.len() > self.cache_limit || self.cache_bytes > MAX_TILE_CACHE_BYTES {
+            if self.cache.is_empty() {
+                break;
+            }
+            let (_, evicted) = self.cache.remove(0);
+            self.cache_bytes = self.cache_bytes.saturating_sub(evicted.pixels.len());
         }
 
         if count > 0 || !fields[10].is_empty() {
@@ -1414,5 +1508,111 @@ mod tests {
             legacy_total, optimized_total
         );
         assert!(optimized_total < legacy_total);
+    }
+
+    #[test]
+    fn test_negative_windows_multi_monitor_layout() {
+        let bounds_str = b"-1920:0:0:1080|0:0:1920:1080|\0";
+        let fields = vec![
+            vec![0u8],
+            3840i32.to_le_bytes().to_vec(),
+            1080i32.to_le_bytes().to_vec(),
+            Vec::new(),
+            Vec::new(),
+            vec![0u8],
+            b"6.6.133".to_vec(),
+            vec![2u8],
+            bounds_str.to_vec(),
+            (-1920i32).to_le_bytes().to_vec(),
+            0i32.to_le_bytes().to_vec(),
+        ];
+        let layout = DisplayLayout::parse_from_login(&fields).unwrap();
+        assert_eq!(layout.virtual_left, -1920);
+        assert_eq!(layout.virtual_top, 0);
+        assert_eq!(layout.monitors.len(), 2);
+        assert_eq!(layout.monitors[0].left, -1920);
+        assert_eq!(layout.monitors[0].right, 0);
+        assert_eq!(layout.monitors[0].width(), 1920);
+
+        let mut screen =
+            RGB555Screen::new((3840, 1080), ZstdDictionaryDecoder::default(), 100, 32);
+        screen.layout = layout;
+        screen.set_monitor_selection(MonitorSelection::Index(0));
+        let bounds = screen.layout.active_bounds(&screen.monitor_selection);
+        assert_eq!(bounds.left, -1920);
+        assert_eq!(bounds.right, 0);
+        let view = screen.active_view_buffer();
+        assert_eq!(view.width, 1920);
+        assert_eq!(view.height, 1080);
+    }
+
+    #[test]
+    fn test_desktop_size_triple_4k_allowed_and_excessive_rejected() {
+        let triple_4k_fields = vec![
+            vec![0u8],
+            11520i32.to_le_bytes().to_vec(),
+            2160i32.to_le_bytes().to_vec(),
+        ];
+        assert_eq!(
+            desktop_size_from_login(&triple_4k_fields).unwrap(),
+            (11520, 2160)
+        );
+
+        let excessive_width = vec![
+            vec![0u8],
+            16385i32.to_le_bytes().to_vec(),
+            1080i32.to_le_bytes().to_vec(),
+        ];
+        assert!(desktop_size_from_login(&excessive_width).is_err());
+
+        let excessive_height = vec![
+            vec![0u8],
+            1920i32.to_le_bytes().to_vec(),
+            8193i32.to_le_bytes().to_vec(),
+        ];
+        assert!(desktop_size_from_login(&excessive_height).is_err());
+
+        let excessive_pixels = vec![
+            vec![0u8],
+            16000i32.to_le_bytes().to_vec(),
+            8000i32.to_le_bytes().to_vec(),
+        ];
+        assert!(desktop_size_from_login(&excessive_pixels).is_err());
+    }
+
+    #[test]
+    fn test_tile_cache_64_mib_bound_and_lru_eviction() {
+        let mut screen = RGB555Screen::new((512, 512), ZstdDictionaryDecoder::default(), 1000, 32);
+
+        let mut cache_adds = Vec::new();
+        for key in 0..100i32 {
+            cache_adds.extend_from_slice(&0i16.to_le_bytes());
+            cache_adds.extend_from_slice(&0i16.to_le_bytes());
+            cache_adds.extend_from_slice(&512i16.to_le_bytes());
+            cache_adds.extend_from_slice(&512i16.to_le_bytes());
+            cache_adds.extend_from_slice(&key.to_le_bytes());
+        }
+
+        let fields: Vec<Vec<u8>> = vec![
+            vec![1u8],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            cache_adds,
+        ];
+
+        screen.apply(&fields).unwrap();
+        assert!(screen.cache_bytes() <= MAX_TILE_CACHE_BYTES);
+        let per_tile = 512 * 512 * 3;
+        let expected_max_tiles = MAX_TILE_CACHE_BYTES / per_tile;
+        assert_eq!(screen.cache.len(), expected_max_tiles);
+        assert_eq!(screen.cache_bytes(), expected_max_tiles * per_tile);
+        assert_eq!(screen.cache.last().unwrap().0, 99);
     }
 }

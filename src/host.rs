@@ -5714,9 +5714,13 @@ mod tests {
             entry.direction,
             crate::file_transfer::TransferDirection::Receive
         );
-        assert_eq!(entry.buffer, payload_bytes);
+        assert!(entry.buffer.is_empty());
         let saved_path = entry.saved_path.as_ref().unwrap();
         assert_eq!(std::fs::read(saved_path).unwrap(), payload_bytes);
+        assert_eq!(
+            core.files.read_completed_download(&file_id).unwrap().1,
+            payload_bytes
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -5782,6 +5786,8 @@ mod tests {
             std::env::temp_dir().join(format!("ultradesk_host_pull_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
+        core.files.download_dir = temp_dir.clone();
+        core.files.allow_remote_requests = true;
         let remote_src = temp_dir.join("remote_export.txt");
         let expected_bytes = b"pulled file content from remote host".to_vec();
         std::fs::write(&remote_src, &expected_bytes).unwrap();
@@ -5817,17 +5823,27 @@ mod tests {
             }
         }
 
-        let completed = controller_files
+        let completed_id = controller_files
             .transfers
             .values()
             .find(|e| e.file_name == "remote_export.txt")
-            .unwrap();
+            .unwrap()
+            .file_id
+            .clone();
+        let completed = controller_files.transfers.get(&completed_id).unwrap();
         assert_eq!(
             completed.status,
             crate::file_transfer::TransferStatus::Completed
         );
-        assert_eq!(completed.buffer, expected_bytes);
+        assert!(completed.buffer.is_empty());
         assert!(completed.saved_path.is_some());
+        assert_eq!(
+            controller_files
+                .read_completed_download(&completed_id)
+                .unwrap()
+                .1,
+            expected_bytes
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

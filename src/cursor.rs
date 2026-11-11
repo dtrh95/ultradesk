@@ -1,4 +1,4 @@
-use image::ImageEncoder;
+use image::{ImageDecoder, ImageEncoder};
 use std::collections::{HashMap, VecDeque};
 
 pub const IGNORED_SELECTION_HASH: i32 = 0xb84d1a70u32 as i32;
@@ -103,16 +103,36 @@ fn decode_cursor_resource(file: &CursorFile) -> Result<RgbaCursor, String> {
         return Err("Invalid cursor dimensions".to_string());
     }
 
-    if file
-        .resource
-        .starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
-    {
-        let img = image::load_from_memory_with_format(&file.resource, image::ImageFormat::Png)
-            .map_err(|e| format!("Failed to decode cursor PNG: {}", e))?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&file.resource))
+        .with_guessed_format()
+        .map_err(|e| format!("Failed to inspect cursor image: {}", e))?;
+
+    if reader.format().is_some() {
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(256);
+        limits.max_image_height = Some(256);
+        limits.max_alloc = Some(4 * 1024 * 1024);
+        reader.limits(limits);
+
+        let decoder = reader
+            .into_decoder()
+            .map_err(|e| format!("Failed to create cursor image decoder: {}", e))?;
+        let (dw, dh) = decoder.dimensions();
+        if !(1..=256).contains(&dw) || !(1..=256).contains(&dh) {
+            return Err("Cursor dimensions in image header outside limits".to_string());
+        }
+
+        let img = image::DynamicImage::from_decoder(decoder)
+            .map_err(|e| format!("Failed to decode cursor image: {}", e))?;
         let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width(), rgba.height());
+        if !(1..=256).contains(&w) || !(1..=256).contains(&h) {
+            return Err("Decoded cursor dimensions outside limits".to_string());
+        }
+
         return Ok(RgbaCursor {
-            width: rgba.width(),
-            height: rgba.height(),
+            width: w,
+            height: h,
             hot_x: file.hot_x,
             hot_y: file.hot_y,
             rgba: rgba.into_raw(),
@@ -375,6 +395,9 @@ impl CursorManager {
             CursorCommand::Shape { hash, cursor } => {
                 self.requested_hashes.retain(|&h| h != hash);
                 let cursor_bytes = cursor.rgba.len();
+                if cursor_bytes > self.max_memory_bytes {
+                    return None;
+                }
 
                 if let Some(old) = self.cache.remove(&hash) {
                     self.current_memory_bytes =
@@ -563,5 +586,45 @@ mod tests {
 
         mgr.handle_command(CursorCommand::Position { x: 50, y: 75 });
         assert_eq!(mgr.position(), (50, 75));
+    }
+
+    #[test]
+    fn test_decode_cursor_oversized_png_rejected_before_alloc() {
+        let oversized = RgbaCursor {
+            width: 300,
+            height: 300,
+            hot_x: 0,
+            hot_y: 0,
+            rgba: vec![0u8; 300 * 300 * 4],
+        };
+        let png_bytes = oversized.to_png().unwrap();
+        let cur_file = CursorFile {
+            file_data: Vec::new(),
+            resource: png_bytes,
+            image_count: 1,
+            width: 256,
+            height: 256,
+            hot_x: 0,
+            hot_y: 0,
+        };
+        assert!(decode_cursor_resource(&cur_file).is_err());
+    }
+
+    #[test]
+    fn test_cursor_manager_rejects_oversized_cursor_exceeding_max_memory() {
+        let mut mgr = CursorManager::new(4, 100);
+        let big_cursor = RgbaCursor {
+            width: 10,
+            height: 10,
+            hot_x: 0,
+            hot_y: 0,
+            rgba: vec![0u8; 400],
+        };
+        mgr.handle_command(CursorCommand::Shape {
+            hash: 55,
+            cursor: big_cursor,
+        });
+        assert_eq!(mgr.cache_len(), 0);
+        assert_eq!(mgr.memory_usage(), 0);
     }
 }

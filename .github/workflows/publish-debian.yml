@@ -10,7 +10,7 @@ on:
         required: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: publish-debian-${{ github.ref }}
@@ -136,6 +136,8 @@ jobs:
     name: Publish Debian DEBs & APT Repo
     needs: [build-debian-deb]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
