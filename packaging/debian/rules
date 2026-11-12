@@ -2,13 +2,37 @@
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export CARGO_HOME = $(CURDIR)/debian/.cargo
 export RUSTUP_HOME = $(CURDIR)/debian/.rustup
-export PATH := $(CARGO_HOME)/bin:$(PATH)
+export RUST_TOOLCHAIN_DIR = $(CURDIR)/debian/.rust-toolchain
+export PATH := $(RUST_TOOLCHAIN_DIR)/bin:$(CARGO_HOME)/bin:$(PATH)
+export ULTRADESK_DISABLE_SYSTEM_CLIPBOARD = 1
+
+RUST_VERSION = 1.99.1
+RUST_DIST_DATE = 2026-10-15
+RUST_SHA256_X86_64 = aded4e6c1d580415e7b594a3080d8e23e9cbe06f159f97e300aa6875211f71bf
+RUST_SHA256_AARCH64 = 703b190f0d723ae68985797f3bb5f62f01b1723f138464c6f30f32b766eb0abf
 
 ensure_rust_toolchain = \
+	set -eu; \
 	mkdir -p -m 0700 "$(CARGO_HOME)" "$(RUSTUP_HOME)"; \
-	if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; then \
-		echo "ERROR: rustc and cargo must be installed in the build environment" >&2; \
-		exit 1; \
+	if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1 || [ "$$(rustc -V | sed -E 's/rustc [0-9]+\.([0-9]+)\..*/\1/')" -lt 90 ]; then \
+		arch="$$(uname -m)"; \
+		case "$$arch" in \
+			x86_64) target="x86_64-unknown-linux-gnu"; sha256="$(RUST_SHA256_X86_64)" ;; \
+			aarch64) target="aarch64-unknown-linux-gnu"; sha256="$(RUST_SHA256_AARCH64)" ;; \
+			*) echo "ERROR: unsupported architecture $$arch for pinned Rust bootstrap" >&2; exit 1 ;; \
+		esac; \
+		tmp_dir="$(RUST_TOOLCHAIN_DIR).tmp"; \
+		rm -rf "$$tmp_dir" "$(RUST_TOOLCHAIN_DIR)"; \
+		mkdir -p -m 0700 "$$tmp_dir"; \
+		url="https://static.rust-lang.org/dist/$(RUST_DIST_DATE)/rust-$(RUST_VERSION)-$$target.tar.gz"; \
+		curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -fsSL "$$url" -o "$$tmp_dir/rust.tar.gz"; \
+		printf '%s  %s\n' "$$sha256" "$$tmp_dir/rust.tar.gz" | sha256sum -c -; \
+		tar -xzf "$$tmp_dir/rust.tar.gz" -C "$$tmp_dir"; \
+		"$$tmp_dir/rust-$(RUST_VERSION)-$$target/install.sh" \
+			--prefix="$(RUST_TOOLCHAIN_DIR)" \
+			--components="rustc,cargo,rust-std-$$target" \
+			--disable-ldconfig; \
+		rm -rf "$$tmp_dir"; \
 	fi; \
 	if [ "$$(rustc -V | sed -E 's/rustc [0-9]+\.([0-9]+)\..*/\1/')" -lt 90 ]; then \
 		echo "ERROR: rustc version >= 1.90 is required (found $$(rustc -V))" >&2; \
@@ -19,7 +43,7 @@ ensure_rust_toolchain = \
 	dh $@
 
 override_dh_auto_clean:
-	rm -rf target "$(CARGO_HOME)" "$(RUSTUP_HOME)"
+	rm -rf target "$(CARGO_HOME)" "$(RUSTUP_HOME)" "$(RUST_TOOLCHAIN_DIR)" "$(RUST_TOOLCHAIN_DIR).tmp"
 
 override_dh_auto_build:
 	$(ensure_rust_toolchain)
