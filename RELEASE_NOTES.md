@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.8
+## UltraDesk (Rust Edition) v1.0.9
 
-Release **v1.0.8** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Consolidate macOS TCC permission prompts, in-process CoreGraphics screen capture, and stable bundle ID signing.
+Release **v1.0.9** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Harden E2E anti-downgrade, host/portal/MCP security boundaries, verified updater checksums, and UltraViewer Windows 6.6.133 compatibility.
 
 ---
 
@@ -35,9 +35,10 @@ Release **v1.0.8** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Consol
 - **End-to-End Encryption (`UDE2E1`)**:
   - Ephemeral **X25519** key exchange with RFC 7748 low-order point rejection.
   - Dual-key directional **ChaCha20-Poly1305** AEAD (`Host -> Viewer` and `Viewer -> Host`) with monotonic 64-bit sequence numbers and replay/tamper rejection.
-  - Domain-separated SHA-256 temporary-password secret derivation (`|s2`) and 128-bit constant-time handshake confirmation tags.
-- **Local Portal & File Transfer Protection**:
-  - Per-launch 128-bit random `X-UltraDesk-Token` authentication and strict `Origin` / `Host` / `Sec-Fetch-Site` validation on the local HTTP control portal.
+  - Domain-separated SHA-256 temporary-password secret derivation (`|s2`), 128-bit constant-time handshake confirmation tags, and anti-downgrade enforcement with explicit legacy UltraViewer Windows 6.6.133 compatibility negotiation.
+- **Local Portal, MCP, & Auto-Updater Protection**:
+  - Per-launch 128-bit random `X-UltraDesk-Token` authentication, pre-body size/token guards, GUI bootstrap secret exchange, and strict `Origin` / `Host` / `Sec-Fetch-Site` validation on the local HTTP control portal and MCP server.
+  - Verified SHA-256 release checksum enforcement (`SHA256SUMS.txt`) and HTTPS-only release validation in the built-in auto-updater.
   - Explicit user acceptance required before writing incoming file transfers (`~/Downloads/UltraDesk`), with strict filename sanitization, size caps (`512 MiB`), and sender-side path confinement.
   - Strict `0700` config directory and `0600` atomic file permissions for XDG profiles and saved credentials.
   - Per-peer login failure throttling (`5` failed attempts -> `5`-minute lockout) and replay-protected login salts.
