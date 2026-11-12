@@ -18,6 +18,10 @@ import {
   isValidThemeMode,
   resolveActiveTheme,
 } from '../../domain/services/theme-resolver.domain-service';
+import {
+  normalizePartnerTarget,
+  sanitizePartnerAlias,
+} from '../../domain/services/partner-target.domain-service';
 import { WebAudioPlayerAdapter } from '../../infrastructure/audio/web-audio-player.adapter';
 import { PortalHttpAdapter } from '../../infrastructure/http/portal-http.adapter';
 import { NativeIpcAdapter } from '../../infrastructure/ipc/native-ipc.adapter';
@@ -84,6 +88,9 @@ export class UltraDeskSessionFacade {
       if (hydrated.savedCreds.remember) {
         if (hydrated.savedCreds.id) {
           this.store.partnerId.set(hydrated.savedCreds.id);
+        }
+        if (hydrated.savedCreds.alias) {
+          this.store.partnerAlias.set(hydrated.savedCreds.alias);
         }
       }
     }
@@ -277,34 +284,111 @@ export class UltraDeskSessionFacade {
     if (found) {
       this.store.partnerId.set(found.partner_id);
       this.store.partnerPass.set(found.password ?? '');
+      this.store.partnerAlias.set(found.alias ?? '');
+    }
+  }
+
+  applyPartnerIdInput(raw: string, normalizeNow: boolean): void {
+    const value = normalizeNow ? normalizePartnerTarget(raw) : raw;
+    this.store.partnerId.set(value);
+    const lookupId = normalizePartnerTarget(value);
+    if (lookupId.length > 0) {
+      const match = this.store.savedRemotes().find((r) => r.partner_id === lookupId);
+      if (match) {
+        if (match.alias) {
+          this.store.partnerAlias.set(match.alias);
+        }
+        if (!this.store.partnerPass() && match.password) {
+          this.store.partnerPass.set(match.password);
+        }
+      }
+    }
+  }
+
+  async savePartnerAlias(): Promise<void> {
+    const id = normalizePartnerTarget(this.store.partnerId());
+    if (!id) {
+      this.showNotice(this.store.t('err_missing_creds'), 'error');
+      return;
+    }
+    const alias = sanitizePartnerAlias(this.store.partnerAlias());
+    const pass = this.store.partnerPass().trim();
+    const remember = this.store.rememberCreds();
+
+    this.store.partnerId.set(id);
+    this.store.partnerAlias.set(alias);
+
+    const prevRemotes = this.store.savedRemotes();
+    const existing = prevRemotes.find((r) => r.partner_id === id);
+    const updatedEntry: SavedRemote = {
+      partner_id: id,
+      password: remember ? pass || existing?.password || '' : '',
+      alias,
+      last_used: Date.now(),
+    };
+    const nextRemotes = [updatedEntry, ...prevRemotes.filter((r) => r.partner_id !== id)].slice(
+      0,
+      20,
+    );
+    this.store.savedRemotes.set(nextRemotes);
+    this.storage.saveRemotesList(nextRemotes);
+    this.storage.saveCredentials(id, remember, alias);
+
+    try {
+      await this.http.postJson(
+        '/credentials',
+        {
+          id,
+          pass,
+          alias,
+          alias_explicit: true,
+          remember,
+        },
+        this.store.t('err_failed'),
+      );
+      this.showNotice(this.store.t('alias_saved_notice'), 'info', 2200);
+    } catch (e: unknown) {
+      this.showNotice(e, 'error');
     }
   }
 
   updateRememberCreds(remember: boolean): void {
     this.store.rememberCreds.set(remember);
-    const id = this.store.partnerId().trim();
+    const id = normalizePartnerTarget(this.store.partnerId());
     const pass = this.store.partnerPass().trim();
-    this.storage.saveCredentials(id, remember);
+    const alias = sanitizePartnerAlias(this.store.partnerAlias());
+    this.storage.saveCredentials(id, remember, alias);
     if (!remember) {
-      this.store.savedRemotes.set([]);
+      const retained = this.store
+        .savedRemotes()
+        .filter((r) => Boolean(r.alias && r.alias.trim().length > 0))
+        .map((r) => ({ ...r, password: '' }));
+      this.store.savedRemotes.set(retained);
+      this.storage.saveRemotesList(retained);
     }
     void this.http
-      .postJson('/credentials', { id, pass, remember }, this.store.t('err_failed'))
+      .postJson('/credentials', { id, pass, alias, remember }, this.store.t('err_failed'))
       .catch(() => undefined);
   }
 
   async connectRemote(): Promise<void> {
-    const id = this.store.partnerId().trim();
+    const id = normalizePartnerTarget(this.store.partnerId());
     const pass = this.store.partnerPass().trim();
+    const alias = sanitizePartnerAlias(this.store.partnerAlias());
     const remember = this.store.rememberCreds();
+    this.store.partnerId.set(id);
     if (!id || !pass) {
       this.showNotice(this.store.t('err_missing_creds'), 'error');
       return;
     }
-    this.storage.saveCredentials(id, remember);
+    this.storage.saveCredentials(id, remember, alias);
     this.store.initiatingConnect.set(true);
     try {
-      await this.http.postJson('/connect', { id, pass, remember }, this.store.t('err_failed'));
+      await this.http.postJson(
+        '/connect',
+        { id, pass, alias, remember },
+        this.store.t('err_failed'),
+      );
       this.setOverlay('none');
     } catch (e: unknown) {
       this.store.initiatingConnect.set(false);
@@ -894,17 +978,27 @@ export class UltraDeskSessionFacade {
         if (!this.store.partnerId() && (s.saved_partner_id || s.partner_id)) {
           this.store.partnerId.set(s.saved_partner_id || s.partner_id);
         }
+        if (!this.store.partnerAlias() && (s.saved_partner_alias || s.partner_alias)) {
+          this.store.partnerAlias.set(s.saved_partner_alias || s.partner_alias);
+        }
         if (!this.store.partnerPass() && s.saved_password) {
           this.store.partnerPass.set(s.saved_password);
         }
         if (!this.store.partnerId() && s.saved_remotes.length > 0) {
           this.store.partnerId.set(s.saved_remotes[0].partner_id);
+          if (!this.store.partnerAlias() && s.saved_remotes[0].alias) {
+            this.store.partnerAlias.set(s.saved_remotes[0].alias);
+          }
           if (!this.store.partnerPass()) {
             this.store.partnerPass.set(s.saved_remotes[0].password ?? '');
           }
         }
-        if (this.store.partnerId() || this.store.partnerPass()) {
-          this.storage.saveCredentials(this.store.partnerId(), this.store.rememberCreds());
+        if (this.store.partnerId() || this.store.partnerPass() || this.store.partnerAlias()) {
+          this.storage.saveCredentials(
+            this.store.partnerId(),
+            this.store.rememberCreds(),
+            this.store.partnerAlias(),
+          );
         }
       }
 

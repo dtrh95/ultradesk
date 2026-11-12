@@ -68,11 +68,14 @@ export class LocalPreferencesStorage {
           .map((item) => ({
             partner_id: String(item['partner_id']),
             password: '',
+            alias: typeof item['alias'] === 'string' ? item['alias'] : '',
           }));
         if (rawList.some((item) => isRecord(item) && 'password' in item)) {
           localStorage.setItem(
             'uv_saved_remotes_list',
-            JSON.stringify(savedRemotes.map((r) => ({ partner_id: r.partner_id }))),
+            JSON.stringify(
+              savedRemotes.map((r) => ({ partner_id: r.partner_id, alias: r.alias ?? '' })),
+            ),
           );
         }
       }
@@ -83,6 +86,7 @@ export class LocalPreferencesStorage {
         savedCreds = {
           id: remember && typeof rawCreds['id'] === 'string' ? rawCreds['id'] : '',
           remember,
+          alias: typeof rawCreds['alias'] === 'string' ? rawCreds['alias'] : '',
         };
         if ('pass' in rawCreds) {
           localStorage.setItem('uv_saved_creds', JSON.stringify(savedCreds));
@@ -130,20 +134,35 @@ export class LocalPreferencesStorage {
     try {
       localStorage.setItem(
         'uv_saved_remotes_list',
-        JSON.stringify(remotes.map((r) => ({ partner_id: r.partner_id }))),
+        JSON.stringify(remotes.map((r) => ({ partner_id: r.partner_id, alias: r.alias ?? '' }))),
       );
     } catch {
       void 0;
     }
   }
 
-  saveCredentials(id: string, remember: boolean): void {
+  saveCredentials(id: string, remember: boolean, alias = ''): void {
     try {
       if (remember) {
-        localStorage.setItem('uv_saved_creds', JSON.stringify({ id, remember: true }));
+        localStorage.setItem('uv_saved_creds', JSON.stringify({ id, alias, remember: true }));
       } else {
-        localStorage.setItem('uv_saved_creds', JSON.stringify({ id: '', remember: false }));
-        localStorage.removeItem('uv_saved_remotes_list');
+        localStorage.setItem(
+          'uv_saved_creds',
+          JSON.stringify({ id: '', alias: '', remember: false }),
+        );
+        const currentListRaw: unknown = JSON.parse(
+          localStorage.getItem('uv_saved_remotes_list') || '[]',
+        );
+        if (Array.isArray(currentListRaw)) {
+          const namedOnly = currentListRaw
+            .filter((item): item is Record<string, unknown> => isRecord(item))
+            .filter((item) => typeof item['alias'] === 'string' && item['alias'].trim().length > 0)
+            .map((item) => ({
+              partner_id: String(item['partner_id']),
+              alias: String(item['alias']),
+            }));
+          localStorage.setItem('uv_saved_remotes_list', JSON.stringify(namedOnly));
+        }
       }
     } catch {
       void 0;

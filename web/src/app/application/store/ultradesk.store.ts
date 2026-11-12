@@ -18,6 +18,10 @@ import {
 } from '../../domain/models/session.model';
 import { I18nKey, translate } from '../../domain/services/i18n.catalog';
 import { buildMonitorViewItems } from '../../domain/services/monitor-selection.domain-service';
+import {
+  formatPartnerIdForDisplay,
+  normalizePartnerTarget,
+} from '../../domain/services/partner-target.domain-service';
 
 @Injectable({ providedIn: 'root' })
 export class UltraDeskStore {
@@ -38,9 +42,35 @@ export class UltraDeskStore {
 
   readonly savedRemotes = signal<readonly SavedRemote[]>([]);
   readonly partnerId = signal<string>('');
+  readonly partnerAlias = signal<string>('');
   readonly partnerPass = signal<string>('');
   readonly rememberCreds = signal<boolean>(true);
   readonly clipInputText = signal<string>('');
+
+  readonly normalizedPartnerId = computed(() => normalizePartnerTarget(this.partnerId()));
+
+  readonly activeRemoteAlias = computed<string>(() => {
+    const snap = this.snapshot();
+    const snapAlias = snap?.partner_alias?.trim() ?? '';
+    if (snapAlias.length > 0) {
+      return snapAlias;
+    }
+    const currentId = normalizePartnerTarget(snap?.partner_id ?? '');
+    if (currentId.length > 0) {
+      const match = this.savedRemotes().find((r) => r.partner_id === currentId);
+      if (match?.alias && match.alias.trim().length > 0) {
+        return match.alias.trim();
+      }
+    }
+    const isConnecting = this.initiatingConnect() || (snap !== null && snap.state === 'connecting');
+    if (isConnecting) {
+      const draft = this.partnerAlias().trim();
+      if (draft.length > 0) {
+        return draft;
+      }
+    }
+    return '';
+  });
 
   readonly themeShortLabel = computed(
     () => THEME_SHORT_LABELS[this.themeMode()] ?? this.themeMode(),
@@ -64,19 +94,41 @@ export class UltraDeskStore {
       return translate(lang, 'status_lost');
     }
     if (this.initiatingConnect()) {
-      return translate(lang, 'status_initiating');
+      const alias = this.activeRemoteAlias();
+      return alias
+        ? translate(lang, 'status_connecting_named', { name: alias })
+        : translate(lang, 'status_initiating');
     }
     const snap = this.snapshot();
     if (!snap) {
       return translate(lang, 'nav_connect');
     }
-    const base =
-      snap.state === 'connected'
-        ? translate(lang, 'status_connected')
-        : snap.state === 'connecting'
-          ? translate(lang, 'status_connecting')
-          : translate(lang, 'nav_connect');
+    const alias = this.activeRemoteAlias();
+    let base: string;
+    if (snap.state === 'connected') {
+      base = alias
+        ? translate(lang, 'status_connected_named', { name: alias })
+        : translate(lang, 'status_connected');
+    } else if (snap.state === 'connecting') {
+      base = alias
+        ? translate(lang, 'status_connecting_named', { name: alias })
+        : translate(lang, 'status_connecting');
+    } else {
+      base = translate(lang, 'nav_connect');
+    }
     return base + (snap.error ? ` (${snap.error})` : '');
+  });
+
+  readonly activePartnerTooltip = computed<string | null>(() => {
+    const snap = this.snapshot();
+    const id = snap?.partner_id?.trim() || this.normalizedPartnerId();
+    const isEngaged =
+      this.initiatingConnect() ||
+      (snap !== null && (snap.state === 'connected' || snap.state === 'connecting'));
+    if (!isEngaged || !id) {
+      return null;
+    }
+    return `ID ${formatPartnerIdForDisplay(id)}`;
   });
 
   readonly activeE2e = computed(() => resolveActiveE2e(this.snapshot()));

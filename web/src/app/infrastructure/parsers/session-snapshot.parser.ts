@@ -122,6 +122,8 @@ function parseSavedRemotes(value: unknown): SavedRemote[] {
       list.push({
         partner_id: item['partner_id'],
         password: asString(item['password'], ''),
+        alias: asString(item['alias'], ''),
+        last_used: asNumber(item['last_used'], 0),
       });
     }
   }
@@ -238,7 +240,9 @@ export function parseSessionSnapshot(raw: unknown): SessionSnapshot {
     frames: asNumber(obj['frames'], 0),
     frame_version: asNumber(obj['frame_version'], asNumber(obj['frames'], 0)),
     partner_id: asString(obj['partner_id'], ''),
+    partner_alias: asString(obj['partner_alias'], ''),
     saved_partner_id: asString(obj['saved_partner_id'], ''),
+    saved_partner_alias: asString(obj['saved_partner_alias'], ''),
     saved_password: asString(obj['saved_password'], ''),
     remember_credentials: asBoolean(obj['remember_credentials'], true),
     saved_remotes: parseSavedRemotes(obj['saved_remotes']),

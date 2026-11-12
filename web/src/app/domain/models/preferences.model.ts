@@ -52,4 +52,5 @@ export interface NoticeBanner {
 export interface SavedCredentialsLocal {
   readonly id: string;
   readonly remember: boolean;
+  readonly alias?: string;
 }

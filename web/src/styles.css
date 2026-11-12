@@ -412,6 +412,14 @@ canvas#screen {
 #btnToggleConnect[data-conn-state='connecting']:not(.active):hover {
   border-color: var(--line-strong);
 }
+#status {
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
 .pill-sep {
   width: 1px;
   height: 18px;
@@ -576,11 +584,13 @@ canvas#screen {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--s-5);
+  overflow-y: auto;
+  padding: calc(44px + var(--s-4)) var(--s-5) var(--s-5);
 }
 .spotlight-card {
   width: 100%;
   max-width: 840px;
+  margin: auto 0;
   background: var(--surface);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-lg);
@@ -590,6 +600,13 @@ canvas#screen {
   overflow: hidden;
 }
 @media (max-width: 720px) {
+  #status {
+    max-width: 140px;
+  }
+  .modal-backdrop {
+    align-items: flex-start;
+    padding: calc(44px + var(--s-3)) var(--s-3) var(--s-4);
+  }
   .spotlight-card {
     grid-template-columns: 1fr;
   }

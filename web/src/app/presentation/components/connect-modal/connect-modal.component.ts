@@ -1,5 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
 import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-session.facade';
+import { SavedRemote } from '../../../domain/models/session.model';
+import { formatPartnerIdForDisplay } from '../../../domain/services/partner-target.domain-service';
 
 @Component({
   selector: 'ud-connect-modal',
@@ -256,6 +258,8 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
                 [attr.placeholder]="store.t('partner_id_placeholder')"
                 [value]="store.partnerId()"
                 (input)="onPartnerIdInput($event)"
+                (paste)="onPartnerIdPaste($event)"
+                (blur)="onPartnerIdBlur()"
               />
             </div>
             <div class="col">
@@ -270,6 +274,32 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
                 [value]="store.partnerPass()"
                 (input)="onPartnerPassInput($event)"
               />
+            </div>
+          </div>
+          <div class="col">
+            <label class="field-label" for="partnerAlias">{{
+              store.t('partner_alias_label')
+            }}</label>
+            <div class="row">
+              <input
+                id="partnerAlias"
+                type="text"
+                maxlength="64"
+                [attr.placeholder]="store.t('partner_alias_placeholder')"
+                [value]="store.partnerAlias()"
+                (input)="onPartnerAliasInput($event)"
+                (keydown.enter)="onSaveAlias()"
+              />
+              <button
+                id="btnSaveAlias"
+                class="secondary"
+                type="button"
+                [disabled]="!store.normalizedPartnerId()"
+                [attr.title]="store.t('save_alias_title')"
+                (click)="onSaveAlias()"
+              >
+                {{ store.t('save') }}
+              </button>
             </div>
           </div>
           <div class="row">
@@ -300,9 +330,9 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
               @for (remote of store.savedRemotes(); track remote.partner_id) {
                 <option
                   [value]="remote.partner_id"
-                  [selected]="remote.partner_id === store.partnerId().trim()"
+                  [selected]="remote.partner_id === store.normalizedPartnerId()"
                 >
-                  {{ remote.partner_id }}
+                  {{ remoteOptionLabel(remote) }}
                 </option>
               }
             </select>
@@ -382,7 +412,26 @@ export class ConnectModalComponent {
 
   protected onPartnerIdInput(event: Event): void {
     const target = event.target as HTMLInputElement | null;
-    this.store.partnerId.set(target?.value ?? '');
+    this.facade.applyPartnerIdInput(target?.value ?? '', false);
+  }
+
+  protected onPartnerIdPaste(event: ClipboardEvent): void {
+    event.preventDefault();
+    const pasted = event.clipboardData?.getData('text') ?? '';
+    this.facade.applyPartnerIdInput(pasted, true);
+  }
+
+  protected onPartnerIdBlur(): void {
+    this.facade.applyPartnerIdInput(this.store.partnerId(), true);
+  }
+
+  protected onPartnerAliasInput(event: Event): void {
+    const target = event.target as HTMLInputElement | null;
+    this.store.partnerAlias.set(target?.value ?? '');
+  }
+
+  protected onSaveAlias(): void {
+    void this.facade.savePartnerAlias();
   }
 
   protected onPartnerPassInput(event: Event): void {
@@ -400,5 +449,13 @@ export class ConnectModalComponent {
     if (target) {
       this.facade.selectSavedRemote(target.value);
     }
+  }
+
+  protected remoteOptionLabel(remote: SavedRemote): string {
+    const alias = remote.alias?.trim();
+    if (alias && alias.length > 0) {
+      return alias;
+    }
+    return formatPartnerIdForDisplay(remote.partner_id);
   }
 }

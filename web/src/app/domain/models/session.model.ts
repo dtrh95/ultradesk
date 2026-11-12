@@ -5,6 +5,8 @@ export type MonitorRect = readonly [left: number, top: number, right: number, bo
 export interface SavedRemote {
   readonly partner_id: string;
   readonly password?: string;
+  readonly alias?: string;
+  readonly last_used?: number;
 }
 
 export type TransferDirection = 'send' | 'receive';
@@ -81,7 +83,9 @@ export interface SessionSnapshot {
   readonly frames: number;
   readonly frame_version: number;
   readonly partner_id: string;
+  readonly partner_alias: string;
   readonly saved_partner_id: string;
+  readonly saved_partner_alias: string;
   readonly saved_password: string;
   readonly remember_credentials: boolean;
   readonly saved_remotes: readonly SavedRemote[];

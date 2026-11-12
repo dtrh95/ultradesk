@@ -32,6 +32,7 @@ import { UltraDeskSessionFacade } from '../../../application/facade/ultradesk-se
             class="pill-btn"
             [class.active]="store.overlay() === 'connect'"
             type="button"
+            [attr.title]="store.activePartnerTooltip()"
             [attr.data-conn-state]="store.connectionState()"
             (click)="onToggleConnect()"
           >
