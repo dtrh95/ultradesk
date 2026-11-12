@@ -40,7 +40,10 @@ pub fn resolve_mcp_target(
         }
         "host" => {
             if origin == McpTransportOrigin::Network {
-                Err("Local host OS capture and input are disabled over network MCP; use stdio MCP".to_string())
+                Err(
+                    "Local host OS capture and input are disabled over network MCP; use stdio MCP"
+                        .to_string(),
+                )
             } else {
                 Ok(true)
             }
@@ -523,10 +526,7 @@ impl McpTool {
     }
 }
 
-pub fn sanitized_mcp_snapshot(
-    session: &ControlSession,
-    origin: McpTransportOrigin,
-) -> Value {
+pub fn sanitized_mcp_snapshot(session: &ControlSession, origin: McpTransportOrigin) -> Value {
     let mut val = serde_json::to_value(session.snapshot()).unwrap_or_else(|_| json!({}));
     if let Some(obj) = val.as_object_mut() {
         obj.insert("saved_password".to_string(), json!(""));
@@ -549,7 +549,6 @@ pub fn sanitized_mcp_snapshot(
 }
 
 impl McpTool {
-
     pub fn execute(
         self,
         session: &ControlSession,
@@ -601,9 +600,12 @@ impl McpTool {
                         .chars()
                         .filter(|c| !c.is_whitespace())
                         .collect();
-                    let matches_self = !host_id.is_empty() && compact == host_id.to_ascii_lowercase();
+                    let matches_self =
+                        !host_id.is_empty() && compact == host_id.to_ascii_lowercase();
                     if is_loopback || matches_self {
-                        return Err("Loopback or self connection is disabled over network MCP".to_string());
+                        return Err(
+                            "Loopback or self connection is disabled over network MCP".to_string()
+                        );
                     }
                 }
                 let remember = args
@@ -687,7 +689,11 @@ impl McpTool {
                 ])
             }
             Self::ListMonitors => {
-                if let Some(src) = args.get("source").or_else(|| args.get("target")).and_then(Value::as_str) {
+                if let Some(src) = args
+                    .get("source")
+                    .or_else(|| args.get("target"))
+                    .and_then(Value::as_str)
+                {
                     let _ = resolve_mcp_target(src, origin, remote_connected)?;
                 }
                 let host = session.host_status();
@@ -784,7 +790,8 @@ impl McpTool {
                     y,
                     ..Default::default()
                 };
-                let routed = dispatch_input_to_target(session, target, evt, origin, remote_connected)?;
+                let routed =
+                    dispatch_input_to_target(session, target, evt, origin, remote_connected)?;
                 Ok(vec![json!({
                     "type": "text",
                     "text": serde_json::to_string(&json!({
@@ -1894,7 +1901,10 @@ fn read_bounded_stdio_line<R: BufRead>(
     max_len: usize,
 ) -> std::io::Result<Option<String>> {
     let mut buf = Vec::new();
-    match reader.take((max_len + 1) as u64).read_until(b'\n', &mut buf) {
+    match reader
+        .take((max_len + 1) as u64)
+        .read_until(b'\n', &mut buf)
+    {
         Ok(0) => Ok(None),
         Ok(_) => {
             if buf.len() > max_len && !buf.ends_with(b"\n") {
@@ -1917,11 +1927,7 @@ pub fn run_stdio_mcp_loop<R: BufRead, W: Write>(
 ) -> std::io::Result<()> {
     const MAX_STDIO_LINE_BYTES: usize = 4 * 1024 * 1024;
     const MAX_STDIO_BODY_BYTES: usize = 4 * 1024 * 1024;
-    loop {
-        let line = match read_bounded_stdio_line(&mut reader, MAX_STDIO_LINE_BYTES)? {
-            Some(l) => l,
-            None => break,
-        };
+    while let Some(line) = read_bounded_stdio_line(&mut reader, MAX_STDIO_LINE_BYTES)? {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -1931,11 +1937,7 @@ pub fn run_stdio_mcp_loop<R: BufRead, W: Write>(
             .or_else(|| trimmed.strip_prefix("content-length:"))
         {
             let content_len = len_str.trim().parse::<usize>().unwrap_or(0);
-            loop {
-                let hdr_line = match read_bounded_stdio_line(&mut reader, 8192)? {
-                    Some(l) => l,
-                    None => break,
-                };
+            while let Some(hdr_line) = read_bounded_stdio_line(&mut reader, 8192)? {
                 if hdr_line == "\r\n" || hdr_line == "\n" {
                     break;
                 }
@@ -2186,12 +2188,7 @@ impl McpClientPermit {
             if cur >= MAX_MCP_CLIENTS {
                 return None;
             }
-            match active.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
+            match active.compare_exchange_weak(cur, cur + 1, Ordering::SeqCst, Ordering::SeqCst) {
                 Ok(_) => return Some(Self(Arc::clone(active))),
                 Err(actual) => cur = actual,
             }
@@ -2352,7 +2349,8 @@ fn handle_mcp_tcp_client(
                 }
                 header_count += 1;
                 total_header_bytes = total_header_bytes.saturating_add(line.len());
-                if header_count > MAX_MCP_HEADERS || total_header_bytes > MAX_MCP_HEADER_BLOCK_BYTES {
+                if header_count > MAX_MCP_HEADERS || total_header_bytes > MAX_MCP_HEADER_BLOCK_BYTES
+                {
                     header_error = true;
                     break;
                 }
@@ -2427,7 +2425,10 @@ fn handle_mcp_tcp_client(
     }
 
     if method == "POST" {
-        let ct = headers.get("content-type").map(|s| s.as_str()).unwrap_or("");
+        let ct = headers
+            .get("content-type")
+            .map(|s| s.as_str())
+            .unwrap_or("");
         if !ct.starts_with("application/json") {
             let resp = "HTTP/1.1 415 Unsupported Media Type\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
             let _ = stream.write_all(resp.as_bytes());
@@ -2438,7 +2439,8 @@ fn handle_mcp_tcp_client(
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
         if content_len > 2 * 1024 * 1024 {
-            let resp = "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            let resp =
+                "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
             let _ = stream.write_all(resp.as_bytes());
             return stream.flush();
         }
@@ -2496,36 +2498,18 @@ mod tests {
     #[test]
     fn test_resolve_mcp_target_semantics() {
         assert!(resolve_mcp_target("remote", McpTransportOrigin::Stdio, false).is_err());
-        assert_eq!(
-            resolve_mcp_target("remote", McpTransportOrigin::Stdio, true).unwrap(),
-            false
-        );
-        assert_eq!(
-            resolve_mcp_target("remote", McpTransportOrigin::Network, true).unwrap(),
-            false
-        );
+        assert!(!resolve_mcp_target("remote", McpTransportOrigin::Stdio, true).unwrap());
+        assert!(!resolve_mcp_target("remote", McpTransportOrigin::Network, true).unwrap());
         assert!(resolve_mcp_target("remote", McpTransportOrigin::Network, false).is_err());
 
         assert!(resolve_mcp_target("host", McpTransportOrigin::Network, true).is_err());
         assert!(resolve_mcp_target("host", McpTransportOrigin::Network, false).is_err());
-        assert_eq!(
-            resolve_mcp_target("host", McpTransportOrigin::Stdio, false).unwrap(),
-            true
-        );
+        assert!(resolve_mcp_target("host", McpTransportOrigin::Stdio, false).unwrap());
 
         assert!(resolve_mcp_target("auto", McpTransportOrigin::Network, false).is_err());
-        assert_eq!(
-            resolve_mcp_target("auto", McpTransportOrigin::Network, true).unwrap(),
-            false
-        );
-        assert_eq!(
-            resolve_mcp_target("auto", McpTransportOrigin::Stdio, false).unwrap(),
-            true
-        );
-        assert_eq!(
-            resolve_mcp_target("auto", McpTransportOrigin::Stdio, true).unwrap(),
-            false
-        );
+        assert!(!resolve_mcp_target("auto", McpTransportOrigin::Network, true).unwrap());
+        assert!(resolve_mcp_target("auto", McpTransportOrigin::Stdio, false).unwrap());
+        assert!(!resolve_mcp_target("auto", McpTransportOrigin::Stdio, true).unwrap());
 
         assert!(resolve_mcp_target("invalid", McpTransportOrigin::Stdio, true).is_err());
     }
@@ -2544,12 +2528,15 @@ mod tests {
         assert_eq!(net_snap["clipboard_remote"], "");
         assert_eq!(net_snap["host_status"]["temp_password"], "");
 
-        let net_status = McpTool::ManageHost.execute(
-            &session,
-            &json!({ "action": "status" }),
-            McpTransportOrigin::Network,
-        ).unwrap();
-        let status_parsed: Value = serde_json::from_str(&net_status[0]["text"].as_str().unwrap()).unwrap();
+        let net_status = McpTool::ManageHost
+            .execute(
+                &session,
+                &json!({ "action": "status" }),
+                McpTransportOrigin::Network,
+            )
+            .unwrap();
+        let status_parsed: Value =
+            serde_json::from_str(net_status[0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(status_parsed["temp_password"], "");
 
         let net_start = McpTool::ManageHost.execute(
@@ -2580,7 +2567,8 @@ mod tests {
         let handle = server.spawn(listener);
 
         let mut s1 = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s1.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+        s1.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
         let mut r1 = String::new();
         s1.read_to_string(&mut r1).unwrap();
         assert!(r1.starts_with("HTTP/1.1 401 Unauthorized"));

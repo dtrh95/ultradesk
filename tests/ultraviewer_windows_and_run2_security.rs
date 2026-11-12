@@ -18,29 +18,18 @@ use ultradesk_rust::protocol::{
     decode_target_route, encode_byte_array_fields, is_public_routable_ipv4, md5_hex_lower,
     TargetRoute,
 };
-use ultradesk_rust::screen::{
-    DisplayLayout, MonitorRect, RGB555Screen, ZstdDictionaryDecoder,
-};
+use ultradesk_rust::screen::{DisplayLayout, MonitorRect, RGB555Screen, ZstdDictionaryDecoder};
 use ultradesk_rust::server::{encode_base64, PortalServer};
 use ultradesk_rust::session::{
     ControlSession, RegistrationProfile, DEFAULT_PARTNER_JSON, DEFAULT_REGISTRATION_JSON,
 };
 
 fn build_valid_16x16_cur_png() -> Vec<u8> {
-    let mut rgba = vec![0u8; 16 * 16 * 4];
-    for px in rgba.chunks_exact_mut(4) {
-        px.copy_from_slice(&[0x20, 0x90, 0xF0, 0xFF]);
-    }
+    let rgba = [0x20u8, 0x90, 0xF0, 0xFF].repeat(16 * 16);
     let mut png = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut png);
-    image::ImageEncoder::write_image(
-        encoder,
-        &rgba,
-        16,
-        16,
-        image::ExtendedColorType::Rgba8,
-    )
-    .unwrap();
+    image::ImageEncoder::write_image(encoder, &rgba, 16, 16, image::ExtendedColorType::Rgba8)
+        .unwrap();
 
     let mut cur = Vec::with_capacity(22 + png.len());
     cur.extend_from_slice(&0u16.to_le_bytes());
@@ -72,7 +61,10 @@ fn test_simulated_ultraviewer_windows_6_6_133_full_session_compatibility() {
     assert_eq!(reg.terms.get(8).map(String::as_str), Some("BC241128BDE1"));
 
     let default_partner: Value = serde_json::from_str(DEFAULT_PARTNER_JSON).unwrap();
-    assert_eq!(default_partner["request_terms"].as_array().map(Vec::len), Some(17));
+    assert_eq!(
+        default_partner["request_terms"].as_array().map(Vec::len),
+        Some(17)
+    );
     assert_eq!(default_partner["request_terms"][1], json!(""));
     assert_eq!(default_partner["password"], json!(""));
 
@@ -165,8 +157,7 @@ fn test_simulated_ultraviewer_windows_6_6_133_full_session_compatibility() {
     .unwrap();
     session.handle_session_payload(&cursor_shape_pkt);
 
-    let cursor_sel_pkt =
-        encode_byte_array_fields(&[&[3u8][..], &424242i32.to_le_bytes()]).unwrap();
+    let cursor_sel_pkt = encode_byte_array_fields(&[&[3u8][..], &424242i32.to_le_bytes()]).unwrap();
     session.handle_session_payload(&cursor_sel_pkt);
 
     let audio_pkt = encode_audio_packet(WaveSource::PcSound, &[0x55u8; 60], false).unwrap();
@@ -241,16 +232,12 @@ fn raw_http(port: u16, req: &str) -> String {
 #[test]
 fn test_portal_http_pre_body_guards_bootstrap_cookie_and_header_hardening() {
     let session = ControlSession::new();
-    let login_pkt = encode_byte_array_fields(&[
-        b"\x00\x00",
-        &1280i32.to_le_bytes(),
-        &720i32.to_le_bytes(),
-    ])
-    .unwrap();
+    let login_pkt =
+        encode_byte_array_fields(&[b"\x00\x00", &1280i32.to_le_bytes(), &720i32.to_le_bytes()])
+            .unwrap();
     session.handle_session_payload(&login_pkt);
 
-    let (mut portal, listener) =
-        PortalServer::bind("127.0.0.1", 0, session.clone(), None).unwrap();
+    let (mut portal, listener) = PortalServer::bind("127.0.0.1", 0, session.clone(), None).unwrap();
     let bootstrap = portal.enable_gui_bootstrap();
     let port = portal.port;
     let viewer_token = portal.viewer_token.clone();
@@ -385,7 +372,9 @@ fn test_portal_http_pre_body_guards_bootstrap_cookie_and_header_hardening() {
     assert!(dl_resp.starts_with("HTTP/1.1 200 OK"));
     let headers_part = dl_resp.split("\r\n\r\n").next().unwrap_or("");
     assert!(
-        !headers_part.to_ascii_lowercase().contains("\nx-injected-header:"),
+        !headers_part
+            .to_ascii_lowercase()
+            .contains("\nx-injected-header:"),
         "CRLF header injection in Content-Disposition must be sanitized: {}",
         headers_part
     );
@@ -399,13 +388,7 @@ fn test_mcp_mandatory_auth_network_isolation_and_secret_redaction() {
     let session = ControlSession::new();
     let _ = session.update_saved_credentials("987654321", "TopSecretPartnerPass!", true);
 
-    assert!(McpServer::bind(
-        "127.0.0.1",
-        0,
-        session.clone(),
-        Some("   ".to_string())
-    )
-    .is_err());
+    assert!(McpServer::bind("127.0.0.1", 0, session.clone(), Some("   ".to_string())).is_err());
 
     let (mcp_srv, listener) = McpServer::bind("127.0.0.1", 0, session.clone(), None).unwrap();
     let generated_token = mcp_srv.auth_token().to_string();
@@ -646,7 +629,10 @@ fn test_leaf_and_host_run2_security_invariants() {
     );
     let actions = host_core.handle_packet(master_login.as_bytes(), Instant::now());
     assert_eq!(host_core.phase, HostPhase::Approval);
-    assert!(matches!(actions.as_slice(), [HostAction::PromptApproval(_)]));
+    assert!(matches!(
+        actions.as_slice(),
+        [HostAction::PromptApproval(_)]
+    ));
 
     let _ = std::fs::remove_dir_all(&ft_dir);
 }

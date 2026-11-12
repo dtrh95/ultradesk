@@ -364,11 +364,7 @@ impl RegistrationTransport {
         self.channel = if use_tls {
             let insecure = allow_insecure_broker_tls();
             let connector = build_tls_connector(insecure)?;
-            let tls_domain = if insecure {
-                TLS_TARGET_HOST
-            } else {
-                host
-            };
+            let tls_domain = if insecure { TLS_TARGET_HOST } else { host };
             let tls = connector
                 .connect(tls_domain, raw)
                 .map_err(|e| format!("TLS handshake failed: {}", e))?;
@@ -1488,7 +1484,8 @@ impl ControlSession {
             inner.files.chat_messages.push(bounded.to_string());
         }
         if inner.files.chat_messages.len() > crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES {
-            let overflow = inner.files.chat_messages.len() - crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES;
+            let overflow =
+                inner.files.chat_messages.len() - crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES;
             inner.files.chat_messages.drain(0..overflow);
         }
         if let Some(clip_text) = host_clip {
@@ -1777,15 +1774,17 @@ impl ControlSession {
                 let wrote_ok = set_linux_system_clipboard(&text);
                 let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.login_acknowledged {
-                    guard.clipboard.apply_remote_clipboard_update(&text, wrote_ok);
-                    guard.state.last_message = format!(
-                        "Clipboard synced from remote ({} chars)",
-                        text.len()
-                    );
+                    guard
+                        .clipboard
+                        .apply_remote_clipboard_update(&text, wrote_ok);
+                    guard.state.last_message =
+                        format!("Clipboard synced from remote ({} chars)", text.len());
                     Self::sync_state_fields(&mut guard);
                 }
             } else {
-                guard.clipboard.apply_remote_clipboard_update(&clip_msg.text, false);
+                guard
+                    .clipboard
+                    .apply_remote_clipboard_update(&clip_msg.text, false);
                 guard.state.last_message = format!(
                     "Clipboard synced from remote ({} chars)",
                     clip_msg.text.len()
@@ -2000,7 +1999,8 @@ impl ControlSession {
         let is_utf16 = is_utf16_string_packet(&pkt);
         guard.files.chat_messages.push(format!("Me: {}", bounded));
         if guard.files.chat_messages.len() > crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES {
-            let overflow = guard.files.chat_messages.len() - crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES;
+            let overflow =
+                guard.files.chat_messages.len() - crate::file_transfer::MAX_CHAT_HISTORY_MESSAGES;
             guard.files.chat_messages.drain(0..overflow);
         }
         let _ = guard.host_session.send_chat(bounded);
@@ -2313,11 +2313,7 @@ impl ControlSession {
         };
         let (e2e_wire, e2e_state) = if !partner.password.is_empty() && (is_temp_pw || requires_e2e)
         {
-            crate::e2e::create_viewer_offer_for_password(
-                &auth.salt,
-                &partner.password,
-                "",
-            )
+            crate::e2e::create_viewer_offer_for_password(&auth.salt, &partner.password, "")
         } else {
             (String::new(), crate::e2e::E2eNegotiationState::Disabled)
         };
@@ -2632,11 +2628,7 @@ impl ControlSession {
         };
         let (e2e_wire, e2e_state) = if !partner.password.is_empty() && (is_temp_pw || requires_e2e)
         {
-            crate::e2e::create_viewer_offer_for_password(
-                &auth.salt,
-                &partner.password,
-                "",
-            )
+            crate::e2e::create_viewer_offer_for_password(&auth.salt, &partner.password, "")
         } else {
             (String::new(), crate::e2e::E2eNegotiationState::Disabled)
         };
@@ -2753,7 +2745,11 @@ impl ControlSession {
             let v = version
                 .map(str::to_string)
                 .or_else(|| guard.update_engine.snapshot().latest_version);
-            (guard.update_engine.clone(), v, guard.credentials_path.clone())
+            (
+                guard.update_engine.clone(),
+                v,
+                guard.credentials_path.clone(),
+            )
         };
         engine.set_dismissed_version(target_ver.clone());
         let mut creds = load_saved_credentials_from(&creds_path);
@@ -2817,7 +2813,10 @@ mod tests {
 
         session.handle_session_payload(&raw_kind_22);
         assert_eq!(session.snapshot().state, "disconnected");
-        assert_eq!(session.snapshot().last_message, "Sai mật khẩu (Wrong Password)");
+        assert_eq!(
+            session.snapshot().last_message,
+            "Sai mật khẩu (Wrong Password)"
+        );
 
         {
             let mut guard = session.inner.lock().unwrap();
@@ -2834,10 +2833,16 @@ mod tests {
 
         session.handle_session_payload(&raw_kind_22);
         assert_eq!(session.snapshot().state, "disconnected");
-        assert_ne!(session.snapshot().last_message, "Sai mật khẩu (Wrong Password)");
+        assert_ne!(
+            session.snapshot().last_message,
+            "Sai mật khẩu (Wrong Password)"
+        );
         {
             let guard = session.inner.lock().unwrap();
-            assert!(!matches!(guard.e2e, crate::e2e::E2eNegotiationState::Disabled));
+            assert!(!matches!(
+                guard.e2e,
+                crate::e2e::E2eNegotiationState::Disabled
+            ));
         }
     }
 
@@ -2948,12 +2953,9 @@ mod tests {
         .unwrap();
         session.handle_session_payload(&dummy_frame);
 
-        let audio_pkt = crate::audio::encode_audio_packet(
-            crate::audio::WaveSource::PcSound,
-            &[0u8; 10],
-            false,
-        )
-        .unwrap();
+        let audio_pkt =
+            crate::audio::encode_audio_packet(crate::audio::WaveSource::PcSound, &[0u8; 10], false)
+                .unwrap();
         session.handle_session_payload(&audio_pkt);
 
         let clip_pkt = crate::clipboard::encode_clipboard_packet(1, "secret_clip").unwrap();

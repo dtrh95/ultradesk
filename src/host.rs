@@ -1253,18 +1253,10 @@ impl Capturer for HeadlessCapturer {
     }
 }
 
+#[derive(Default)]
 pub struct HeadlessInjector {
     #[cfg(test)]
     pub injected_packets: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-
-impl Default for HeadlessInjector {
-    fn default() -> Self {
-        Self {
-            #[cfg(test)]
-            injected_packets: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
 }
 
 impl HeadlessInjector {
@@ -1346,9 +1338,8 @@ impl Injector for X11CommandInjector {
                 },
                 HostInputEvent::Key { kind, vk, ch, .. } => {
                     if vk == VK_PACKET && (kind == KEY_DOWN || kind == SYS_KEY_DOWN) && ch >= 0x20 {
-                        char::from_u32(ch as u32).map(|c| {
-                            vec!["type".to_string(), "--".to_string(), c.to_string()]
-                        })
+                        char::from_u32(ch as u32)
+                            .map(|c| vec!["type".to_string(), "--".to_string(), c.to_string()])
                     } else {
                         None
                     }
@@ -4116,7 +4107,8 @@ impl HostSession {
                         for frame in frames {
                             if let Ok(Some(pkt)) = decode_transport_body(&frame) {
                                 if pkt.kind == "relay" || pkt.kind == "direct" {
-                                    if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
+                                    if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag)
+                                    {
                                         if active_peer.is_some() {
                                             if decoded.starts_with(b"login:") {
                                                 if let Ok(auth_fail_frame) = encode_relay_frame(
@@ -4125,7 +4117,9 @@ impl HostSession {
                                                     pending[i].peer_port,
                                                     0,
                                                 ) {
-                                                    let _ = pending[i].stream.write_all(&auth_fail_frame);
+                                                    let _ = pending[i]
+                                                        .stream
+                                                        .write_all(&auth_fail_frame);
                                                 }
                                                 drop_peer = true;
                                                 break;
@@ -4160,7 +4154,9 @@ impl HostSession {
                                                         if !s.lan_viewer_active
                                                             && s.core.phase == HostPhase::None
                                                         {
-                                                            std::mem::take(&mut s.outbound_peer_packets)
+                                                            std::mem::take(
+                                                                &mut s.outbound_peer_packets,
+                                                            )
                                                         } else {
                                                             Vec::new()
                                                         }
@@ -4239,7 +4235,8 @@ impl HostSession {
                         for frame in active.rx_frames.feed(&buf[..n]) {
                             if let Ok(Some(pkt)) = decode_transport_body(&frame) {
                                 if pkt.kind == "relay" || pkt.kind == "direct" {
-                                    if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag) {
+                                    if let Some(decoded) = decode_peer_payload(&pkt.data, pkt.flag)
+                                    {
                                         let _ = self.handle_peer_payload_from_peer(
                                             &active.throttle_key,
                                             &decoded,
@@ -4285,7 +4282,8 @@ impl HostSession {
                 };
                 for pkt in outbound {
                     had_activity = true;
-                    if let Ok(frame) = encode_relay_frame(&pkt, &active.wire_ip, active.peer_port, 0)
+                    if let Ok(frame) =
+                        encode_relay_frame(&pkt, &active.wire_ip, active.peer_port, 0)
                     {
                         if active.stream.write_all(&frame).is_err() {
                             disconnected = true;
@@ -5728,8 +5726,7 @@ mod tests {
             HostAction::SendPeer(p) => p.clone(),
             _ => panic!("expected screen_init"),
         };
-        let legacy_init_fields =
-            decode_byte_array_fields_checked(&screen_init, Some(11)).unwrap();
+        let legacy_init_fields = decode_byte_array_fields_checked(&screen_init, Some(11)).unwrap();
         assert!(legacy_init_fields[3].is_empty());
     }
 
@@ -6076,10 +6073,7 @@ mod tests {
 
     #[test]
     fn test_peer_throttles_saturation_preserves_locked_entries_and_ipv6_bucket() {
-        assert_eq!(
-            peer_throttle_key("192.0.2.1".parse().unwrap()),
-            "192.0.2.1"
-        );
+        assert_eq!(peer_throttle_key("192.0.2.1".parse().unwrap()), "192.0.2.1");
         assert_eq!(
             peer_throttle_key("::ffff:192.0.2.1".parse().unwrap()),
             "192.0.2.1"
@@ -6116,7 +6110,11 @@ mod tests {
         }
         {
             let s = session.inner.lock().unwrap();
-            assert!(s.peer_throttles.get(attacker_ip).unwrap().is_locked(Instant::now()));
+            assert!(s
+                .peer_throttles
+                .get(attacker_ip)
+                .unwrap()
+                .is_locked(Instant::now()));
         }
 
         for i in 0..300 {
@@ -6127,8 +6125,14 @@ mod tests {
         {
             let s = session.inner.lock().unwrap();
             let throttle = s.peer_throttles.get(attacker_ip);
-            assert!(throttle.is_some(), "attacker throttle should not be evicted");
-            assert!(throttle.unwrap().is_locked(Instant::now()), "attacker must remain locked");
+            assert!(
+                throttle.is_some(),
+                "attacker throttle should not be evicted"
+            );
+            assert!(
+                throttle.unwrap().is_locked(Instant::now()),
+                "attacker must remain locked"
+            );
         }
     }
 
@@ -6146,8 +6150,7 @@ mod tests {
                 bottom: 4,
             }],
         };
-        let host =
-            HostSession::new("pass1234", None, layout, DesktopBackend::headless(4, 4));
+        let host = HostSession::new("pass1234", None, layout, DesktopBackend::headless(4, 4));
         host.set_auto_approve(true);
         let status = host.start_with_endpoint("127.0.0.1", 1, false);
         let port = status.lan_port;
@@ -6166,9 +6169,8 @@ mod tests {
             .set_read_timeout(Some(Duration::from_millis(500)))
             .unwrap();
         let login_payload = sample_login_payload("pass1234", "2", 1);
-        let utf16le = |s: &str| -> Vec<u8> {
-            s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
-        };
+        let utf16le =
+            |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
         let frame = encode_relay_frame(
             &utf16le(&String::from_utf8(login_payload).unwrap()),
             "127.0.0.1",
@@ -6268,17 +6270,21 @@ mod tests {
             );
         }
 
-        assert!(
-            parse_relay_notification_with_policy("11:127.0.0.1:unused:localhost", "", "", true)
-                .is_some()
-        );
-        assert!(
-            parse_relay_notification_with_policy("11:127.0.0.1:unused:localhost", "", "", false)
-                .is_none()
-        );
-        assert!(
-            parse_relay_notification("11:103.56.158.44:unused:localhost").is_none()
-        );
+        assert!(parse_relay_notification_with_policy(
+            "11:127.0.0.1:unused:localhost",
+            "",
+            "",
+            true
+        )
+        .is_some());
+        assert!(parse_relay_notification_with_policy(
+            "11:127.0.0.1:unused:localhost",
+            "",
+            "",
+            false
+        )
+        .is_none());
+        assert!(parse_relay_notification("11:103.56.158.44:unused:localhost").is_none());
 
         let bad_host = "11:103.56.158.44:unused:evil..com";
         assert!(parse_relay_notification(bad_host).is_none());

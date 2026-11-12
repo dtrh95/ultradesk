@@ -192,10 +192,10 @@ impl DisplayLayout {
             virtual_top = virtual_top.min(m.top);
         }
         if monitors.is_empty() {
-            let r = (virtual_left as i64 + width as i64)
-                .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-            let b = (virtual_top as i64 + height as i64)
-                .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            let r =
+                (virtual_left as i64 + width as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            let b =
+                (virtual_top as i64 + height as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
             monitors.push(MonitorRect {
                 left: virtual_left,
                 top: virtual_top,
@@ -1186,7 +1186,13 @@ impl RGB555Screen {
             let h = i16::from_le_bytes([chunk[6], chunk[7]]) as i32;
             let key = i32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
 
-            if w <= 0 || h <= 0 || w > MAX_CACHED_TILE_DIM || h > MAX_CACHED_TILE_DIM || x < 0 || y < 0 {
+            if w <= 0
+                || h <= 0
+                || w > MAX_CACHED_TILE_DIM
+                || h > MAX_CACHED_TILE_DIM
+                || x < 0
+                || y < 0
+            {
                 continue;
             }
             let cw = (w as u32).min(self.canvas.width.saturating_sub(x as u32));
@@ -1534,8 +1540,7 @@ mod tests {
         assert_eq!(layout.monitors[0].right, 0);
         assert_eq!(layout.monitors[0].width(), 1920);
 
-        let mut screen =
-            RGB555Screen::new((3840, 1080), ZstdDictionaryDecoder::default(), 100, 32);
+        let mut screen = RGB555Screen::new((3840, 1080), ZstdDictionaryDecoder::default(), 100, 32);
         screen.layout = layout;
         screen.set_monitor_selection(MonitorSelection::Index(0));
         let bounds = screen.layout.active_bounds(&screen.monitor_selection);

@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn test_audio_buffer_bytes_cap_eviction() {
         let mut buf = AudioBuffer::new(100);
-        let silence_len = (256 * 1024) as i32;
+        let silence_len: i32 = 256 * 1024;
         let pkt =
             encode_audio_packet(WaveSource::PcSound, &silence_len.to_le_bytes(), true).unwrap();
 
