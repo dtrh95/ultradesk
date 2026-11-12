@@ -655,9 +655,7 @@ impl FileTransferManager {
             .filter(|e| {
                 matches!(
                     e.status,
-                    TransferStatus::Completed
-                        | TransferStatus::Cancelled
-                        | TransferStatus::Failed
+                    TransferStatus::Completed | TransferStatus::Cancelled | TransferStatus::Failed
                 )
             })
             .count()
@@ -690,9 +688,7 @@ impl FileTransferManager {
             } else if let Some(old_id) = self.transfers.iter().find_map(|(k, e)| {
                 if matches!(
                     e.status,
-                    TransferStatus::Completed
-                        | TransferStatus::Cancelled
-                        | TransferStatus::Failed
+                    TransferStatus::Completed | TransferStatus::Cancelled | TransferStatus::Failed
                 ) {
                     Some(k.clone())
                 } else {
@@ -720,7 +716,8 @@ impl FileTransferManager {
         let path_str = entry.saved_path.as_deref()?;
         let path = Path::new(path_str);
         let meta = fs::symlink_metadata(path).ok()?;
-        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_FILE_TRANSFER_BYTES {
+        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_FILE_TRANSFER_BYTES
+        {
             return None;
         }
         let data = fs::read(path).ok()?;
@@ -1113,14 +1110,23 @@ mod tests {
         assert_eq!(sanitize_file_name("evil\0file.bin"), "evilfile.bin");
         assert_eq!(sanitize_file_name("tab\tchar.txt"), "tabchar.txt");
         assert_eq!(sanitize_file_name("quote\"test'.txt"), "quotetest.txt");
-        assert_eq!(sanitize_file_name("semicolon;inject.doc"), "semicoloninject.doc");
-        assert_eq!(sanitize_file_name(r"C:\Windows\System32\cmd.exe"), "cmd.exe");
+        assert_eq!(
+            sanitize_file_name("semicolon;inject.doc"),
+            "semicoloninject.doc"
+        );
+        assert_eq!(
+            sanitize_file_name(r"C:\Windows\System32\cmd.exe"),
+            "cmd.exe"
+        );
         assert_eq!(sanitize_file_name("../../etc/passwd"), "passwd");
         assert_eq!(sanitize_file_name(".."), "file.bin");
         assert_eq!(sanitize_file_name("."), "file.bin");
         assert_eq!(sanitize_file_name(""), "file.bin");
         assert_eq!(sanitize_file_name("\r\n\t;\"'"), "file.bin");
-        assert_eq!(sanitize_file_name("tài_liệu_hợp_đồng.pdf"), "tài_liệu_hợp_đồng.pdf");
+        assert_eq!(
+            sanitize_file_name("tài_liệu_hợp_đồng.pdf"),
+            "tài_liệu_hợp_đồng.pdf"
+        );
     }
 
     #[test]
@@ -1157,8 +1163,13 @@ mod tests {
         mgr.push_chat_message("chat".to_string());
         mgr.record_requested_remote_path("foo.txt");
 
-        let (fid, _) = mgr.offer_file_bytes("active.txt", b"active".to_vec()).unwrap();
-        assert_eq!(mgr.transfers.get(&fid).unwrap().status, TransferStatus::Offered);
+        let (fid, _) = mgr
+            .offer_file_bytes("active.txt", b"active".to_vec())
+            .unwrap();
+        assert_eq!(
+            mgr.transfers.get(&fid).unwrap().status,
+            TransferStatus::Offered
+        );
 
         let completed_fid = "comp1".to_string();
         mgr.transfers.insert(
@@ -1252,7 +1263,10 @@ mod tests {
 
         let entry = mgr.transfers.get("mem_id").unwrap();
         assert_eq!(entry.status, TransferStatus::Completed);
-        assert!(entry.buffer.is_empty(), "RAM buffer must be released upon completion");
+        assert!(
+            entry.buffer.is_empty(),
+            "RAM buffer must be released upon completion"
+        );
         assert!(entry.saved_path.is_some());
 
         let downloaded = mgr.read_completed_download("mem_id").unwrap();

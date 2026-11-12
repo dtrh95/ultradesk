@@ -2069,8 +2069,7 @@ Connection: close
                 name: "ultradesk-rust-v1.0.0-x86_64-archlinux.tar.zst".to_string(),
                 download_url: "http://127.0.0.1/archive.tar.zst".to_string(),
                 expected_sha256: Some(
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                        .to_string(),
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
                 ),
                 size_bytes: 100,
             },
@@ -2081,7 +2080,9 @@ Connection: close
         let bad_pkg = Path::new("/tmp/ultradesk-rust-v1.0.0-x86_64-archlinux.tar.zst");
         let res = engine.execute_install_strategy(&plan, bad_pkg);
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("Refusing unmanaged root extraction"));
+        assert!(res
+            .unwrap_err()
+            .contains("Refusing unmanaged root extraction"));
     }
 
     #[test]
@@ -2096,7 +2097,9 @@ Connection: close
 
         let res = engine.confirm_and_apply_for_version(Some("9.9.9"));
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("no update is currently available"));
+        assert!(res
+            .unwrap_err()
+            .contains("no update is currently available"));
 
         let plan_without_sha = ReleasePlan {
             version: "9.9.9".to_string(),
@@ -2118,16 +2121,21 @@ Connection: close
 
         let res_mismatch = engine.confirm_and_apply_for_version(Some("1.0.0"));
         assert!(res_mismatch.is_err());
-        assert!(res_mismatch.unwrap_err().contains("does not match available version"));
+        assert!(res_mismatch
+            .unwrap_err()
+            .contains("does not match available version"));
 
         let res_no_sha = engine.confirm_and_apply_for_version(Some("9.9.9"));
         assert!(res_no_sha.is_err());
-        assert!(res_no_sha.unwrap_err().contains("no expected SHA-256 checksum found"));
+        assert!(res_no_sha
+            .unwrap_err()
+            .contains("no expected SHA-256 checksum found"));
     }
 
     #[test]
     fn test_fallback_parent_symlink_rejection() {
-        let base_tmp = std::env::temp_dir().join(format!("updater_symlink_test_{}", std::process::id()));
+        let base_tmp =
+            std::env::temp_dir().join(format!("updater_symlink_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base_tmp);
         fs::create_dir_all(&base_tmp).unwrap();
 

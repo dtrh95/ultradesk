@@ -1192,7 +1192,11 @@ mod tests {
         ];
         for ip_str in blocked {
             let ip: Ipv4Addr = ip_str.parse().unwrap();
-            assert!(!is_public_routable_ipv4(ip), "expected {} to be blocked", ip_str);
+            assert!(
+                !is_public_routable_ipv4(ip),
+                "expected {} to be blocked",
+                ip_str
+            );
         }
 
         let allowed = [
@@ -1205,7 +1209,11 @@ mod tests {
         ];
         for ip_str in allowed {
             let ip: Ipv4Addr = ip_str.parse().unwrap();
-            assert!(is_public_routable_ipv4(ip), "expected {} to be allowed", ip_str);
+            assert!(
+                is_public_routable_ipv4(ip),
+                "expected {} to be allowed",
+                ip_str
+            );
         }
     }
 
@@ -1253,7 +1261,11 @@ mod tests {
                 "8:1:192.168.1.10:0:203.0.113.10:55000:55001:55002:hostB64:2112:0:{}:0:1:functions3.ultraviewer.net:0:0:0:0:0:token-xyz:",
                 ip
             );
-            assert!(decode_target_route(raw.as_bytes()).is_err(), "expected unroutable ip {} to fail", ip);
+            assert!(
+                decode_target_route(raw.as_bytes()).is_err(),
+                "expected unroutable ip {} to fail",
+                ip
+            );
         }
 
         let tcp_port_zero = b"8:1:192.168.1.10:0:203.0.113.10:55000:55001:55002:hostB64:0:0:103.56.158.44:0:1:functions3.ultraviewer.net:0:0:0:0:0:token-xyz:";

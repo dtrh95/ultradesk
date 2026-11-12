@@ -263,7 +263,9 @@ impl PortalServer {
 
     pub fn set_mcp_config(&mut self, enabled: bool, token: Option<String>) {
         self.mcp_enabled = enabled;
-        self.mcp_token = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        self.mcp_token = token
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
     }
 
     pub fn spawn(self, listener: TcpListener) -> thread::JoinHandle<()> {
@@ -722,7 +724,10 @@ pub(crate) fn handle_http_client_with_options(
             }
         }
 
-        if matches!((method, path), ("GET", "/" | "/index.html" | "/viewer.html")) {
+        if matches!(
+            (method, path),
+            ("GET", "/" | "/index.html" | "/viewer.html")
+        ) {
             if let Some(ref expected_boot) = opts.bootstrap_token {
                 let already_authed = x_viewer_token
                     .as_deref()
@@ -1729,11 +1734,20 @@ mod tests {
 
     #[test]
     fn test_host_and_origin_gates() {
-        assert!(is_allowed_host_header(Some("127.0.0.1:8080"), "127.0.0.1:8080"));
-        assert!(is_allowed_host_header(Some("localhost:9000"), "127.0.0.1:9000"));
+        assert!(is_allowed_host_header(
+            Some("127.0.0.1:8080"),
+            "127.0.0.1:8080"
+        ));
+        assert!(is_allowed_host_header(
+            Some("localhost:9000"),
+            "127.0.0.1:9000"
+        ));
         assert!(is_allowed_host_header(Some("[::1]:9333"), "127.0.0.1:9333"));
         assert!(!is_allowed_host_header(Some("evil.com"), "127.0.0.1:8080"));
-        assert!(!is_allowed_host_header(Some("attacker.internal:8080"), "127.0.0.1:8080"));
+        assert!(!is_allowed_host_header(
+            Some("attacker.internal:8080"),
+            "127.0.0.1:8080"
+        ));
         assert!(!is_allowed_host_header(None, "127.0.0.1:8080"));
 
         assert!(is_allowed_origin("http://127.0.0.1:8080", "127.0.0.1:8080"));
@@ -1753,7 +1767,8 @@ mod tests {
         let handle = portal.spawn(listener);
 
         let mut s1 = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s1.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+        s1.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
         let mut r1 = String::new();
         s1.read_to_string(&mut r1).unwrap();
         assert!(r1.starts_with("HTTP/1.1 403 Forbidden"));
@@ -1769,7 +1784,8 @@ mod tests {
         assert!(r2.contains("SameSite=Strict"));
 
         let mut s3 = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s3.write_all(b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+        s3.write_all(b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
         let mut r3 = String::new();
         s3.read_to_string(&mut r3).unwrap();
         assert!(r3.starts_with("HTTP/1.1 404 Not Found"));

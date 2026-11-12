@@ -404,8 +404,10 @@ mod tests {
 
     #[test]
     fn test_clipboard_apply_remote_update_baseline_protection() {
-        let mut state = ClipboardState::default();
-        state.local_text = "local_baseline".to_string();
+        let mut state = ClipboardState {
+            local_text: "local_baseline".to_string(),
+            ..Default::default()
+        };
 
         state.apply_remote_clipboard_update("", true);
         assert_eq!(state.local_text, "local_baseline");
