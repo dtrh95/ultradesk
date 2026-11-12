@@ -137,19 +137,97 @@ pub fn effective_lookup_terms(
     Ok(terms)
 }
 
+fn is_trim_noise(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00A0}'
+        )
+}
+
+pub fn normalize_partner_target(raw: &str) -> String {
+    let trimmed = raw.trim_matches(is_trim_noise);
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let body = [
+        "partner id",
+        "partner_id",
+        "partner-id",
+        "remote id",
+        "remote_id",
+        "remote-id",
+        "id",
+    ]
+    .iter()
+    .find_map(|prefix| {
+        let rest = lower.strip_prefix(prefix)?;
+        let trimmed_rest = rest.trim_start_matches(is_trim_noise);
+        let after_sep = trimmed_rest
+            .strip_prefix(':')
+            .or_else(|| trimmed_rest.strip_prefix('='))?;
+        let offset = trimmed.len() - after_sep.len();
+        Some(trimmed[offset..].trim_matches(is_trim_noise))
+    })
+    .unwrap_or(trimmed);
+
+    let compact: String = body.chars().filter(|c| !is_trim_noise(*c)).collect();
+    if compact.is_empty() {
+        return String::new();
+    }
+
+    let compact_lower = compact.to_ascii_lowercase();
+    if parse_direct_lan_target(&compact).is_some()
+        || compact_lower.starts_with("lan://")
+        || compact_lower.starts_with("tcp://")
+        || compact_lower.starts_with('[')
+        || compact_lower.contains(':')
+    {
+        return compact;
+    }
+
+    let digits: String = compact
+        .chars()
+        .filter(|c| !matches!(c, '-' | '\u{2013}' | '\u{2014}' | '\u{2212}' | '.' | '_'))
+        .collect();
+    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+        return digits;
+    }
+
+    compact
+}
+
+pub fn sanitize_partner_alias(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim_matches(is_trim_noise)
+        .chars()
+        .take(64)
+        .collect::<String>()
+        .trim_matches(is_trim_noise)
+        .to_string()
+}
+
 pub fn parse_direct_lan_target(partner_id: &str) -> Option<(String, u16)> {
-    let mut trimmed = partner_id.trim();
+    let mut trimmed = partner_id.trim_matches(is_trim_noise);
     if let Some(rest) = trimmed.strip_prefix("lan://") {
-        trimmed = rest.trim();
+        trimmed = rest.trim_matches(is_trim_noise);
     } else if let Some(rest) = trimmed.strip_prefix("tcp://") {
-        trimmed = rest.trim();
+        trimmed = rest.trim_matches(is_trim_noise);
     }
     if trimmed.is_empty() {
         return None;
     }
     if let Some((host_part, port_part)) = trimmed.split_once(':') {
-        let port = port_part.trim().parse::<u16>().ok().filter(|&p| p > 0)?;
-        let host = host_part.trim();
+        let port = port_part
+            .trim_matches(is_trim_noise)
+            .parse::<u16>()
+            .ok()
+            .filter(|&p| p > 0)?;
+        let host = host_part.trim_matches(is_trim_noise);
         if host.eq_ignore_ascii_case("localhost") {
             return Some(("127.0.0.1".to_string(), port));
         }
@@ -722,6 +800,8 @@ pub struct SavedRemoteEntry {
     pub partner_id: String,
     pub password: String,
     #[serde(default)]
+    pub alias: String,
+    #[serde(default)]
     pub last_used: u64,
 }
 
@@ -731,6 +811,8 @@ pub struct SavedCredentials {
     pub partner_id: String,
     #[serde(default)]
     pub password: String,
+    #[serde(default)]
+    pub alias: String,
     #[serde(default = "default_remember_true")]
     pub remember: bool,
     #[serde(default)]
@@ -762,6 +844,7 @@ impl Default for SavedCredentials {
         Self {
             partner_id: String::new(),
             password: String::new(),
+            alias: String::new(),
             remember: true,
             saved_remotes: Vec::new(),
             theme: default_theme_mode(),
@@ -804,11 +887,17 @@ pub fn credentials_file_path() -> PathBuf {
 pub fn load_saved_credentials_from(path: &std::path::Path) -> SavedCredentials {
     if let Ok(bytes) = fs::read(path) {
         if let Ok(mut creds) = serde_json::from_slice::<SavedCredentials>(&bytes) {
+            creds.partner_id = normalize_partner_target(&creds.partner_id);
+            creds.alias = sanitize_partner_alias(&creds.alias);
             if creds.theme.trim().is_empty() {
                 creds.theme = default_theme_mode();
             }
             if creds.language.trim().is_empty() {
                 creds.language = default_ui_language();
+            }
+            for r in &mut creds.saved_remotes {
+                r.partner_id = normalize_partner_target(&r.partner_id);
+                r.alias = sanitize_partner_alias(&r.alias);
             }
             if !creds.partner_id.is_empty()
                 && !creds
@@ -821,6 +910,7 @@ pub fn load_saved_credentials_from(path: &std::path::Path) -> SavedCredentials {
                     SavedRemoteEntry {
                         partner_id: creds.partner_id.clone(),
                         password: creds.password.clone(),
+                        alias: creds.alias.clone(),
                         last_used: now_epoch_secs() as u64,
                     },
                 );
@@ -856,7 +946,11 @@ pub struct SessionState {
     pub local_id: String,
     pub partner_id: String,
     #[serde(default)]
+    pub partner_alias: String,
+    #[serde(default)]
     pub saved_partner_id: String,
+    #[serde(default)]
+    pub saved_partner_alias: String,
     #[serde(default)]
     pub saved_password: String,
     #[serde(default = "default_remember_true")]
@@ -939,7 +1033,9 @@ impl Default for SessionState {
             height: 768,
             local_id: String::new(),
             partner_id: saved.partner_id.clone(),
+            partner_alias: saved.alias.clone(),
             saved_partner_id: saved.partner_id,
+            saved_partner_alias: saved.alias,
             saved_password: saved.password,
             remember_credentials: saved.remember,
             saved_remotes: saved.saved_remotes,
@@ -2010,37 +2106,69 @@ impl ControlSession {
         Ok(pkt)
     }
 
-    pub fn update_saved_credentials(
+    pub fn update_saved_credentials_with_alias(
         &self,
         partner_id: &str,
         password: &str,
+        alias: Option<&str>,
+        alias_explicit: bool,
         remember: bool,
     ) -> Result<(), String> {
-        let cleaned_id: String = partner_id.chars().filter(|c| !c.is_whitespace()).collect();
+        let cleaned_id = normalize_partner_target(partner_id);
         let cleaned_pass = password.trim().to_string();
         let creds_path = {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.credentials_path.clone()
         };
         let mut existing = load_saved_credentials_from(&creds_path);
-        if remember && !cleaned_id.is_empty() {
+
+        let prev_alias = existing
+            .saved_remotes
+            .iter()
+            .find(|r| r.partner_id == cleaned_id)
+            .map(|r| r.alias.clone())
+            .unwrap_or_default();
+
+        let resolved_alias = if alias_explicit {
+            sanitize_partner_alias(alias.unwrap_or(""))
+        } else if let Some(a) = alias {
+            let s = sanitize_partner_alias(a);
+            if !s.is_empty() {
+                s
+            } else {
+                prev_alias
+            }
+        } else {
+            prev_alias
+        };
+
+        if !cleaned_id.is_empty() && (remember || !resolved_alias.is_empty() || alias_explicit) {
             existing
                 .saved_remotes
                 .retain(|r| r.partner_id != cleaned_id);
-            existing.saved_remotes.insert(
-                0,
-                SavedRemoteEntry {
-                    partner_id: cleaned_id.clone(),
-                    password: cleaned_pass.clone(),
-                    last_used: now_epoch_secs() as u64,
-                },
-            );
+            if remember || !resolved_alias.is_empty() {
+                existing.saved_remotes.insert(
+                    0,
+                    SavedRemoteEntry {
+                        partner_id: cleaned_id.clone(),
+                        password: if remember {
+                            cleaned_pass.clone()
+                        } else {
+                            String::new()
+                        },
+                        alias: resolved_alias.clone(),
+                        last_used: now_epoch_secs() as u64,
+                    },
+                );
+            }
             existing.saved_remotes.truncate(20);
         }
+
         let creds = if remember {
             SavedCredentials {
                 partner_id: cleaned_id.clone(),
                 password: cleaned_pass.clone(),
+                alias: resolved_alias.clone(),
                 remember: true,
                 saved_remotes: existing.saved_remotes,
                 theme: existing.theme,
@@ -2053,9 +2181,11 @@ impl ControlSession {
             for r in &mut remotes {
                 r.password.clear();
             }
+            remotes.retain(|r| !r.alias.is_empty());
             SavedCredentials {
                 partner_id: String::new(),
                 password: String::new(),
+                alias: String::new(),
                 remember: false,
                 saved_remotes: remotes,
                 theme: existing.theme,
@@ -2067,11 +2197,24 @@ impl ControlSession {
         let _ = save_credentials_to(&creds_path, &creds);
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.state.saved_partner_id = creds.partner_id;
+        guard.state.saved_partner_alias = creds.alias;
         guard.state.saved_password = creds.password;
         guard.state.remember_credentials = creds.remember;
         guard.state.saved_remotes = creds.saved_remotes;
+        if guard.state.partner_id == cleaned_id {
+            guard.state.partner_alias = resolved_alias;
+        }
         Self::sync_state_fields(&mut guard);
         Ok(())
+    }
+
+    pub fn update_saved_credentials(
+        &self,
+        partner_id: &str,
+        password: &str,
+        remember: bool,
+    ) -> Result<(), String> {
+        self.update_saved_credentials_with_alias(partner_id, password, None, false, remember)
     }
 
     pub fn update_ui_preferences(
@@ -2134,33 +2277,58 @@ impl ControlSession {
         self.start_connect_with_remember(partner_id, password, remember)
     }
 
-    pub fn start_connect_with_remember(
+    pub fn start_connect_with_alias(
         &self,
         partner_id: &str,
         password: &str,
+        alias: Option<&str>,
         remember: bool,
     ) -> Result<SessionState, String> {
         self.stop_flag.store(true, Ordering::SeqCst);
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.stop_flag.store(false, Ordering::SeqCst);
 
-        let _ = self.update_saved_credentials(partner_id, password, remember);
+        let cleaned_id = normalize_partner_target(partner_id);
+        let _ =
+            self.update_saved_credentials_with_alias(&cleaned_id, password, alias, false, remember);
 
         let (reg_profile, partner_profile) = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let mut p = guard.default_partner.clone();
-            if !partner_id.trim().is_empty() {
-                let cleaned: String = partner_id.chars().filter(|c| !c.is_whitespace()).collect();
+            if !cleaned_id.is_empty() {
                 if p.request_terms.len() > 1 {
-                    p.request_terms[1] = cleaned.clone();
+                    p.request_terms[1] = cleaned_id.clone();
                 }
-                guard.state.partner_id = cleaned;
+                guard.state.partner_id = cleaned_id.clone();
             } else if p.request_terms.len() > 1 {
                 guard.state.partner_id = p.request_terms[1].clone();
             }
             if !password.trim().is_empty() {
                 p.password = password.trim().to_string();
             }
+            let active_alias = if let Some(a) = alias {
+                let s = sanitize_partner_alias(a);
+                if !s.is_empty() {
+                    s
+                } else {
+                    guard
+                        .state
+                        .saved_remotes
+                        .iter()
+                        .find(|r| r.partner_id == guard.state.partner_id)
+                        .map(|r| r.alias.clone())
+                        .unwrap_or_default()
+                }
+            } else {
+                guard
+                    .state
+                    .saved_remotes
+                    .iter()
+                    .find(|r| r.partner_id == guard.state.partner_id)
+                    .map(|r| r.alias.clone())
+                    .unwrap_or_default()
+            };
+            guard.state.partner_alias = active_alias;
             if guard.state.partner_id.trim().is_empty() || p.password.trim().is_empty() {
                 let err = "Partner ID and password are required".to_string();
                 guard.state.state = "disconnected".to_string();
@@ -2175,7 +2343,7 @@ impl ControlSession {
             guard.outbound_queue.clear();
             guard.login_acknowledged = false;
             guard.e2e = crate::e2e::E2eNegotiationState::Disabled;
-            guard.e2e_policy = e2e_channel_policy_for_target(partner_id);
+            guard.e2e_policy = e2e_channel_policy_for_target(&guard.state.partner_id);
             guard.files.reset_for_new_session();
             guard.audio.clear();
             guard.state.state = "connecting".to_string();
@@ -2193,6 +2361,15 @@ impl ControlSession {
         });
 
         Ok(self.snapshot())
+    }
+
+    pub fn start_connect_with_remember(
+        &self,
+        partner_id: &str,
+        password: &str,
+        remember: bool,
+    ) -> Result<SessionState, String> {
+        self.start_connect_with_alias(partner_id, password, None, remember)
     }
 
     pub fn disconnect(&self) {
@@ -2998,6 +3175,159 @@ mod tests {
         for entry in &creds.saved_remotes {
             assert!(entry.password.is_empty());
         }
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_normalize_partner_target_and_sanitize_alias() {
+        assert_eq!(normalize_partner_target(""), "");
+        assert_eq!(normalize_partner_target("   \r\n\t"), "");
+        assert_eq!(normalize_partner_target("  123 456 789 \r\n"), "123456789");
+        assert_eq!(normalize_partner_target("123-456-789"), "123456789");
+        assert_eq!(normalize_partner_target("123–456—789"), "123456789");
+        assert_eq!(normalize_partner_target("123.456.789"), "123456789");
+        assert_eq!(
+            normalize_partner_target("  ID: 123 456-789 \n"),
+            "123456789"
+        );
+        assert_eq!(normalize_partner_target("id=123.456.789"), "123456789");
+        assert_eq!(
+            normalize_partner_target("Partner ID: 901 357 379"),
+            "901357379"
+        );
+        assert_eq!(
+            normalize_partner_target("Partner ID = \u{200B}901 357 379\u{FEFF}"),
+            "901357379"
+        );
+        assert_eq!(
+            normalize_partner_target("remote id: 987-654-321"),
+            "987654321"
+        );
+        assert_eq!(
+            normalize_partner_target("lan://127.0.0.1:5938"),
+            "lan://127.0.0.1:5938"
+        );
+        assert_eq!(normalize_partner_target("192.168.1.10"), "192.168.1.10");
+        assert_eq!(normalize_partner_target("127.0.0.1:5938"), "127.0.0.1:5938");
+        assert_eq!(normalize_partner_target("localhost:5938"), "localhost:5938");
+        assert_eq!(
+            normalize_partner_target("  lan://192.168.1.50:5938 \r\n"),
+            "lan://192.168.1.50:5938"
+        );
+
+        assert_eq!(sanitize_partner_alias("  Office PC \r\n"), "Office PC");
+        assert_eq!(
+            sanitize_partner_alias("\u{200B}Accounting\u{FEFF}"),
+            "Accounting"
+        );
+        let long_name = "A".repeat(100);
+        assert_eq!(sanitize_partner_alias(&long_name).len(), 64);
+        assert_eq!(sanitize_partner_alias("Line\x00One\nTwo"), "LineOneTwo");
+    }
+
+    #[test]
+    fn test_saved_credentials_legacy_json_deserialization_without_alias() {
+        let legacy_json = r#"{
+            "partner_id": " 123 456 789 ",
+            "password": "pass",
+            "remember": true,
+            "saved_remotes": [
+                {
+                    "partner_id": "987-654-321",
+                    "password": "secret",
+                    "last_used": 12345
+                }
+            ],
+            "theme": "onedark",
+            "language": "vi"
+        }"#;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ultradesk-creds-legacy-test-{}-{}",
+            std::process::id(),
+            random_digits(8)
+        ));
+        let _ = fs::create_dir_all(&temp_dir);
+        let temp_path = temp_dir.join("credentials.json");
+        fs::write(&temp_path, legacy_json.as_bytes()).unwrap();
+
+        let creds = load_saved_credentials_from(&temp_path);
+        assert_eq!(creds.partner_id, "123456789");
+        assert_eq!(creds.alias, "");
+        assert_eq!(creds.saved_remotes.len(), 2);
+        assert_eq!(creds.saved_remotes[0].partner_id, "123456789");
+        assert_eq!(creds.saved_remotes[0].alias, "");
+        assert_eq!(creds.saved_remotes[1].partner_id, "987654321");
+        assert_eq!(creds.saved_remotes[1].alias, "");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_update_saved_credentials_with_alias_and_preserve_named_remotes_on_scrub() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ultradesk-creds-alias-test-{}-{}",
+            std::process::id(),
+            random_digits(8)
+        ));
+        let temp_path = temp_dir.join("credentials.json");
+        let session = ControlSession::new();
+        {
+            let mut guard = session.inner.lock().unwrap();
+            guard.credentials_path = temp_path.clone();
+        }
+
+        session
+            .update_saved_credentials_with_alias(
+                "123-456-789",
+                "pass1",
+                Some("Accounting PC"),
+                true,
+                true,
+            )
+            .unwrap();
+
+        let snap = session.snapshot();
+        assert_eq!(snap.saved_partner_id, "123456789");
+        assert_eq!(snap.saved_partner_alias, "Accounting PC");
+        assert_eq!(snap.saved_remotes[0].alias, "Accounting PC");
+
+        session
+            .update_saved_credentials_with_alias("123456789", "newpass", None, false, true)
+            .unwrap();
+        let snap2 = session.snapshot();
+        assert_eq!(snap2.saved_partner_alias, "Accounting PC");
+        assert_eq!(snap2.saved_remotes[0].alias, "Accounting PC");
+
+        session
+            .update_saved_credentials_with_alias(
+                "123456789",
+                "newpass",
+                Some("Office Mac"),
+                true,
+                true,
+            )
+            .unwrap();
+        let snap3 = session.snapshot();
+        assert_eq!(snap3.saved_partner_alias, "Office Mac");
+        assert_eq!(snap3.saved_remotes[0].alias, "Office Mac");
+
+        session
+            .update_saved_credentials_with_alias("987654321", "pass2", None, false, true)
+            .unwrap();
+        let snap4 = session.snapshot();
+        assert_eq!(snap4.saved_remotes.len(), 2);
+
+        session
+            .update_saved_credentials_with_alias("987654321", "", None, false, false)
+            .unwrap();
+        let creds = load_saved_credentials_from(&temp_path);
+        assert!(!creds.remember);
+        assert_eq!(creds.password, "");
+        assert_eq!(creds.saved_remotes.len(), 1);
+        assert_eq!(creds.saved_remotes[0].partner_id, "123456789");
+        assert_eq!(creds.saved_remotes[0].alias, "Office Mac");
+        assert_eq!(creds.saved_remotes[0].password, "");
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

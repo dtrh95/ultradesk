@@ -100,6 +100,10 @@ struct ConnectRequest {
     password: String,
     #[serde(default = "default_true")]
     remember: bool,
+    #[serde(default, alias = "name", alias = "partner_alias")]
+    alias: Option<String>,
+    #[serde(default)]
+    alias_explicit: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -1101,7 +1105,8 @@ pub(crate) fn handle_http_client_with_options(
                 } else {
                     &req.password
                 };
-                match session.start_connect_with_remember(pid, pwd, req.remember) {
+                match session.start_connect_with_alias(pid, pwd, req.alias.as_deref(), req.remember)
+                {
                     Ok(state) => write_json_response(
                         &mut stream,
                         200,
@@ -1124,6 +1129,7 @@ pub(crate) fn handle_http_client_with_options(
                     &json!({
                         "ok": true,
                         "partner_id": snap.saved_partner_id,
+                        "alias": snap.saved_partner_alias,
                         "password": snap.saved_password,
                         "remember": snap.remember_credentials,
                         "saved_remotes": snap.saved_remotes,
@@ -1146,7 +1152,13 @@ pub(crate) fn handle_http_client_with_options(
                 } else {
                     &req.password
                 };
-                let _ = session.update_saved_credentials(pid, pwd, req.remember);
+                let _ = session.update_saved_credentials_with_alias(
+                    pid,
+                    pwd,
+                    req.alias.as_deref(),
+                    req.alias_explicit,
+                    req.remember,
+                );
                 write_json_response(
                     &mut stream,
                     200,
@@ -1810,5 +1822,112 @@ mod tests {
 
         shutdown.store(true, Ordering::SeqCst);
         let _ = handle.join();
+    }
+
+    #[test]
+    fn test_server_credentials_and_connect_alias_handling() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ultradesk-server-alias-test-{}-{}",
+            std::process::id(),
+            crate::profile::generate_ephemeral_device_id()
+        ));
+        let session = ControlSession::new();
+        {
+            let mut guard = session.inner.lock().unwrap();
+            guard.credentials_path = temp_dir.join("credentials.json");
+            guard.state.saved_remotes.clear();
+            guard.state.saved_partner_id.clear();
+            guard.state.saved_partner_alias.clear();
+            guard.state.saved_password.clear();
+        }
+        let (mut portal, listener) =
+            PortalServer::bind("127.0.0.1", 0, session.clone(), None).unwrap();
+        let port = portal.port;
+        let boot = portal.enable_gui_bootstrap();
+        let shutdown = portal.shutdown.clone();
+        let handle = portal.spawn(listener);
+
+        let mut s_boot = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req_boot = format!(
+            "GET /?bootstrap={} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            boot
+        );
+        s_boot.write_all(req_boot.as_bytes()).unwrap();
+        let mut r_boot = String::new();
+        s_boot.read_to_string(&mut r_boot).unwrap();
+        let token = r_boot
+            .split("Set-Cookie: ultradesk_token=")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+
+        let mut s_get = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req_get = format!(
+            "GET /credentials HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Viewer-Token: {}\r\nConnection: close\r\n\r\n",
+            token
+        );
+        s_get.write_all(req_get.as_bytes()).unwrap();
+        let mut r_get = String::new();
+        s_get.read_to_string(&mut r_get).unwrap();
+        assert!(r_get.starts_with("HTTP/1.1 200 OK"));
+        let body_get = r_get.split("\r\n\r\n").nth(1).unwrap();
+        let json_get: serde_json::Value = serde_json::from_str(body_get).unwrap();
+        assert_eq!(json_get["ok"], true);
+        assert!(json_get.get("alias").is_some());
+
+        let post_body = serde_json::to_string(&serde_json::json!({
+            "id": "  ID: 123 456-789 \n",
+            "pass": "secret123",
+            "alias": "  Accounting PC  ",
+            "alias_explicit": true,
+            "remember": true
+        }))
+        .unwrap();
+        let mut s_post = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req_post = format!(
+            "POST /credentials HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Viewer-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            token,
+            post_body.len(),
+            post_body
+        );
+        s_post.write_all(req_post.as_bytes()).unwrap();
+        let mut r_post = String::new();
+        s_post.read_to_string(&mut r_post).unwrap();
+        assert!(r_post.starts_with("HTTP/1.1 200 OK"));
+        let body_post = r_post.split("\r\n\r\n").nth(1).unwrap();
+        let json_post: serde_json::Value = serde_json::from_str(body_post).unwrap();
+        assert_eq!(json_post["ok"], true);
+        assert_eq!(json_post["state"]["saved_partner_id"], "123456789");
+        assert_eq!(json_post["state"]["saved_partner_alias"], "Accounting PC");
+
+        let connect_body = serde_json::to_string(&serde_json::json!({
+            "id": "123456789",
+            "pass": "secret123",
+            "alias": "Office Mac",
+            "remember": true
+        }))
+        .unwrap();
+        let mut s_conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req_conn = format!(
+            "POST /connect HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Viewer-Token: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            token,
+            connect_body.len(),
+            connect_body
+        );
+        s_conn.write_all(req_conn.as_bytes()).unwrap();
+        let mut r_conn = String::new();
+        s_conn.read_to_string(&mut r_conn).unwrap();
+        assert!(r_conn.starts_with("HTTP/1.1 200 OK"));
+        let body_conn = r_conn.split("\r\n\r\n").nth(1).unwrap();
+        let json_conn: serde_json::Value = serde_json::from_str(body_conn).unwrap();
+        assert_eq!(json_conn["ok"], true);
+        assert_eq!(json_conn["state"]["partner_alias"], "Office Mac");
+
+        session.disconnect();
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

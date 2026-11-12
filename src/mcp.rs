@@ -234,6 +234,10 @@ impl McpTool {
                         "type": "string",
                         "description": "Session or unattended master password for the remote partner."
                     },
+                    "alias": {
+                        "type": "string",
+                        "description": "Friendly human name or alias for the remote partner (e.g. 'Accounting PC')."
+                    },
                     "remember": {
                         "type": "boolean",
                         "description": "Whether to save credentials in the local profile.",
@@ -565,7 +569,7 @@ impl McpTool {
                 Ok(vec![json!({ "type": "text", "text": text })])
             }
             Self::ConnectRemote => {
-                let partner_id = args
+                let raw_partner_id = args
                     .get("partner_id")
                     .or_else(|| args.get("id"))
                     .and_then(Value::as_str)
@@ -577,12 +581,12 @@ impl McpTool {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .trim();
-                if partner_id.is_empty() || password.is_empty() {
+                let normalized_id = crate::session::normalize_partner_target(raw_partner_id);
+                if normalized_id.is_empty() || password.is_empty() {
                     return Err("partner_id and password are required".to_string());
                 }
                 if origin == McpTransportOrigin::Network {
-                    let lower = partner_id.to_ascii_lowercase();
-                    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+                    let compact = normalized_id.to_ascii_lowercase();
                     let is_loopback = compact == "127.0.0.1"
                         || compact == "localhost"
                         || compact == "::1"
@@ -594,28 +598,30 @@ impl McpTool {
                         || compact.starts_with("lan://0.0.0.0")
                         || compact.starts_with("127.")
                         || compact.starts_with("::ffff:127.");
-                    let host_id: String = session
-                        .host_status()
-                        .host_id
-                        .chars()
-                        .filter(|c| !c.is_whitespace())
-                        .collect();
-                    let matches_self =
-                        !host_id.is_empty() && compact == host_id.to_ascii_lowercase();
+                    let host_id =
+                        crate::session::normalize_partner_target(&session.host_status().host_id)
+                            .to_ascii_lowercase();
+                    let matches_self = !host_id.is_empty() && compact == host_id;
                     if is_loopback || matches_self {
                         return Err(
                             "Loopback or self connection is disabled over network MCP".to_string()
                         );
                     }
                 }
+                let alias = args
+                    .get("alias")
+                    .or_else(|| args.get("name"))
+                    .and_then(Value::as_str);
                 let remember = args
                     .get("remember")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
-                let state = session.start_connect_with_remember(partner_id, password, remember)?;
+                let state =
+                    session.start_connect_with_alias(&normalized_id, password, alias, remember)?;
                 let summary = json!({
                     "ok": true,
                     "partner_id": state.partner_id,
+                    "partner_alias": state.partner_alias,
                     "state": state.state,
                     "last_message": state.last_message
                 });
@@ -2552,6 +2558,72 @@ mod tests {
             McpTransportOrigin::Network,
         );
         assert!(net_loopback.is_err());
+
+        let net_loopback_prefixed = McpTool::ConnectRemote.execute(
+            &session,
+            &json!({ "partner_id": "ID: 127.0.0.1", "password": "dummy" }),
+            McpTransportOrigin::Network,
+        );
+        assert!(net_loopback_prefixed.is_err());
+
+        let net_loopback_spaces = McpTool::ConnectRemote.execute(
+            &session,
+            &json!({ "partner_id": "  127.0.0.1  ", "password": "dummy" }),
+            McpTransportOrigin::Network,
+        );
+        assert!(net_loopback_spaces.is_err());
+
+        let host_id = session.host_status().host_id;
+        if !host_id.is_empty() {
+            let formatted_self = format!("ID: {}", host_id);
+            let net_self = McpTool::ConnectRemote.execute(
+                &session,
+                &json!({ "partner_id": formatted_self, "password": "dummy" }),
+                McpTransportOrigin::Network,
+            );
+            assert!(net_self.is_err());
+        }
+    }
+
+    #[test]
+    fn test_mcp_connect_remote_normalization_alias_and_sanitization() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ultradesk-mcp-alias-test-{}-{}",
+            std::process::id(),
+            crate::profile::generate_ephemeral_device_id()
+        ));
+        let session = ControlSession::new();
+        {
+            let mut guard = session.inner.lock().unwrap();
+            guard.credentials_path = temp_dir.join("credentials.json");
+            guard.state.saved_remotes.clear();
+        }
+        let res = McpTool::ConnectRemote
+            .execute(
+                &session,
+                &json!({
+                    "partner_id": "  ID: 123 456-789 \n",
+                    "password": "valid_password",
+                    "alias": "  Accounting Mac \r\n",
+                    "remember": true
+                }),
+                McpTransportOrigin::Stdio,
+            )
+            .unwrap();
+
+        let parsed: Value = serde_json::from_str(res[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["partner_id"], "123456789");
+        assert_eq!(parsed["partner_alias"], "Accounting Mac");
+
+        let snap = sanitized_mcp_snapshot(&session, McpTransportOrigin::Stdio);
+        assert_eq!(snap["partner_alias"], "Accounting Mac");
+        assert_eq!(snap["saved_partner_alias"], "Accounting Mac");
+        assert_eq!(snap["saved_password"], "");
+        assert_eq!(snap["saved_remotes"][0]["alias"], "Accounting Mac");
+        assert_eq!(snap["saved_remotes"][0]["password"], "");
+        session.disconnect();
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
