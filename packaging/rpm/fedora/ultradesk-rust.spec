@@ -1,5 +1,5 @@
 Name:           ultradesk-rust
-Version:        1.0.9
+Version:        1.0.10
 Release:        1%{?dist}
 Summary:        Remote desktop controller and host for Linux (Rust Edition)
 License:        MIT
@@ -66,7 +66,8 @@ elif [ $1 -eq 2 ]; then
 fi
 
 %changelog
-* Thu Nov 12 2026 Hieu Doan <dtrunghieu96@gmail.com> - 1.0.9-1
+* Mon Nov 16 2026 Hieu Doan <dtrunghieu96@gmail.com> - 1.0.10-1
+- Fix full-screen modal JPEG atlas strip rendering and Rust 1.100 Clippy compatibility
 - Harden E2E anti-downgrade, host/portal/MCP security boundaries, verified updater checksums, and UltraViewer Windows 6.6.133 compatibility
 - Consolidate macOS TCC permission prompts, in-process CoreGraphics screen capture, and stable bundle ID signing
 - Fix GTK3 clipboard reentrancy, Nix sandbox cache fallback, Wayland/XWayland clipboard sync, and Arch PKGBUILD

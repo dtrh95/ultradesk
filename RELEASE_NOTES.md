@@ -1,6 +1,6 @@
-## UltraDesk (Rust Edition) v1.0.9
+## UltraDesk (Rust Edition) v1.0.10
 
-Release **v1.0.9** of **UltraDesk (Rust Edition)** (`ultradesk-rust`) — Harden E2E anti-downgrade, host/portal/MCP security boundaries, verified updater checksums, and UltraViewer Windows 6.6.133 compatibility.
+Release **v1.0.10** of **UltraDesk (Rust Edition)** (`ultradesk-rust`). Fixes full-screen modal JPEG atlas strip rendering and Rust 1.100 Clippy compatibility.
 
 ---
 
