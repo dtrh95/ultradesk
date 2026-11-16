@@ -1620,4 +1620,82 @@ mod tests {
         assert_eq!(screen.cache_bytes(), expected_max_tiles * per_tile);
         assert_eq!(screen.cache.last().unwrap().0, 99);
     }
+
+    #[test]
+    fn test_tall_vertical_jpeg_atlas_strip_renders_full_overlay_and_enforces_pixel_cap() {
+        let mut screen = RGB555Screen::new((1366, 768), ZstdDictionaryDecoder::default(), 1000, 32);
+
+        let mut raw = vec![0u8; 32 * 33024 * 3];
+        for y in 0..33024 {
+            let color: [u8; 3] = if y < 32 {
+                [40, 80, 220]
+            } else if (16480..16512).contains(&y) {
+                [40, 190, 60]
+            } else if (32992..33024).contains(&y) {
+                [210, 40, 40]
+            } else {
+                [0, 0, 0]
+            };
+            let row_start = y * 32 * 3;
+            for x in 0..32 {
+                let px_start = row_start + x * 3;
+                raw[px_start..px_start + 3].copy_from_slice(&color);
+            }
+        }
+
+        let mut jpeg_bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg_bytes, 90)
+            .write_image(&raw, 32, 33024, ExtendedColorType::Rgb8)
+            .unwrap();
+
+        let mut dirty_rect = Vec::with_capacity(8);
+        dirty_rect.extend_from_slice(&0i16.to_le_bytes());
+        dirty_rect.extend_from_slice(&0i16.to_le_bytes());
+        dirty_rect.extend_from_slice(&1366i16.to_le_bytes());
+        dirty_rect.extend_from_slice(&768i16.to_le_bytes());
+
+        let mut fields = vec![Vec::new(); 11];
+        fields[0] = vec![1u8];
+        fields[7] = jpeg_bytes;
+        fields[8] = dirty_rect.clone();
+
+        assert_eq!(screen.apply(&fields).unwrap(), 1032);
+        assert_eq!(screen.version, 2);
+
+        let p0 = screen.canvas.get_pixel(0, 0);
+        assert!((p0.0 as i32 - 210).abs() <= 8);
+        assert!((p0.1 as i32 - 40).abs() <= 8);
+        assert!((p0.2 as i32 - 40).abs() <= 8);
+
+        let p1 = screen.canvas.get_pixel(683, 384);
+        assert!((p1.0 as i32 - 40).abs() <= 8);
+        assert!((p1.1 as i32 - 190).abs() <= 8);
+        assert!((p1.2 as i32 - 60).abs() <= 8);
+
+        let p2 = screen.canvas.get_pixel(1365, 767);
+        assert!((p2.0 as i32 - 40).abs() <= 8);
+        assert!((p2.1 as i32 - 80).abs() <= 8);
+        assert!((p2.2 as i32 - 220).abs() <= 8);
+
+        let mut oversized_jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut oversized_jpeg, 80)
+            .write_image(&[0u8; 8 * 8 * 3], 8, 8, ExtendedColorType::Rgb8)
+            .unwrap();
+        let sof0 = oversized_jpeg
+            .windows(2)
+            .position(|w| w == [0xFF, 0xC0])
+            .unwrap();
+        oversized_jpeg[sof0 + 5..sof0 + 7].copy_from_slice(&33024u16.to_be_bytes());
+        oversized_jpeg[sof0 + 7..sof0 + 9].copy_from_slice(&1024u16.to_be_bytes());
+
+        let mut oversized_fields = vec![Vec::new(); 11];
+        oversized_fields[0] = vec![1u8];
+        oversized_fields[7] = oversized_jpeg;
+        oversized_fields[8] = dirty_rect;
+
+        assert_eq!(
+            screen.apply(&oversized_fields).unwrap_err(),
+            "JPEG atlas outside allocation policy"
+        );
+    }
 }
