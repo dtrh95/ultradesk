@@ -507,17 +507,13 @@ pub(crate) fn is_allowed_host_header(host_header: Option<&str>, bind_addr: &str)
         return true;
     }
     let bind_host = extract_host_from_address(bind_addr);
-    if !bind_host.is_empty()
+    !bind_host.is_empty()
         && bind_host != "0.0.0.0"
         && bind_host != "::"
         && bind_host != "[::]"
         && (host.eq_ignore_ascii_case(bind_host)
             || (host == "::1" && bind_host == "[::1]")
             || (host == "[::1]" && bind_host == "::1"))
-    {
-        return true;
-    }
-    false
 }
 
 pub fn handle_http_client(
