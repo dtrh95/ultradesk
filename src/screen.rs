@@ -12,6 +12,7 @@ pub const MAX_MONITOR_COORD: i32 = 65536;
 pub const MAX_DISPLAY_WIDTH: u32 = 16384;
 pub const MAX_DISPLAY_HEIGHT: u32 = 8192;
 pub const MAX_DISPLAY_PIXELS: u64 = 32 * 1024 * 1024;
+pub const MAX_JPEG_ATLAS_DIM: u32 = u16::MAX as u32;
 pub const MAX_CACHED_TILE_DIM: i32 = 512;
 pub const MAX_TILE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -1094,8 +1095,8 @@ impl RGB555Screen {
                 reader.set_format(ImageFormat::Jpeg);
             }
             let mut limits = image::Limits::default();
-            limits.max_image_width = Some(MAX_DISPLAY_WIDTH);
-            limits.max_image_height = Some(MAX_DISPLAY_HEIGHT);
+            limits.max_image_width = Some(MAX_JPEG_ATLAS_DIM);
+            limits.max_image_height = Some(MAX_JPEG_ATLAS_DIM);
             limits.max_alloc = Some(128 * 1024 * 1024);
             reader.limits(limits);
 
@@ -1109,7 +1110,7 @@ impl RGB555Screen {
 
             let decoded = image::DynamicImage::from_decoder(decoder)
                 .map_err(|e| format!("invalid JPEG atlas: {}", e))?;
-            let rgb_img = decoded.to_rgb8();
+            let rgb_img = decoded.into_rgb8();
             let aw = rgb_img.width();
             let ah = rgb_img.height();
             if aw == 0 || ah == 0 || (aw as u64) * (ah as u64) > MAX_DISPLAY_PIXELS {
