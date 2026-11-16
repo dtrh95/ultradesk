@@ -372,7 +372,7 @@ pub fn tile_sample_score(
 
 pub fn is_public_routable_ipv4(ip: std::net::Ipv4Addr) -> bool {
     let octets = ip.octets();
-    if ip.is_unspecified()
+    !(ip.is_unspecified()
         || ip.is_loopback()
         || ip.is_private()
         || (octets[0] == 169 && octets[1] == 254)
@@ -382,11 +382,7 @@ pub fn is_public_routable_ipv4(ip: std::net::Ipv4Addr) -> bool {
         || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
         || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
         || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
-        || octets[0] >= 240
-    {
-        return false;
-    }
-    true
+        || octets[0] >= 240)
 }
 
 pub fn is_valid_hostname(host: &str) -> bool {
